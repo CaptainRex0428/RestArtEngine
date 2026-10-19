@@ -39,6 +39,10 @@ RestArtEngine 的可执行引擎和用户工程是两个独立目录。引擎根
 
 `engineAssociation` 是 UE 式 `EngineAssociation` 的对应物：启动器通过每用户的引擎注册表（`engines.json`，Windows 位于 `%LOCALAPPDATA%\RAEngine\engines.json`）把它解析到某个引擎安装目录；`engineRoot` 则作为缓存 / 回退，保证 `--project` 直接打开时无需注册表。切版本 = 改 `engineAssociation` 并重写 `engineRoot`。
 
+工程被移动或换机器后 `engineRoot` 会失效，`--project` / 裸路径入口同样会先尝试恢复：优先用**当前运行引擎**（版本与绑定一致时），其次用注册表里该 `engineAssociation` 对应的引擎；重绑后把 `engineRoot` 重写成相对 manifest 的路径，下次打开不再需要恢复。版本不一致时不会静默升级，仍由工程管理器显式切换。
+
+跨盘符绑定无法用相对路径表达，此时 manifest **只保留 `engineAssociation`、不写 `engineRoot`**；加载时通过引擎注册表定位引擎，避免把某台机器的绝对路径写进工程文件。
+
 `loadProject` 会验证工程资源路径位于工程目录内，并读取 `engineRoot` 的身份。旧的 v1 / v2 manifest 仍可加载：v1 标记为 `LegacyProject`，首次通过工程管理器打开时可以升级绑定；v2 只是缺少 `engineAssociation`。
 
 ## 工程管理器流程

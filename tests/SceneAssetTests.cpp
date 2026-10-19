@@ -2,6 +2,8 @@
 #include <RestArtEngine/Scene/World.h>
 #include <RestArtEngine/Project/Project.h>
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -384,6 +386,45 @@ void engineRegistryAndAssociation(const fs::path& directory) {
     require(rebind.engineVersion == "0.3.0" && rebind.engineHash == "hash-b" && rebind.engineAssociation == "0.3.0",
             "Rebinding did not write the new version/association.");
     require(rebind.engineRoot == fs::canonical(engineB), "Rebinding did not rewrite engineRoot.");
+
+    // A project moved to another folder keeps a stale engineRoot. recoverProject
+    // rebinds it to the running engine and rewrites the link relatively, so the
+    // relocated project opens on another machine without the project manager.
+    const auto moved = fixture / "Moved/Demo";
+    fs::create_directories(moved);
+    fs::copy(project / "Content", moved / "Content", fs::copy_options::recursive);
+    fs::copy(project / "Shaders", moved / "Shaders", fs::copy_options::recursive);
+    const auto movedManifest = moved / "Demo.raproject";
+    write(movedManifest,
+          "{\"format\":\"RAEngine.Project\",\"version\":3,\"name\":\"Demo\","
+          "\"engineRoot\":\"../../Engine-9.9.9\",\"engineVersion\":\"0.2.0\",\"engineHash\":\"hash-a\","
+          "\"engineAssociation\":\"0.2.0\",\"contentRoot\":\"Content\",\"shaderRoot\":\"Shaders\","
+          "\"defaultScene\":\"Content/Scenes/Default.rascene\"}");
+    require(!rae::project::loadProject(movedManifest, paths, error),
+            "A stale engineRoot must not load without recovery.");
+    rae::project::ProjectPaths recovered;
+    require(rae::project::recoverProject(movedManifest, engineA, recovered, error),
+            "recoverProject did not rebind the moved project: " + error);
+    require(recovered.engineRoot == fs::canonical(engineA), "recoverProject picked the wrong engine.");
+    require(recovered.engine.version == "0.2.0", "recoverProject lost the engine identity.");
+    {
+        std::ifstream stream(movedManifest);
+        const auto manifestJson = nlohmann::json::parse(stream);
+        require(manifestJson.contains("engineRoot"), "Recovery should keep engineRoot for direct opens.");
+        const auto rewritten = manifestJson.at("engineRoot").get<std::string>();
+        require(fs::path(rewritten).is_relative(), "Recovery must not persist an absolute engine path.");
+    }
+    require(rae::project::loadProject(movedManifest, paths, error),
+            "Recovered project should load directly: " + error);
+
+    // A project bound to an unknown version is never silently upgraded.
+    write(movedManifest,
+          "{\"format\":\"RAEngine.Project\",\"version\":3,\"name\":\"Demo\","
+          "\"engineRoot\":\"../../Engine-9.9.9\",\"engineVersion\":\"9.9.9\",\"engineHash\":\"hash-x\","
+          "\"engineAssociation\":\"9.9.9\",\"contentRoot\":\"Content\",\"shaderRoot\":\"Shaders\","
+          "\"defaultScene\":\"Content/Scenes/Default.rascene\"}");
+    require(!rae::project::recoverProject(movedManifest, engineA, recovered, error),
+            "recoverProject must not switch engine versions silently.");
 
     // A stale engine root must not load directly, but its manifest info still
     // exposes the association so the launcher can recover via the registry.

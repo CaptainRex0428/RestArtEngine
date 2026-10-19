@@ -536,7 +536,10 @@ int wmain(int argc, wchar_t** argv) {
                 return 0; // User closed the project manager without opening a project.
             }
         } else {
-            project = rae::editor::resolveProject(projectPath);
+            // Pass the running engine so a moved project can be rebound without
+            // opening the project manager first.
+            const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
+            project = rae::editor::resolveProject(projectPath, engineHint);
         }
         const HINSTANCE instance = GetModuleHandleW(nullptr);
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};

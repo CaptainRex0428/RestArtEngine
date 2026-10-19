@@ -431,8 +431,14 @@ bool updateProjectEngineBinding(const std::filesystem::path& folderOrManifest,
         // `relative(path, base)` returns the path to the engine from the
         // project directory. Keep the engine as the first argument so nested
         // projects resolve to links such as ../../Engine.
+        // A relative path cannot express another volume, so in that case keep
+        // only the association: the loader resolves it through the registry
+        // instead of persisting a machine-specific absolute path.
         const auto relative = fs::relative(engine.root, manifest.parent_path());
-        value["engineRoot"] = pathUtf8(relative.empty() ? engine.root : relative);
+        if (relative.empty())
+            value.erase("engineRoot");
+        else
+            value["engineRoot"] = pathUtf8(relative);
         const auto temporary = manifest.string() + ".tmp";
         {
             std::ofstream output(temporary, std::ios::trunc);
@@ -447,6 +453,62 @@ bool updateProjectEngineBinding(const std::filesystem::path& folderOrManifest,
             fs::rename(temporary, manifest, ec);
         }
         if (ec) throw std::runtime_error("Cannot replace project manifest: " + ec.message());
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool recoverProject(const std::filesystem::path& folderOrManifest,
+                    const std::filesystem::path& preferredEngineRoot,
+                    ProjectPaths& result, std::string& error) {
+    try {
+        ProjectManifestInfo info;
+        std::string infoError;
+        if (!loadProjectManifestInfo(folderOrManifest, info, infoError))
+            throw std::runtime_error(infoError);
+        if (info.engineAssociation.empty() && info.engineVersion.empty())
+            throw std::runtime_error("Project has no engine binding to recover.");
+        std::vector<EngineIdentity> candidates;
+        const auto addCandidate = [&candidates](const std::filesystem::path& root) {
+            if (root.empty()) return;
+            const auto absolute = fs::weakly_canonical(root);
+            for (const auto& candidate : candidates)
+                if (candidate.root == absolute) return;
+            EngineIdentity identity;
+            std::string identityError;
+            if (loadEngineIdentity(absolute, identity, identityError)) candidates.push_back(std::move(identity));
+        };
+        // The running engine is the best candidate: it needs no registry entry
+        // and it is the copy that will actually render the project.
+        addCandidate(preferredEngineRoot);
+        if (!info.engineAssociation.empty()) {
+            EngineRegistry registry;
+            std::string registryError;
+            if (loadEngineRegistry(defaultEngineRegistryPath(), registry, registryError)) {
+                EngineRegistryEntry entry;
+                if (findEngineByAssociation(registry, info.engineAssociation, entry)) addCandidate(entry.root);
+            }
+        }
+        // Only rebind to an engine that matches the recorded binding. Switching
+        // to a different version stays an explicit project-manager action.
+        const auto matches = [&info](const EngineIdentity& identity) {
+            if (identity.version.empty()) return false;
+            if (!info.engineAssociation.empty() && identity.version == info.engineAssociation) return true;
+            return !info.engineVersion.empty() && identity.version == info.engineVersion;
+        };
+        const auto match = std::find_if(candidates.begin(), candidates.end(), matches);
+        if (match == candidates.end()) {
+            const auto requested = info.engineAssociation.empty() ? info.engineVersion : info.engineAssociation;
+            throw std::runtime_error("No available engine matches '" + requested +
+                "'. Open the project in the project manager to switch engine versions.");
+        }
+        std::string bindingError;
+        if (!updateProjectEngineBinding(info.manifest, *match, bindingError)) throw std::runtime_error(bindingError);
+        std::string loadError;
+        if (!loadProject(info.manifest, result, loadError)) throw std::runtime_error(loadError);
         error.clear();
         return true;
     } catch (const std::exception& exception) {
@@ -595,21 +657,6 @@ bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& re
         staged.name = value.at("name").get<std::string>();
         if (staged.name.empty()) throw std::runtime_error("Project name cannot be empty.");
         staged.projectRoot = manifest.parent_path();
-        const auto engine = value.at("engineRoot").get<std::string>();
-        if (engine.empty()) throw std::runtime_error("Project engineRoot cannot be empty.");
-        staged.engineRoot = fs::weakly_canonical(staged.projectRoot / pathFromUtf8(engine));
-        if (!fs::is_regular_file(staged.engineRoot / "Shaders" / "Private" / "Scene.hlsl"))
-            throw std::runtime_error("engineRoot must reference an engine containing Shaders/Private/Scene.hlsl.");
-        const auto identityManifest = engineManifestPath(staged.engineRoot);
-        if (fs::is_regular_file(identityManifest)) {
-            std::string identityError;
-            if (!loadEngineIdentity(staged.engineRoot, staged.engine, identityError))
-                throw std::runtime_error(identityError);
-        } else {
-            staged.engine.root = staged.engineRoot;
-            staged.engine.manifest = identityManifest;
-            staged.engine.manifestPresent = false;
-        }
         const auto readBinding = [&value](const char* key, const char* nestedKey) -> std::string {
             if (value.contains(key)) {
                 if (!value.at(key).is_string()) throw std::runtime_error(std::string(key) + " must be a string.");
@@ -629,10 +676,41 @@ bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& re
         staged.engineHash = readBinding("engineHash", "hash");
         if (staged.engineVersion.empty() != staged.engineHash.empty())
             throw std::runtime_error("Project engine binding must include both engineVersion and engineHash.");
-        if (value.contains("engineAssociation")) {
-            if (!value.at("engineAssociation").is_string())
-                throw std::runtime_error("engineAssociation must be a string.");
-            staged.engineAssociation = value.at("engineAssociation").get<std::string>();
+        staged.engineAssociation = readBinding("engineAssociation", "association");
+        // engineRoot is a cache for direct --project opens. A binding created
+        // from another volume cannot be expressed relatively, so such a
+        // manifest keeps only engineAssociation and the registry resolves it.
+        if (value.contains("engineRoot")) {
+            if (!value.at("engineRoot").is_string())
+                throw std::runtime_error("engineRoot must be a string.");
+            const auto engine = value.at("engineRoot").get<std::string>();
+            if (!engine.empty())
+                staged.engineRoot = fs::weakly_canonical(staged.projectRoot / pathFromUtf8(engine));
+        }
+        if (staged.engineRoot.empty()) {
+            if (staged.engineAssociation.empty())
+                throw std::runtime_error("Project engineRoot is missing and there is no engineAssociation to resolve it.");
+            EngineRegistry registry;
+            std::string registryError;
+            EngineRegistryEntry entry;
+            if (!loadEngineRegistry(defaultEngineRegistryPath(), registry, registryError))
+                throw std::runtime_error(registryError);
+            if (!findEngineByAssociation(registry, staged.engineAssociation, entry))
+                throw std::runtime_error("Project engineRoot is missing and no installed engine matches association '" +
+                    staged.engineAssociation + "'.");
+            staged.engineRoot = fs::weakly_canonical(entry.root);
+        }
+        if (!fs::is_regular_file(staged.engineRoot / "Shaders" / "Private" / "Scene.hlsl"))
+            throw std::runtime_error("engineRoot must reference an engine containing Shaders/Private/Scene.hlsl.");
+        const auto identityManifest = engineManifestPath(staged.engineRoot);
+        if (fs::is_regular_file(identityManifest)) {
+            std::string identityError;
+            if (!loadEngineIdentity(staged.engineRoot, staged.engine, identityError))
+                throw std::runtime_error(identityError);
+        } else {
+            staged.engine.root = staged.engineRoot;
+            staged.engine.manifest = identityManifest;
+            staged.engine.manifestPresent = false;
         }
         staged.contentRoot = projectPath(value, "contentRoot", staged.projectRoot);
         staged.shaderRoot = projectPath(value, "shaderRoot", staged.projectRoot);

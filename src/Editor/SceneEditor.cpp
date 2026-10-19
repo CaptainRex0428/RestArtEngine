@@ -50,11 +50,21 @@ std::string pathText(const std::filesystem::path& path) {
 
 }
 
-project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject) {
+project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject,
+                                     const std::filesystem::path& engineRootHint) {
     project::ProjectPaths result;
     std::string error;
+    // A moved project keeps a stale (or absent) engine link. Try the recorded
+    // link first, then rebind to the running engine or a registered one so the
+    // project opens on another machine without going through the manager.
+    const auto open = [&engineRootHint, &result](const std::filesystem::path& path, std::string& openError) {
+        if (project::loadProject(path, result, openError)) return true;
+        std::string recoveryError;
+        if (project::recoverProject(path, engineRootHint, result, recoveryError)) return true;
+        return false;
+    };
     if (!explicitProject.empty()) {
-        if (!project::loadProject(explicitProject, result, error)) throw std::runtime_error(error);
+        if (!open(explicitProject, error)) throw std::runtime_error(error);
         return result;
     }
     wchar_t executable[32768]{};
@@ -63,7 +73,7 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
         for (auto path = start; !path.empty(); path = path.parent_path()) {
             const auto candidate = path / "Projects/Sandbox/Sandbox.raproject";
             if (std::filesystem::is_regular_file(candidate)) {
-                if (!project::loadProject(candidate, result, error)) throw std::runtime_error(error);
+                if (!open(candidate, error)) throw std::runtime_error(error);
                 return result;
             }
             if (path.parent_path() == path) break;

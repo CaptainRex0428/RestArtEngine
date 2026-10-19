@@ -72,7 +72,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 - `.raproject` 记录命名的引擎版本关联（`engineAssociation`）、绑定版本 / hash 与相对 `engineRoot`。
 - 引擎身份文件 `Engine.raeengine` + 兼容性检查，支持多版本引擎并存与切换。
-- 引擎注册表（`engines.json`）解析版本关联；工程根路径失效时可自动恢复。
+- 引擎注册表（`engines.json`）解析版本关联；工程移动或换机器后，Project Manager 与 `--project` 入口都会自动重绑并写回相对路径。
+- 跨盘符绑定不写绝对路径：manifest 只保留 `engineAssociation`，由注册表在加载时解析。
 - 工程数据与引擎目录彻底分离，工程可独立提交、独立分发。
 
 ## 环境要求
@@ -191,8 +192,8 @@ Projects/Sandbox/            <- 纯数据示例工程
 ```
 
 - `engineAssociation`：命名的引擎版本关联（UE `EngineAssociation` 的对应物），由 Project Manager 通过引擎注册表解析到具体安装目录。
-- `engineRoot`：缓存 / 回退路径，保证 `--project` 直接打开时无需注册表。
-- `engineVersion` / `engineHash`：绑定身份，与引擎根目录的 `Engine.raeengine` 比对。
+- `engineRoot`：缓存 / 回退路径，保证 `--project` 直接打开时无需注册表；工程移动后由自动恢复重写为相对路径，跨盘符时省略该字段。
+- `engineVersion` / `engineHash`：绑定身份，与引擎根目录的 `Engine.raeengine` 比对。恢复只接受版本匹配的引擎，切换版本仍需在 Project Manager 中显式确认。
 
 版本或 hash 不匹配时，Project Manager 提供「使用引用的引擎」「更新到当前引擎」「选择引擎…」；`engineRoot` 失效时会尝试按关联自动恢复，恢复不了则明确提示无法打开。
 

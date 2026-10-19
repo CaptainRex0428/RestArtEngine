@@ -125,6 +125,17 @@ bool writeEngineManifest(const std::filesystem::path& engineRoot, std::string_vi
 bool updateProjectEngineBinding(const std::filesystem::path& folderOrManifest,
                                 const EngineIdentity& engine, std::string& error);
 
+// Rebinds a project whose cached engineRoot is missing or stale, then reloads
+// it. Prefers the running engine (preferredEngineRoot) and falls back to the
+// engine registered for the manifest's association. Only an engine whose
+// version matches the recorded binding is used; switching versions stays an
+// explicit project-manager action. The rewritten manifest stores engineRoot
+// relative to the manifest (or only the association when it lives on another
+// volume), so a moved project keeps working on another machine.
+bool recoverProject(const std::filesystem::path& folderOrManifest,
+                    const std::filesystem::path& preferredEngineRoot,
+                    ProjectPaths& result, std::string& error);
+
 // Create or refresh the project-local solution and build metadata.  This is
 // safe to call after an engine binding update and is idempotent.  It does not
 // copy engine sources or binaries into the project directory.

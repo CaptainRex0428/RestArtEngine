@@ -49,6 +49,9 @@ private:
 };
 
 // Resolve from --project, working directory, then executable ancestors.
-project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject = {});
+// `engineRootHint` is the running engine; it is used to recover a project whose
+// cached engine link no longer resolves (moved project, new machine).
+project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject = {},
+                                     const std::filesystem::path& engineRootHint = {});
 
 } // namespace rae::editor
