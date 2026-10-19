@@ -135,7 +135,7 @@ bool browseForProject(std::filesystem::path& result, HWND owner) {
     info.hwndOwner = owner;
     info.lpstrFile = fileName;
     info.nMaxFile = static_cast<DWORD>(std::size(fileName));
-    info.lpstrFilter = L"RAEngine Project (*.raproject)\0*.raproject\0All files (*.*)\0*.*\0\0";
+    info.lpstrFilter = L"RestArtEngine Project (*.raproject)\0*.raproject\0All files (*.*)\0*.*\0\0";
     info.lpstrTitle = L"Open RAEngine Project";
     info.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&info)) return false;
@@ -227,7 +227,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) { error = "RegisterClassEx failed for project manager."; return false; }
     RECT bounds{0, 0, 1080, 720};
     AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
-    WindowOwner window{CreateWindowW(wc.lpszClassName, L"RAEngine | Project Manager", WS_OVERLAPPEDWINDOW,
+    WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Project Manager", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
         nullptr, nullptr, instance, &windowState)};
     if (!window.handle) { error = "CreateWindow failed for project manager."; return false; }
@@ -280,10 +280,10 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
         ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(static_cast<float>(windowState.width), static_cast<float>(windowState.height)));
-        ImGui::Begin("RAEngine Project Manager", nullptr,
+        ImGui::Begin("RestArtEngine Project Manager", nullptr,
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
         ImGui::SetWindowFontScale(1.15f);
-        ImGui::Text("RAEngine");
+        ImGui::Text("RestArtEngine");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::TextWrapped("Choose an existing project, create a project from an engine example, or close this window.");
         ImGui::Separator();
@@ -512,7 +512,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--capture-dir" && i + 1 < argc) captureDir = argv[++i];
             else if (arg == "auto" || arg == "dx11") {}
             else if (arg == "--help") {
-                std::cout << "RAEngine: DX11 scene and asset editor\n"
+                std::cout << "RestArtEngine: DX11 scene and asset editor\n"
                     "--forward | --deferred   --rt   --no-ui   --frames N\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
                     "--engine PATH (engine root used by the project manager)\n"
@@ -548,7 +548,7 @@ int wmain(int argc, wchar_t** argv) {
         WindowState windowState;
         RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
         AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
-        WindowOwner window{CreateWindowW(wc.lpszClassName, L"RAEngine | Scene & Material Editor | DirectX 11",
+        WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Scene & Material Editor | DirectX 11",
             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right-bounds.left,
             bounds.bottom-bounds.top, nullptr, nullptr, instance, &windowState)};
         if (!window.handle) throw std::runtime_error("CreateWindow failed");
@@ -578,7 +578,7 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         if (interactive) presentLoading(renderer, ui, loading, 1.0f, "Ready");
-        std::cout << "RAEngine / D3D11 / " << renderer.adapterName() << '\n';
+        std::cout << "RestArtEngine / D3D11 / " << renderer.adapterName() << '\n';
         std::cout << "Forward + deferred rasterization; directional shadow maps, selectable analytic shadows, and GPU ray reflections.\n";
         bool running = true;
         int frame = 0;
@@ -672,8 +672,8 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "Completed " << frame << " frames.\n";
         return 0;
     } catch (const std::exception& e) {
-        std::cerr << "RAEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest) MessageBoxA(nullptr, e.what(), "RAEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        std::cerr << "RestArtEngine error: " << e.what() << '\n';
+        if (!selfTest && !editorSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

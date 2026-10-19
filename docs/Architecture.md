@@ -1,6 +1,8 @@
-# RAEngine 目录与基础架构
+# RestArtEngine 目录与基础架构
 
 本工程面向技术美术的材质与渲染实验。当前编辑器通过 DX11 绘制 Actor 场景，使用 Dear ImGui 提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
+
+> 命名约定：产品全称 **RestArtEngine**，缩写 **RAEngine / RA**。代码标识符、文件名与扩展名沿用 `RA` 前缀（`RAEngine.exe`、`RAEngine.sln`、`.raproject`、`.rascene`、`.ramat`、`.raeengine`、`include/RAEngine/`、命名空间 `rae`）。
 
 ## 目录约定
 
@@ -72,7 +74,7 @@ RAEngine/                         引擎仓库根目录
 {
   "format": "RAEngine.Engine",
   "version": 1,
-  "name": "RAEngine",
+  "name": "RestArtEngine",
   "engineVersion": "0.2.0",
   "engineHash": "dev-0.2.0"
 }
@@ -133,7 +135,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 | Shader 编辑器 Apply | 修改后编译并更新预览 | 编译共享 HLSL，当前为 DX11 Shader Model 5。 |
 | Save | 将编辑成果保存到磁盘 | Apply 与 Save 分离，不存在自动 Cook 或派生数据缓存。 |
 
-这里借鉴 UE 的对象与编辑流程，文件格式和代码实现均为 RAEngine 自己的接口。
+这里借鉴 UE 的对象与编辑流程，文件格式和代码实现均为 RestArtEngine 自己的接口。
 
 ## 渲染边界与扩展位置
 

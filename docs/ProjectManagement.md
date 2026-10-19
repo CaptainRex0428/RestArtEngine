@@ -1,6 +1,6 @@
 # 工程与引擎管理
 
-RAEngine 的可执行引擎和用户工程是两个独立目录。引擎根目录包含 `RAEngine.exe`、`Shaders/Private/`、默认材质模板和 `Engine.raeengine`；工程目录包含 `.raproject`、`Content/`、工程 Shader 和场景。工程不会把用户资产写回引擎目录，因此同一份引擎可以被多个工程复用，也可以把引擎单独发布。`RAEngine.exe` 同时是 Project Manager（launcher）和编辑器，没有单独的 launcher 程序，也没有单独的运行时库。
+RestArtEngine 的可执行引擎和用户工程是两个独立目录。引擎根目录包含 `RAEngine.exe`、`Shaders/Private/`、默认材质模板和 `Engine.raeengine`；工程目录包含 `.raproject`、`Content/`、工程 Shader 和场景。工程不会把用户资产写回引擎目录，因此同一份引擎可以被多个工程复用，也可以把引擎单独发布。`RAEngine.exe` 同时是 Project Manager（launcher）和编辑器，没有单独的 launcher 程序，也没有单独的运行时库。
 
 ## 引擎身份
 
@@ -10,7 +10,7 @@ RAEngine 的可执行引擎和用户工程是两个独立目录。引擎根目�
 {
   "format": "RAEngine.Engine",
   "version": 1,
-  "name": "RAEngine",
+  "name": "RestArtEngine",
   "engineVersion": "0.2.0",
   "engineHash": "dev-0.2.0"
 }

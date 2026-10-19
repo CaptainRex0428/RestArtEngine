@@ -345,7 +345,7 @@ bool loadEngineIdentity(const std::filesystem::path& engineRoot, EngineIdentity&
         EngineIdentity staged;
         staged.root = root;
         staged.manifest = fs::canonical(manifest);
-        staged.name = value.contains("name") ? value.at("name").get<std::string>() : "RAEngine";
+        staged.name = value.contains("name") ? value.at("name").get<std::string>() : "RestArtEngine";
         staged.version = requiredString(value, "engineVersion", "engineVersion");
         staged.hash = requiredString(value, "engineHash", "engineHash");
         staged.manifestPresent = true;

@@ -86,7 +86,9 @@
     <ClCompile Include="src\ImGui\ImGuiLayer.cpp" />
     <ClCompile Include="src\Renderer\RenderBackend.cpp" />
     <ClCompile Include="src\Renderer\SceneRenderer.cpp" />
-    <ClCompile Include="vendor\ImGuizmo\ImGuizmo.cpp" />
+    <ClCompile Include="vendor\ImGuizmo\ImGuizmo.cpp">
+      <DisableSpecificWarnings>4245</DisableSpecificWarnings>
+    </ClCompile>
     <ClCompile Include="vendor\imgui\imgui.cpp" />
     <ClCompile Include="vendor\imgui\imgui_draw.cpp" />
     <ClCompile Include="vendor\imgui\imgui_tables.cpp" />

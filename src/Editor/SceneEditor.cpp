@@ -440,7 +440,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     settings.viewportY = 90;
     settings.viewportWidth = static_cast<int>(display.x - 2 * side);
     settings.viewportHeight = static_cast<int>(middle);
-    beginPanel("RAEngine Editor", {0, 0}, {display.x, 90}, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90}, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
     if (ImGui::Button("Save Scene")) saveScene();
     ImGui::SameLine();
     if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;

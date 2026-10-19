@@ -1,6 +1,6 @@
 # 引擎启动、工程链接与发布
 
-RAEngine 的运行时和工程内容是两个可移动的包。`RAEngine.exe` 是引擎工程管理器和编辑器程序；`.raproject` 是工程入口文件，记录工程自己的 Content、Shader、场景以及所依赖的引擎身份。工程不需要把引擎源码或引擎资产复制进去。
+RestArtEngine 的运行时和工程内容是两个可移动的包。`RAEngine.exe` 是引擎工程管理器和编辑器程序；`.raproject` 是工程入口文件，记录工程自己的 Content、Shader、场景以及所依赖的引擎身份。工程不需要把引擎源码或引擎资产复制进去。
 
 ## 两种目录
 
@@ -87,7 +87,7 @@ cmake --build --preset windows-debug --target RAEngine
 
 在 Project Manager 中选择 **New Project**，指定父目录和工程名。工程管理器创建 `.raproject`、`Content/`、工程 Shader 和默认场景，并把当前引擎的 association、版本、hash 和相对路径写入 manifest。工程是纯数据，不生成 `.sln`。案例工程位于引擎仓库的 `Projects/Sandbox`，创建新工程时复制其内容，不会把新工程的保存结果写回案例或引擎公共 Shader。
 
-上传工程时只提交工程目录（`.raproject`、`Content/`、工程 `Shaders/`），不提交引擎目录。接收者安装或解压兼容版本的 RAEngine 后，用 `RAEngine.exe --project MyProject/MyProject.raproject` 打开。上传引擎本身时则保留 `RAEngine.exe`、`Engine.raeengine`、`Shaders/` 以及可选的 `Projects/Sandbox/`，不需要包含任何个人工程。
+上传工程时只提交工程目录（`.raproject`、`Content/`、工程 `Shaders/`），不提交引擎目录。接收者安装或解压兼容版本的 RestArtEngine 后，用 `RAEngine.exe --project MyProject/MyProject.raproject` 打开。上传引擎本身时则保留 `RAEngine.exe`、`Engine.raeengine`、`Shaders/` 以及可选的 `Projects/Sandbox/`，不需要包含任何个人工程。
 
 ## 发布检查
 

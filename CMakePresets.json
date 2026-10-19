@@ -29,14 +29,14 @@
     },
     {
       "name": "windows-debug-engine",
-      "displayName": "Debug / RAEngine executable",
+      "displayName": "Debug / RestArtEngine executable",
       "configurePreset": "windows-vs2022",
       "configuration": "Debug",
       "targets": ["RAEngine"]
     },
     {
       "name": "windows-release-engine",
-      "displayName": "Release / RAEngine executable",
+      "displayName": "Release / RestArtEngine executable",
       "configurePreset": "windows-vs2022",
       "configuration": "Release",
       "targets": ["RAEngine"]

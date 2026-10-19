@@ -2,7 +2,7 @@
   <img src="assets/icons/RAEngine.png" width="200" alt="RAEngine logo">
 </p>
 
-<h1 align="center">RAEngine</h1>
+<h1 align="center">RestArtEngine</h1>
 
 <p align="center">
 面向技术美术的 C++20 / DirectX 11 场景渲染引擎与编辑器<br>
@@ -17,9 +17,11 @@ A C++20 / DirectX 11 scene rendering engine and editor for technical artists
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
+> **命名约定**：产品全称 **RestArtEngine**，缩写 **RAEngine / RA**。代码标识符、文件名与文件扩展名继续使用 `RA` 前缀——`RAEngine.exe`、`RAEngine.sln`、`RAEngine.vcxproj`、`RAEngine.rc`、`.raproject`、`.rascene`、`.ramat`、`.raeengine`、`include/RAEngine/`、命名空间 `rae`。
+
 ---
 
-RAEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RAEngine.vcxproj`（或 CMake 目标 `RAEngine`）得到 `RAEngine.exe`，它同时扮演两个角色——
+RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RAEngine.vcxproj`（或 CMake 目标 `RAEngine`）得到 `RAEngine.exe`，它同时扮演两个角色——
 
 - **Project Manager（launcher）**：不带参数启动时显示，用于创建 / 打开 / 选择 `.raproject` 工程；
 - **场景编辑器**：带 `--project` 启动时直接进入，编辑 Actor、静态 Mesh、材质与 HLSL。
@@ -321,7 +323,7 @@ RAEngine.exe --help
 
 所有第三方源码随仓库提供，构建**不需要联网**。
 
-RAEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE)。第三方依赖各自保留其原始 MIT 许可（见上表）。
+RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE)。第三方依赖各自保留其原始 MIT 许可（见上表）。
 
 ## 文档
 
