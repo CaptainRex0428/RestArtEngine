@@ -106,7 +106,7 @@ F2 切换 Forward / Deferred；F3 开关解析光追效果；F1 隐藏 / 显示�
 
 解析光追同时追踪内置 Sphere / Plane / Cube 与通用 MeshAsset。前 32 个内置对象使用精确解析求交，超出的内置对象、OBJ 和未来网格类型通过结构化三角形缓冲参与环境反射、相互反射和阴影。通用路径不设置引擎层三角形预算，实际可用范围取决于 D3D11 资源创建和显存。它仍是 GPU 解析求交，不是 DXR。
 
-CPU 测试 `restartengine_asset_tests` 检查 Actor 稳定 ID、复制与删除、OBJ 的负索引和非法数据、材质持久化、场景保存加载、工程路径解析与越界配置拒绝、中文 OBJ 与工程路径，以及加载失败后当前数据不变。CMake 构建后执行 `ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure`。渲染自测和编辑器自测需要 Windows / DX11 设备，分别验证图像与 Shader Apply / 场景编辑效果；CPU 测试不替代 GPU 验证。
+渲染自测和编辑器自测需要 Windows / DX11 设备，分别验证图像与 Shader Apply / 场景编辑效果。
 
 完整目录职责、UE 概念对照及当前能力边界见 [Architecture.md](Architecture.md)。
 

@@ -1,7 +1,7 @@
 param([string]$Executable = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-if (!$Executable) { $Executable = Join-Path $root 'build-msvc/Debug/RestArtEngine.exe' }
+if (!$Executable) { $Executable = Join-Path $root 'bin/windows-x86_64/Debug/RestArtEngine.exe' }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $outputDir = Join-Path $root 'artifacts/window-test'
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null

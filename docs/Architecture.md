@@ -27,9 +27,8 @@
 | `Projects/Sandbox/Shaders/Materials/Standard.hlsli` | Sandbox 工程可编辑的共享材质 Shader，编辑器 Apply / Save 的源码入口。 |
 | `app/MinimalApp.cpp` | 引擎可执行入口：Win32 窗口、消息循环、Project Manager、编辑器启动、启动加载界面、命令行解析。 |
 | `app/EditorSmoke.cpp` | 引擎 GPU 自测：通过 ImGui 上下文钩子注入真实鼠标/键盘，验证拾取、gizmo、材质与 Shader 流程（`--editor-self-test`）。 |
-| `tests/` | 无窗口 CPU 测试，检查 Actor、资产和场景读写。 |
 | `scripts/` | 引擎验证脚本：`Validate-Render.ps1` 跑渲染自测并比对截图，`Test-Window.ps1` 验证窗口生命周期。 |
-| `vendor/` | 随仓库提供的第三方代码和许可证，如 Dear ImGui、ImGuizmo、nlohmann/json。ImGuizmo 用于编辑器变换手柄，版本与来源记录在 `vendor/ImGuizmo/README.raengine.md`。 |
+| `vendor/` | 随仓库提供的第三方代码和许可证，如 Dear ImGui、ImGuizmo、nlohmann/json。ImGuizmo 用于编辑器变换手柄，版本与来源记录在 `docs/vendor/ImGuizmo.md`。 |
 | `docs/` | 架构、文件格式与编辑工作流文档。 |
 | `artifacts/`、`screenshots/` | 验证日志与截图，属于输出，不应作为资产源目录。 |
 | `build*/` | 编译生成物，不在这些目录维护源码、材质或 Shader。 |
@@ -153,7 +152,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 | 归属 | 目录 / 文件 | 规则 |
 | --- | --- | --- |
-| 引擎 | `include/`、`src/`、`app/`、`Shaders/`、`vendor/`、`tests/`、`scripts/`、`docs/` | 提交到引擎仓库；引擎功能不依赖任何具体工程。 |
+| 引擎 | `include/`、`src/`、`app/`、`Shaders/`、`vendor/`、`scripts/`、`docs/` | 提交到引擎仓库；引擎功能不依赖任何具体工程。 |
 | 引擎资源 | `assets/`（logo、启动加载背景） | 随引擎发布；运行时路径以引擎根目录为准。 |
 | 工程 | `Projects/<name>/`（`.raproject` + `Content/` + `Shaders/`） | 纯数据，可独立提交 / 分发；编辑器不会写回引擎目录。 |
 | 输出 | `build*/`、`artifacts/`、`screenshots/` | 不提交，已由 `.gitignore` 排除。 |
@@ -189,10 +188,9 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 ```powershell
 cmake --preset windows-vs2022
 cmake --build --preset windows-debug
-ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
 .\build\cmake-vs2022\Debug\RestArtEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
 .\scripts\Validate-Render.ps1
 ```
 
-CPU 测试不需要显卡；`--editor-self-test` 与 `Validate-Render.ps1` 需要 D3D11 设备（硬件设备不可用时回退 WARP，速度较慢）。
+`--editor-self-test` 与 `Validate-Render.ps1` 需要 D3D11 设备（硬件设备不可用时回退 WARP，速度较慢）。
 

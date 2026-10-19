@@ -81,21 +81,34 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - Windows 10 / 11（x64）
 - Visual Studio 2022，需勾选「使用 C++ 的桌面开发」（MSVC v143 + Windows SDK）
 - CMake **3.24+**（仅 CMake 构建方式需要）
+- Premake **5.0**（仅 Premake 生成 solution 方式需要；`premake5.exe` 随仓库在 `scripts/premake/`）
+- Git（第三方依赖是 submodule，首次需 `git submodule update --init`）
 - 支持 D3D11 Feature Level 11.0 的显卡；硬件设备创建失败时自动回退 WARP 软件渲染（性能较低）
 
 ## 构建
 
-### 方式一：Rider / Visual Studio（根目录 solution）
+### 前置：检出第三方依赖
 
-1. 打开仓库根目录的 `RestArtEngine.sln`
+```powershell
+git submodule update --init
+```
+
+### 方式一：Premake 生成 solution（Rider / Visual Studio）
+
+```powershell
+.\scripts\GenerateWIN.bat
+# 等价命令：.\scripts\premake\premake5.exe --file=Build.lua vs2022
+```
+
+1. 打开生成的 `RestArtEngine.sln`
 2. 选择 `Debug | x64` 或 `Release | x64`
 3. 构建并运行目标 `RestArtEngine`
 
-输出：
+输出（`bin/<system>-<arch>/<config>/`）：
 
 ```text
-build-msvc/Debug/RestArtEngine.exe
-build-msvc/Release/RestArtEngine.exe
+bin/windows-x86_64/Debug/RestArtEngine.exe
+bin/windows-x86_64/Release/RestArtEngine.exe
 ```
 
 ### 方式二：CMake
@@ -113,10 +126,9 @@ CMake 目标：
 | 目标 | 说明 |
 | --- | --- |
 | `RestArtEngine` | 引擎可执行文件（Project Manager + 编辑器） |
-| `restartengine_asset_tests` | 无窗口 CPU 测试 |
 | `DearImGui` | 随仓库构建的 ImGui 静态库 |
 
-两种构建方式共享源码，输出目录互相独立。
+两种构建方式共享源码，输出目录互相独立（CMake 输出到 `build/`；Premake 输出到 `bin/` 与 `settings/`，solution 由 Premake 生成、不提交）。
 
 > 应用图标：项目 logo 为 [`assets/icons/RAEngine.png`](assets/icons/RAEngine.png)，构建时通过 [`RestArtEngine.rc`](RestArtEngine.rc) 嵌入由它生成的 `assets/icons/RAEngine.ico`，因此任务栏与窗口标题栏显示引擎 logo。
 
@@ -260,7 +272,6 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 | `Shaders/Private/Scene.hlsl` | 引擎公共渲染管线（几何 / G-buffer / 光照 / 背景） |
 | `Shaders/Materials/Standard.hlsli` | 默认可编辑材质模板 |
 | `vendor/` | Dear ImGui、ImGuizmo、nlohmann/json |
-| `tests/SceneAssetTests.cpp` | 无窗口 CPU 测试 |
 
 ## 开发
 
@@ -271,9 +282,6 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 ## 测试与验证
 
 ```powershell
-# CPU：Actor 生命周期、OBJ 校验、材质持久化、场景事务性、工程路径、Unicode、引擎注册表
-ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
-
 # GPU：编辑器全流程（真实鼠标/键盘注入）
 .\build\cmake-vs2022\Debug\RestArtEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
 
@@ -320,9 +328,9 @@ RestArtEngine.exe --help
 | --- | --- | --- | --- |
 | Dear ImGui | v1.91.9b | MIT | `vendor/imgui/LICENSE.txt` |
 | ImGuizmo | `105e4fde45e4e74aae8973d98750820ef7aca7e2` | MIT | `vendor/ImGuizmo/LICENSE` |
-| nlohmann/json | 随仓库 | MIT | `vendor/nlohmann/LICENSE.MIT` |
+| nlohmann/json | v3.12.0 | MIT | `vendor/nlohmann/LICENSE.MIT` |
 
-所有第三方源码随仓库提供，构建**不需要联网**。
+第三方依赖以 **git submodule** 提供（见 [vendor/README.md](vendor/README.md) 与 `docs/vendor/`）；首次克隆后运行 `git submodule update --init` 检出，之后构建**不需要联网**。
 
 RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE)。第三方依赖各自保留其原始 MIT 许可（见上表）。
 

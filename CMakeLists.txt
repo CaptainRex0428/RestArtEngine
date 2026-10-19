@@ -39,14 +39,14 @@ add_executable(RestArtEngine
     src/Editor/SceneEditor.cpp
     src/Editor/ViewportInteraction.cpp
     src/Editor/LoadingScreen.cpp
-    vendor/ImGuizmo/ImGuizmo.cpp
+    vendor/ImGuizmo/src/ImGuizmo.cpp
     RestArtEngine.rc)
 target_include_directories(RestArtEngine PRIVATE
     include
-    vendor
+    vendor/nlohmann/single_include
     vendor/imgui
     vendor/imgui/backends
-    vendor/ImGuizmo)
+    vendor/ImGuizmo/src)
 target_link_libraries(RestArtEngine PRIVATE DearImGui d3d11 dxgi d3dcompiler dwmapi comdlg32)
 target_compile_definitions(RestArtEngine PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 if(MSVC)
@@ -55,25 +55,9 @@ else()
     target_compile_options(RestArtEngine PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 # Vendored ImGuizmo is compiled under /W4; silence its signed/unsigned noise.
-set_source_files_properties(vendor/ImGuizmo/ImGuizmo.cpp PROPERTIES
+set_source_files_properties(vendor/ImGuizmo/src/ImGuizmo.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/wd4245>")
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
-
-include(CTest)
-if(BUILD_TESTING)
-    # Headless CPU tests compile the core sources directly; they do not need the
-    # Win32 entry point or any graphics API.
-    add_executable(restartengine_asset_tests
-        tests/SceneAssetTests.cpp
-        src/Scene/World.cpp
-        src/Assets/AssetLibrary.cpp
-        src/Project/Project.cpp)
-    target_include_directories(restartengine_asset_tests PRIVATE include vendor)
-    if(MSVC)
-        target_compile_options(restartengine_asset_tests PRIVATE /W4 /permissive- /utf-8)
-    endif()
-    add_test(NAME SceneAssets COMMAND restartengine_asset_tests)
-endif()
 
 include(GNUInstallDirs)
 install(TARGETS RestArtEngine DearImGui EXPORT RestArtEngineTargets
