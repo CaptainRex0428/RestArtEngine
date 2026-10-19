@@ -27,7 +27,7 @@ struct RenderBackendCreateInfo {
     std::uint32_t height = 720;
     bool enableValidation = false;
     bool vsync = true;
-    const char* applicationName = "RAEngine";
+    const char* applicationName = "RestArtEngine";
 };
 
 struct RenderBackendCapabilities {

@@ -3,10 +3,10 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
-#include <RAEngine/Renderer/SceneRenderer.h>
-#include <RAEngine/ImGui/ImGuiLayer.h>
-#include <RAEngine/Editor/SceneEditor.h>
-#include <RAEngine/Editor/LoadingScreen.h>
+#include <RestArtEngine/Renderer/SceneRenderer.h>
+#include <RestArtEngine/ImGui/ImGuiLayer.h>
+#include <RestArtEngine/Editor/SceneEditor.h>
+#include <RestArtEngine/Editor/LoadingScreen.h>
 #include "EditorSmoke.h"
 #include <imgui.h>
 #include <algorithm>
@@ -31,7 +31,7 @@ struct WindowState {
     bool resized = false, minimized = false, closeRequested = false;
 };
 
-// RAEngine.rc embeds assets/icons/RAEngine.ico (generated from the project logo
+// RestArtEngine.rc embeds assets/icons/RAEngine.ico (generated from the project logo
 // assets/icons/RAEngine.png) as resource 101. A missing resource leaves the
 // default Windows icon.
 constexpr int kEngineIconResource = 101;
@@ -136,7 +136,7 @@ bool browseForProject(std::filesystem::path& result, HWND owner) {
     info.lpstrFile = fileName;
     info.nMaxFile = static_cast<DWORD>(std::size(fileName));
     info.lpstrFilter = L"RestArtEngine Project (*.raproject)\0*.raproject\0All files (*.*)\0*.*\0\0";
-    info.lpstrTitle = L"Open RAEngine Project";
+    info.lpstrTitle = L"Open RestArtEngine Project";
     info.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&info)) return false;
     result = std::filesystem::path(fileName);
@@ -216,7 +216,7 @@ std::vector<ProjectExample> findExamples(const std::filesystem::path& engineRoot
 
 bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::ProjectPaths& selected,
     std::string& error) {
-    if (engineRoot.empty()) { error = "Cannot locate the RAEngine root. Start the project manager inside an engine checkout."; return false; }
+    if (engineRoot.empty()) { error = "Cannot locate the RestArtEngine root. Start the project manager inside an engine checkout."; return false; }
     WindowState windowState;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};

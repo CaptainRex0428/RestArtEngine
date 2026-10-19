@@ -1,7 +1,7 @@
 #pragma once
 
-#include <RAEngine/Renderer/SceneRenderer.h>
-#include <RAEngine/Scene/World.h>
+#include <RestArtEngine/Renderer/SceneRenderer.h>
+#include <RestArtEngine/Scene/World.h>
 
 namespace rae::editor {
 

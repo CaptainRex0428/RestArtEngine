@@ -17,16 +17,16 @@ A C++20 / DirectX 11 scene rendering engine and editor for technical artists
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
-> **命名约定**：产品全称 **RestArtEngine**，缩写 **RAEngine / RA**。代码标识符、文件名与文件扩展名继续使用 `RA` 前缀——`RAEngine.exe`、`RAEngine.sln`、`RAEngine.vcxproj`、`RAEngine.rc`、`.raproject`、`.rascene`、`.ramat`、`.raeengine`、`include/RAEngine/`、命名空间 `rae`。
+> **命名约定**：产品与所有工程文件使用全称 **RestArtEngine**——`RestArtEngine.exe`、`RestArtEngine.sln`、`RestArtEngine.vcxproj`、`RestArtEngine.rc`、`RestArtEngineProject.json`、`include/RestArtEngine/`。只有**文件扩展名与格式标识**保留 `RA` 缩写：`.raproject`、`.rascene`、`.ramat`、`.raeengine`、JSON `format`（`RAEngine.Project` / `RAEngine.Engine` / `RAEngine.Scene` / `RAEngine.Material` / `RAEngine.EngineRegistry` / `RAEngine.ProjectBuild`），以及命名空间 `rae` 与引擎注册表目录 `%LOCALAPPDATA%\RAEngine`。
 
 ---
 
-RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RAEngine.vcxproj`（或 CMake 目标 `RAEngine`）得到 `RAEngine.exe`，它同时扮演两个角色——
+RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestArtEngine.vcxproj`（或 CMake 目标 `RestArtEngine`）得到 `RestArtEngine.exe`，它同时扮演两个角色——
 
 - **Project Manager（launcher）**：不带参数启动时显示，用于创建 / 打开 / 选择 `.raproject` 工程；
 - **场景编辑器**：带 `--project` 启动时直接进入，编辑 Actor、静态 Mesh、材质与 HLSL。
 
-工程（`.raproject`）是**纯数据**：`Content/` 场景与材质、工程自己的 `Shaders/`。它不包含 C++ 代码，也不生成自己的 `.sln`；编译引擎永远只打开仓库根目录的 `RAEngine.sln`。
+工程（`.raproject`）是**纯数据**：`Content/` 场景与材质、工程自己的 `Shaders/`。它不包含 C++ 代码，也不生成自己的 `.sln`；编译引擎永远只打开仓库根目录的 `RestArtEngine.sln`。
 
 ## 目录
 
@@ -86,15 +86,15 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RAEngi
 
 ### 方式一：Rider / Visual Studio（根目录 solution）
 
-1. 打开仓库根目录的 `RAEngine.sln`
+1. 打开仓库根目录的 `RestArtEngine.sln`
 2. 选择 `Debug | x64` 或 `Release | x64`
-3. 构建并运行目标 `RAEngine`
+3. 构建并运行目标 `RestArtEngine`
 
 输出：
 
 ```text
-build-msvc/Debug/RAEngine.exe
-build-msvc/Release/RAEngine.exe
+build-msvc/Debug/RestArtEngine.exe
+build-msvc/Release/RestArtEngine.exe
 ```
 
 ### 方式二：CMake
@@ -102,31 +102,31 @@ build-msvc/Release/RAEngine.exe
 ```powershell
 cmake --preset windows-vs2022
 cmake --build --preset windows-debug
-.\build\cmake-vs2022\Debug\RAEngine.exe
+.\build\cmake-vs2022\Debug\RestArtEngine.exe
 ```
 
-Release 用 `cmake --build --preset windows-release`，输出 `build/cmake-vs2022/Release/RAEngine.exe`。
+Release 用 `cmake --build --preset windows-release`，输出 `build/cmake-vs2022/Release/RestArtEngine.exe`。
 
 CMake 目标：
 
 | 目标 | 说明 |
 | --- | --- |
-| `RAEngine` | 引擎可执行文件（Project Manager + 编辑器） |
-| `raengine_asset_tests` | 无窗口 CPU 测试 |
+| `RestArtEngine` | 引擎可执行文件（Project Manager + 编辑器） |
+| `restartengine_asset_tests` | 无窗口 CPU 测试 |
 | `DearImGui` | 随仓库构建的 ImGui 静态库 |
 
 两种构建方式共享源码，输出目录互相独立。
 
-> 应用图标：项目 logo 为 [`assets/icons/RAEngine.png`](assets/icons/RAEngine.png)，构建时通过 [`RAEngine.rc`](RAEngine.rc) 嵌入由它生成的 `assets/icons/RAEngine.ico`，因此任务栏与窗口标题栏显示引擎 logo。
+> 应用图标：项目 logo 为 [`assets/icons/RAEngine.png`](assets/icons/RAEngine.png)，构建时通过 [`RestArtEngine.rc`](RestArtEngine.rc) 嵌入由它生成的 `assets/icons/RAEngine.ico`，因此任务栏与窗口标题栏显示引擎 logo。
 
 ## 快速开始
 
 ```powershell
 # 1) 打开工程管理器（launcher）
-.\build\cmake-vs2022\Debug\RAEngine.exe
+.\build\cmake-vs2022\Debug\RestArtEngine.exe
 
 # 2) 直接打开示例工程（等价写法：--project Projects\Sandbox\Sandbox.raproject）
-.\build\cmake-vs2022\Debug\RAEngine.exe Projects\Sandbox\Sandbox.raproject
+.\build\cmake-vs2022\Debug\RestArtEngine.exe Projects\Sandbox\Sandbox.raproject
 ```
 
 进入编辑器后：
@@ -162,9 +162,9 @@ Viewport settings 还可调 Key light、Exposure、VSync、Shadow method，并�
 ## 工程与引擎
 
 ```text
-RAEngine.sln                 <- 唯一的编译入口
-RAEngine.vcxproj             <- 产出 RAEngine.exe
-RAEngine.rc                  <- 图标与版本资源
+RestArtEngine.sln                 <- 唯一的编译入口
+RestArtEngine.vcxproj             <- 产出 RestArtEngine.exe
+RestArtEngine.rc                  <- 图标与版本资源
 Projects/Sandbox/            <- 纯数据示例工程
   Sandbox.raproject
   Content/Scenes/Default.rascene
@@ -244,7 +244,7 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 
 | 路径 | 职责 |
 | --- | --- |
-| `include/RAEngine/` | 公共头文件（Scene / Assets / Project / Renderer / Editor / ImGui / Core） |
+| `include/RestArtEngine/` | 公共头文件（Scene / Assets / Project / Renderer / Editor / ImGui / Core） |
 | `src/Scene/World.cpp` | Actor、Transform、静态网格组件、场景 JSON 读写（事务性） |
 | `src/Assets/AssetLibrary.cpp` | 内置 Mesh、OBJ 导入、材质参数与持久化 |
 | `src/Project/Project.cpp` | `.raproject` / `Engine.raeengine`、兼容性检查、引擎注册表 |
@@ -263,7 +263,7 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 
 ## 开发
 
-引擎接口在 `include/RAEngine/`，实现在 `src/`，可执行入口在 `app/`。新增可复用功能放进对应模块，不要堆进入口文件；工程只承载数据。
+引擎接口在 `include/RestArtEngine/`，实现在 `src/`，可执行入口在 `app/`。新增可复用功能放进对应模块，不要堆进入口文件；工程只承载数据。
 
 目录归属、常见改动落点、必须守住的常量缓冲 / 资源 / 事务性约定，以及提交前的验证命令，汇总在 **[架构文档 · 开发指引](docs/Architecture.md#开发指引)**。
 
@@ -274,7 +274,7 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
 
 # GPU：编辑器全流程（真实鼠标/键盘注入）
-.\build\cmake-vs2022\Debug\RAEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
+.\build\cmake-vs2022\Debug\RestArtEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
 
 # GPU：前向 / 延迟一致性、光追开关、Unlit、法线与 UI 截图
 .\scripts\Validate-Render.ps1
@@ -288,18 +288,18 @@ ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
 ## 命令行参数
 
 ```powershell
-RAEngine.exe                          # 打开 Project Manager
-RAEngine.exe <path>                   # 裸路径 = --project，可传 .raproject 或工程目录
-RAEngine.exe --project <path>         # 直接打开工程
-RAEngine.exe --engine <path>          # 指定引擎根目录启动 Project Manager
-RAEngine.exe --forward | --deferred   # 选择渲染路径
-RAEngine.exe --rt                     # 开启解析光追阴影与反射
-RAEngine.exe --no-ui                  # 不绘制编辑器面板
-RAEngine.exe --frames N               # 运行 N 帧后退出（配合 --capture-dir）
-RAEngine.exe --capture-dir <path>     # 截图输出目录（默认 screenshots）
-RAEngine.exe --self-test              # 渲染自测
-RAEngine.exe --editor-self-test       # 编辑器自测
-RAEngine.exe --help
+RestArtEngine.exe                          # 打开 Project Manager
+RestArtEngine.exe <path>                   # 裸路径 = --project，可传 .raproject 或工程目录
+RestArtEngine.exe --project <path>         # 直接打开工程
+RestArtEngine.exe --engine <path>          # 指定引擎根目录启动 Project Manager
+RestArtEngine.exe --forward | --deferred   # 选择渲染路径
+RestArtEngine.exe --rt                     # 开启解析光追阴影与反射
+RestArtEngine.exe --no-ui                  # 不绘制编辑器面板
+RestArtEngine.exe --frames N               # 运行 N 帧后退出（配合 --capture-dir）
+RestArtEngine.exe --capture-dir <path>     # 截图输出目录（默认 screenshots）
+RestArtEngine.exe --self-test              # 渲染自测
+RestArtEngine.exe --editor-self-test       # 编辑器自测
+RestArtEngine.exe --help
 ```
 
 截图格式为 BMP，默认写入程序工作目录下的 `screenshots`。

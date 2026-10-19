@@ -7,7 +7,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{6B43E54C-05F1-46E9-A697-BEF48B3D74E8}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>RAEngine</RootNamespace>
+    <RootNamespace>RestArtEngine</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -33,7 +33,7 @@
   <PropertyGroup>
     <OutDir>$(ProjectDir)build-msvc\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)build-msvc\obj\$(ProjectName)\$(Configuration)\</IntDir>
-    <TargetName>RAEngine</TargetName>
+    <TargetName>RestArtEngine</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -97,17 +97,17 @@
     <ClCompile Include="vendor\imgui\backends\imgui_impl_dx11.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\RAEngine\Core\Engine.h" />
-    <ClInclude Include="include\RAEngine\ImGui\ImGuiLayer.h" />
-    <ClInclude Include="include\RAEngine\Renderer\RenderBackend.h" />
-    <ClInclude Include="include\RAEngine\Renderer\SceneRenderer.h" />
-    <ClInclude Include="include\RAEngine\Renderer\SceneShaders.h" />
-    <ClInclude Include="include\RAEngine\Assets\AssetLibrary.h" />
-    <ClInclude Include="include\RAEngine\Scene\World.h" />
-    <ClInclude Include="include\RAEngine\Project\Project.h" />
-    <ClInclude Include="include\RAEngine\Editor\SceneEditor.h" />
-    <ClInclude Include="include\RAEngine\Editor\ViewportInteraction.h" />
-    <ClInclude Include="include\RAEngine\Editor\LoadingScreen.h" />
+    <ClInclude Include="include\RestArtEngine\Core\Engine.h" />
+    <ClInclude Include="include\RestArtEngine\ImGui\ImGuiLayer.h" />
+    <ClInclude Include="include\RestArtEngine\Renderer\RenderBackend.h" />
+    <ClInclude Include="include\RestArtEngine\Renderer\SceneRenderer.h" />
+    <ClInclude Include="include\RestArtEngine\Renderer\SceneShaders.h" />
+    <ClInclude Include="include\RestArtEngine\Assets\AssetLibrary.h" />
+    <ClInclude Include="include\RestArtEngine\Scene\World.h" />
+    <ClInclude Include="include\RestArtEngine\Project\Project.h" />
+    <ClInclude Include="include\RestArtEngine\Editor\SceneEditor.h" />
+    <ClInclude Include="include\RestArtEngine\Editor\ViewportInteraction.h" />
+    <ClInclude Include="include\RestArtEngine\Editor\LoadingScreen.h" />
     <ClInclude Include="app\EditorSmoke.h" />
     <ClInclude Include="vendor\ImGuizmo\ImGuizmo.h" />
   </ItemGroup>
@@ -119,7 +119,7 @@
     <None Include="assets\icons\RAEngine.ico" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="RAEngine.rc" />
+    <ResourceCompile Include="RestArtEngine.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

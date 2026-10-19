@@ -1,6 +1,5 @@
-// Windows resources for RestArtEngine (abbreviated RAEngine in code and file names).
-// The project logo lives at assets/icons/RAEngine.png; the embedded
-// RAEngine.ico is generated from it (sizes 16-256) and referenced below.
+// Windows resources for RestArtEngine. The embedded icon keeps the RA
+// abbreviation: assets/icons/RAEngine.ico, generated from assets/icons/RAEngine.png.
 
 #include <windows.h>
 
@@ -23,8 +22,8 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "RestArtEngine scene and material editor"
             VALUE "FileVersion", "0.2.0"
-            VALUE "InternalName", "RAEngine"
-            VALUE "OriginalFilename", "RAEngine.exe"
+            VALUE "InternalName", "RestArtEngine"
+            VALUE "OriginalFilename", "RestArtEngine.exe"
             VALUE "ProductName", "RestArtEngine"
             VALUE "ProductVersion", "0.2.0"
         END

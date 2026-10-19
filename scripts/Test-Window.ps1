@@ -1,7 +1,7 @@
 param([string]$Executable = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-if (!$Executable) { $Executable = Join-Path $root 'build-msvc/Debug/RAEngine.exe' }
+if (!$Executable) { $Executable = Join-Path $root 'build-msvc/Debug/RestArtEngine.exe' }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $outputDir = Join-Path $root 'artifacts/window-test'
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
@@ -35,7 +35,7 @@ try {
             [WindowTestNative]::GetWindowThreadProcessId($window,[ref]$ownerId) | Out-Null
             $title=[System.Text.StringBuilder]::new(256)
             [WindowTestNative]::GetWindowText($window,$title,256) | Out-Null
-            if($ownerId -eq $script:testProcessId -and $title.ToString().StartsWith('RAEngine')) {$script:testWindow=$window}
+            if($ownerId -eq $script:testProcessId -and $title.ToString().StartsWith('RestArtEngine')) {$script:testWindow=$window}
             return $true
         },[IntPtr]::Zero) | Out-Null
     }

@@ -1,6 +1,6 @@
-#include <RAEngine/Assets/AssetLibrary.h>
-#include <RAEngine/Scene/World.h>
-#include <RAEngine/Project/Project.h>
+#include <RestArtEngine/Assets/AssetLibrary.h>
+#include <RestArtEngine/Scene/World.h>
+#include <RestArtEngine/Project/Project.h>
 
 #include <chrono>
 #include <cmath>
@@ -224,7 +224,7 @@ void projectPaths(const fs::path& directory) {
     require(rae::project::writeProjectBuildFiles(fromDirectory, buildFiles, error),
             "Project-local solution generation failed: " + error);
     require(buildFiles.solution == project / "Test project.sln" &&
-                buildFiles.buildManifest == project / "RAEngineProject.json" &&
+                buildFiles.buildManifest == project / "RestArtEngineProject.json" &&
                 fs::is_regular_file(buildFiles.solution) && fs::is_regular_file(buildFiles.buildManifest),
             "Project-local solution files were not created");
     std::ifstream buildDescription(buildFiles.buildManifest);
@@ -415,7 +415,7 @@ void projectSolutionReferences(const fs::path& directory) {
     write(engine / "Engine.raeengine",
           "{\"format\":\"RAEngine.Engine\",\"version\":1,\"name\":\"Engine\","
           "\"engineVersion\":\"0.2.0\",\"engineHash\":\"hash\"}");
-    write(engine / "RAEngine.vcxproj",
+    write(engine / "RestArtEngine.vcxproj",
           "<?xml version=\"1.0\"?><Project><PropertyGroup><ProjectGuid>{6B43E54C-05F1-46E9-A697-BEF48B3D74E8}</ProjectGuid></PropertyGroup></Project>");
     write(project / "Content/Scenes/Default.rascene", "{}");
     write(project / "Demo.raproject",
@@ -430,10 +430,10 @@ void projectSolutionReferences(const fs::path& directory) {
     require(rae::project::writeProjectBuildFiles(paths, files, error), "Cannot generate build files: " + error);
     std::ifstream solution(files.solution);
     const std::string text((std::istreambuf_iterator<char>(solution)), {});
-    require(text.find("RAEngine.vcxproj") != std::string::npos &&
+    require(text.find("RestArtEngine.vcxproj") != std::string::npos &&
             text.find("{6B43E54C-05F1-46E9-A697-BEF48B3D74E8}") != std::string::npos &&
             text.find("RAEngineRuntime.vcxproj") == std::string::npos,
-            "Generated solution should reference only the single RAEngine project.");
+            "Generated solution should reference only the single RestArtEngine project.");
     std::ifstream buildDescription(files.buildManifest);
     const std::string buildText((std::istreambuf_iterator<char>(buildDescription)), {});
     require(buildText.find("\"engineSources\": true") != std::string::npos &&

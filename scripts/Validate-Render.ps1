@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
-if (!$Executable) { $Executable = Join-Path $repositoryRoot 'build-msvc/Debug/RAEngine.exe' }
+if (!$Executable) { $Executable = Join-Path $repositoryRoot 'build-msvc/Debug/RestArtEngine.exe' }
 if (!$CaptureDirectory) { $CaptureDirectory = Join-Path $repositoryRoot 'artifacts/validation' }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $CaptureDirectory = [IO.Path]::GetFullPath($CaptureDirectory)

@@ -1,4 +1,4 @@
-#include "RAEngine/Project/Project.h"
+#include "RestArtEngine/Project/Project.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -471,7 +471,7 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
             throw std::runtime_error("Project must have a complete engine binding before generating build files.");
 
         const auto solution = project.projectRoot / (project.name + ".sln");
-        const auto buildManifest = project.projectRoot / "RAEngineProject.json";
+        const auto buildManifest = project.projectRoot / "RestArtEngineProject.json";
         const auto projectItemGuid = solutionGuid(project);
         const auto manifestName = project.manifest.filename();
         const auto engineRelative = fs::relative(project.engineRoot, project.projectRoot);
@@ -479,7 +479,7 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
         // When the linked engine ships its MSBuild project, reference it so
         // opening this solution also opens and builds the engine source.  The
         // manifest items stay in a solution-folder for quick access.
-        const auto engineVcxproj = project.engineRoot / "RAEngine.vcxproj";
+        const auto engineVcxproj = project.engineRoot / "RestArtEngine.vcxproj";
         const bool engineSources = fs::is_regular_file(engineVcxproj);
         std::string engineGuid;
         if (engineSources) engineGuid = readProjectGuid(engineVcxproj);
@@ -490,8 +490,8 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
             << "VisualStudioVersion = 17.0.31903.59\n"
             << "MinimumVisualStudioVersion = 10.0.40219.1\n";
         if (engineSources) {
-            const auto engineProjectPath = joinSolutionPath(solutionPath(engineRelative), "RAEngine.vcxproj");
-            sln << "Project(\"{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}\") = \"RAEngine\", \""
+            const auto engineProjectPath = joinSolutionPath(solutionPath(engineRelative), "RestArtEngine.vcxproj");
+            sln << "Project(\"{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}\") = \"RestArtEngine\", \""
                 << engineProjectPath << "\", \"" << engineGuid << "\"\n"
                 << "EndProject\n";
         }
@@ -499,7 +499,7 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
             << project.name << "\", \".\", \"" << projectItemGuid << "\"\n"
             << "\tProjectSection(SolutionItems) = preProject\n"
             << "\t\t" << solutionPath(manifestName) << " = " << solutionPath(manifestName) << "\n"
-            << "\t\tRAEngineProject.json = RAEngineProject.json\n"
+            << "\t\tRestArtEngineProject.json = RestArtEngineProject.json\n"
             << "\tEndProjectSection\n"
             << "EndProject\n"
             << "Global\n"
@@ -534,9 +534,9 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
             {"engineHash", project.engineHash},
             {"engineSources", engineSources},
             {"build", {
-                {"description", "Configure and build the RAEngine solution from the linked engine root."},
-                {"engineSolution", "RAEngine.sln"},
-                {"engineExecutable", "RAEngine.exe"},
+                {"description", "Configure and build the RestArtEngine solution from the linked engine root."},
+                {"engineSolution", "RestArtEngine.sln"},
+                {"engineExecutable", "RestArtEngine.exe"},
                 {"cmakeSource", pathUtf8(engineRelative)}
             }}
         };

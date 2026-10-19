@@ -2,25 +2,25 @@
 
 本工程面向技术美术的材质与渲染实验。当前编辑器通过 DX11 绘制 Actor 场景，使用 Dear ImGui 提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
 
-> 命名约定：产品全称 **RestArtEngine**，缩写 **RAEngine / RA**。代码标识符、文件名与扩展名沿用 `RA` 前缀（`RAEngine.exe`、`RAEngine.sln`、`.raproject`、`.rascene`、`.ramat`、`.raeengine`、`include/RAEngine/`、命名空间 `rae`）。
+> 命名约定：产品与所有工程文件使用全称 **RestArtEngine**（`RestArtEngine.exe`、`RestArtEngine.sln`、`RestArtEngine.vcxproj`、`RestArtEngine.rc`、`RestArtEngineProject.json`、`include/RestArtEngine/`）。只有文件扩展名与格式标识保留 `RA` 缩写：`.raproject`、`.rascene`、`.ramat`、`.raeengine`、JSON `format`（`RAEngine.*`）、命名空间 `rae`、注册表目录 `%LOCALAPPDATA%\RAEngine`。
 
 ## 目录约定
 
 | 目录 | 职责与放置规则 |
 | --- | --- |
-| `include/RAEngine/Core/`、`src/Core/` | 引擎生命周期等公共基础设施。 |
-| `include/RAEngine/Project/`、`src/Project/` | `.raproject` 工程描述解析、引擎与工程资源路径解析验证。 |
-| `include/RAEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、`StaticMeshComponent` 与场景序列化；不依赖 ImGui 或 DX11。 |
-| `include/RAEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
-| `include/RAEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
-| `include/RAEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
-| `include/RAEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器。 |
+| `include/RestArtEngine/Core/`、`src/Core/` | 引擎生命周期等公共基础设施。 |
+| `include/RestArtEngine/Project/`、`src/Project/` | `.raproject` 工程描述解析、引擎与工程资源路径解析验证。 |
+| `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、`StaticMeshComponent` 与场景序列化；不依赖 ImGui 或 DX11。 |
+| `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
+| `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
+| `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
+| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
 | `Projects/Sandbox/Sandbox.raproject` | 默认 Sandbox 工程描述，声明引擎、工程资产、工程 Shader 与默认场景的位置。 |
-| `RAEngine.exe` | 独立工程管理器和编辑器程序；无 `--project` 时进入 Project Manager。CMake 目标名为 `RAEngine`。 |
+| `RestArtEngine.exe` | 独立工程管理器和编辑器程序；无 `--project` 时进入 Project Manager。CMake 目标名为 `RestArtEngine`。 |
 | `Engine.raeengine` | 引擎安装身份（版本和发布 / 源码 hash），用于工程绑定和工程管理器兼容检查。 |
-| `Projects/Sandbox/Sandbox.raproject`、`Content/`、`Shaders/` | 默认示例工程（纯数据）：`.raproject` 声明引擎链接与内容路径，通过 `RAEngine.exe` 打开；不包含也不生成 `.sln`。 |
+| `Projects/Sandbox/Sandbox.raproject`、`Content/`、`Shaders/` | 默认示例工程（纯数据）：`.raproject` 声明引擎链接与内容路径，通过 `RestArtEngine.exe` 打开；不包含也不生成 `.sln`。 |
 | `Projects/Sandbox/Content/Scenes/` | Sandbox 工程的场景资产；默认场景为 `Default.rascene`。 |
 | `Projects/Sandbox/Content/Materials/` | Sandbox 工程的材质参数资产。参数资产与 HLSL 源码分开管理。 |
 | `Projects/Sandbox/Content/Meshes/` | Sandbox 工程的 OBJ 源文件；编辑器导入时复制至当前工程的 Meshes 目录。 |
@@ -34,15 +34,15 @@
 | `artifacts/`、`screenshots/` | 验证日志与截图，属于输出，不应作为资产源目录。 |
 | `build*/` | 编译生成物，不在这些目录维护源码、材质或 Shader。 |
 
-对外接口放在引擎根目录的 `include/RAEngine/<模块>/`，实现放在对应的 `src/<模块>/`。新增可复用引擎功能不继续堆入样例入口。引擎根目录的 `Shaders/Private` 保存公共渲染管线，`Shaders/Materials` 提供默认模板；用户内容属于具体工程，各工程拥有自己的 `Content/` 和 `Shaders/`。编辑器导入、保存与重新加载都解析到当前工程，不把用户资产写入引擎根目录。
+对外接口放在引擎根目录的 `include/RestArtEngine/<模块>/`，实现放在对应的 `src/<模块>/`。新增可复用引擎功能不继续堆入样例入口。引擎根目录的 `Shaders/Private` 保存公共渲染管线，`Shaders/Materials` 提供默认模板；用户内容属于具体工程，各工程拥有自己的 `Content/` 和 `Shaders/`。编辑器导入、保存与重新加载都解析到当前工程，不把用户资产写入引擎根目录。
 
 ## 工程描述与路径
 
 默认工程位于 `Projects/Sandbox/`。`.raproject` 中的路径相对描述文件所在目录解析：
 
 ```text
-RAEngine/                         引擎仓库根目录
-├─ include/RAEngine/、src/         引擎与编辑器源码
+RestArtEngine/                         引擎仓库根目录
+├─ include/RestArtEngine/、src/         引擎与编辑器源码
 ├─ Shaders/                       引擎公共管线与默认模板
 └─ Projects/
    └─ Sandbox/                    一个独立工程
@@ -86,7 +86,7 @@ RAEngine/                         引擎仓库根目录
 
 新工程可以复用同一个引擎目录，拥有独立的 Content 和材质 Shader；引擎模板与工程源码是两个文件，保存一个工程的 Shader 不会修改其他工程或默认模板。移动工程后，应检查 `engineRoot` 是否仍能指向引擎。
 
-引擎可独立启动。没有 `--project` 时，`RAEngine.exe` 先显示 Project Manager：可以打开已有 `.raproject`、从 `Projects/` 中选择案例，或把 `Projects/Sandbox/` 复制到指定父目录创建新工程。新工程拥有自己的 `Content/`、材质 Shader 和场景文件，manifest 会写入当前引擎的 `engineAssociation`、`engineVersion`、`engineHash` 与相对 `engineRoot` 链接。工程是纯数据，不生成自己的 `.sln`；编译引擎只打开仓库根目录的 `RAEngine.sln`。工程管理器在进入编辑器前检查身份；版本或 hash 不一致时，可以更新绑定到当前引擎、使用 manifest 引用的引擎、浏览选择其它引擎版本，或关闭。`contentRoot`、`shaderRoot` 目录和 `defaultScene` 文件必须已经存在；默认材质源码位于 `shaderRoot/Materials/Standard.hlsli`。复制时保留 Content 与 Shaders 的完整内容，不只复制描述文件。
+引擎可独立启动。没有 `--project` 时，`RestArtEngine.exe` 先显示 Project Manager：可以打开已有 `.raproject`、从 `Projects/` 中选择案例，或把 `Projects/Sandbox/` 复制到指定父目录创建新工程。新工程拥有自己的 `Content/`、材质 Shader 和场景文件，manifest 会写入当前引擎的 `engineAssociation`、`engineVersion`、`engineHash` 与相对 `engineRoot` 链接。工程是纯数据，不生成自己的 `.sln`；编译引擎只打开仓库根目录的 `RestArtEngine.sln`。工程管理器在进入编辑器前检查身份；版本或 hash 不一致时，可以更新绑定到当前引擎、使用 manifest 引用的引擎、浏览选择其它引擎版本，或关闭。`contentRoot`、`shaderRoot` 目录和 `defaultScene` 文件必须已经存在；默认材质源码位于 `shaderRoot/Materials/Standard.hlsli`。复制时保留 Content 与 Shaders 的完整内容，不只复制描述文件。
 
 `Engine.raeengine` 是引擎安装的发布身份文件。`engineHash` 由发行或构建流程写入，必须是稳定的构建标识；它不依赖进程随机数，也不把工程资产复制进引擎。这样可以把引擎目录独立发布，工程只保存链接和身份信息，未来可单独开源或安装多份引擎并在工程管理器中切换。
 
@@ -164,7 +164,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 | --- | --- |
 | 窗口、消息循环、命令行、启动与加载流程、Project Manager | `app/MinimalApp.cpp` |
 | 引擎 GPU 自测 | `app/EditorSmoke.cpp` |
-| 场景 / Actor / 场景序列化 | `include/RAEngine/Scene/World.h`、`src/Scene/World.cpp` |
+| 场景 / Actor / 场景序列化 | `include/RestArtEngine/Scene/World.h`、`src/Scene/World.cpp` |
 | 网格导入、材质资产与资产文件格式 | `src/Assets/AssetLibrary.cpp`、`src/Assets/AssetSerialization.h` |
 | 工程格式、引擎身份、引擎注册表 | `src/Project/Project.cpp` |
 | DX11 资源、G-buffer、阴影、光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
@@ -172,7 +172,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
 | 视口拾取、变换手柄、相机 | `src/Editor/ViewportInteraction.cpp` |
 | 启动加载界面与背景图 | `src/Editor/LoadingScreen.cpp`、`assets/load/load.png` |
-| 新的公开接口 | `include/RAEngine/<模块>/`，实现放 `src/<模块>/` |
+| 新的公开接口 | `include/RestArtEngine/<模块>/`，实现放 `src/<模块>/` |
 
 `app/` 是引擎的可执行入口（不是示例工程），新增可复用功能应放进对应模块而不是堆进入口文件。
 
@@ -190,7 +190,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 cmake --preset windows-vs2022
 cmake --build --preset windows-debug
 ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
-.\build\cmake-vs2022\Debug\RAEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
+.\build\cmake-vs2022\Debug\RestArtEngine.exe --editor-self-test --capture-dir artifacts\editor-validation
 .\scripts\Validate-Render.ps1
 ```
 

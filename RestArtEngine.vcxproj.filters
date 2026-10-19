@@ -28,17 +28,17 @@
     <ClCompile Include="vendor\imgui\backends\imgui_impl_win32.cpp"><Filter>vendor</Filter></ClCompile>
     <ClCompile Include="vendor\imgui\backends\imgui_impl_dx11.cpp"><Filter>vendor</Filter></ClCompile>
     <ClInclude Include="app\EditorSmoke.h"><Filter>app</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Core\Engine.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\ImGui\ImGuiLayer.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Renderer\RenderBackend.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Renderer\SceneRenderer.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Renderer\SceneShaders.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Assets\AssetLibrary.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Scene\World.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Project\Project.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Editor\SceneEditor.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Editor\ViewportInteraction.h"><Filter>include</Filter></ClInclude>
-    <ClInclude Include="include\RAEngine\Editor\LoadingScreen.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Core\Engine.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\ImGui\ImGuiLayer.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Renderer\RenderBackend.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Renderer\SceneRenderer.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Renderer\SceneShaders.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Assets\AssetLibrary.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Scene\World.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Project\Project.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Editor\SceneEditor.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Editor\ViewportInteraction.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RestArtEngine\Editor\LoadingScreen.h"><Filter>include</Filter></ClInclude>
     <ClInclude Include="vendor\ImGuizmo\ImGuizmo.h"><Filter>vendor</Filter></ClInclude>
     <None Include="Shaders\Private\Scene.hlsl"><Filter>Shaders</Filter></None>
     <None Include="Shaders\Materials\Standard.hlsli"><Filter>Shaders</Filter></None>
@@ -47,6 +47,6 @@
     <None Include="assets\icons\RAEngine.png" />
     <None Include="assets\icons\RAEngine.ico" />
     <None Include="assets\load\load.png" />
-    <ResourceCompile Include="RAEngine.rc" />
+    <ResourceCompile Include="RestArtEngine.rc" />
   </ItemGroup>
 </Project>
