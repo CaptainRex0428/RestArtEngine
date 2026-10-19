@@ -1,0 +1,16 @@
+{
+  "format": "RAEngine.Material",
+  "material": {
+    "baseColor": [
+      0.8500000238418579,
+      0.2800000011920929,
+      0.07999999821186066
+    ],
+    "grid": false,
+    "id": 3,
+    "metallic": 0.8550000190734863,
+    "name": "Yellow",
+    "roughness": 0.1550000011920929
+  },
+  "version": 1
+}
