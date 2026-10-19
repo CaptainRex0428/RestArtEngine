@@ -29,6 +29,11 @@ using namespace rae::renderer;
 struct WindowState {
     unsigned width = 1440, height = 900;
     bool resized = false, minimized = false, closeRequested = false;
+    // Only the window that owns the main loop may post WM_QUIT when destroyed.
+    // The project manager and the editor share `windowProc`; without this gate,
+    // destroying the project manager can leave a thread-wide WM_QUIT in the
+    // queue that terminates the editor loop before its first frame.
+    bool quitOnDestroy = false;
 };
 
 // RestArtEngine.rc embeds assets/icons/RAEngine.ico (generated from the project logo
@@ -80,7 +85,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
         if (state) state->closeRequested = true;
         return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        if (!state || state->quitOnDestroy) PostQuitMessage(0);
+        return 0;
     }
     if (uiHandled) return 1;
     return DefWindowProcW(window, message, wp, lp);
@@ -549,6 +556,9 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
         WindowState windowState;
+        // The editor owns the main loop, so it is the only window allowed to
+        // turn its destruction into a thread-wide quit.
+        windowState.quitOnDestroy = true;
         RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
         AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
         WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Scene & Material Editor | DirectX 11",
@@ -585,6 +595,14 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "Forward + deferred rasterization; directional shadow maps, selectable analytic shadows, and GPU ray reflections.\n";
         bool running = true;
         int frame = 0;
+        // Defensive: a WM_QUIT posted by a window destroyed during startup would
+        // end the loop before its first frame. Only windows with quitOnDestroy
+        // set can post it now, so draining here is a cheap safety net.
+        {
+            MSG stale{};
+            while (PeekMessageW(&stale, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE))
+                std::cerr << "Drained a stale WM_QUIT left over from startup.\n";
+        }
         auto previous = std::chrono::steady_clock::now();
         while (running) {
             MSG msg{};
