@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# RAEngine - repository ignore rules
+#
+# Tracked: include/ src/ samples/ tests/ Shaders/ Projects/ vendor/ docs/
+# scripts/ assets/, plus RAEngine.sln, RAEngine.vcxproj(.filters), RAEngine.rc
+# and the CMake files. Everything a build, an IDE, or a test run produces stays
+# local.
+#
+# Note: *.obj is intentionally NOT ignored globally because Wavefront OBJ meshes
+# under Projects/*/Content/Meshes/ are source content. Compiler object files
+# only appear inside the ignored build directories.
+# ---------------------------------------------------------------------------
+
+# Build output
+/build/
+/build-*/
+/out/
+/install/
+/install-*/
+/.vs/
+x64/
+*.res
+*.tlog
+*.lastbuildstate
+
+# Compiled binaries and linker intermediates
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.map
+
+# IDE / editor state
+.idea/
+*.sln.iml
+*.user
+*.suo
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+imgui.ini
+
+# Test / validation output
+/screenshots/
+/artifacts/
+Testing/
+
+# Operating system junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary files
+*.tmp

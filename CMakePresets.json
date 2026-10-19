@@ -1,0 +1,45 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-vs2022",
+      "displayName": "Windows / Visual Studio 2022 x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/cmake-vs2022"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Debug",
+      "configurePreset": "windows-vs2022",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Release",
+      "configurePreset": "windows-vs2022",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-debug-engine",
+      "displayName": "Debug / RAEngine executable",
+      "configurePreset": "windows-vs2022",
+      "configuration": "Debug",
+      "targets": ["RAEngine"]
+    },
+    {
+      "name": "windows-release-engine",
+      "displayName": "Release / RAEngine executable",
+      "configurePreset": "windows-vs2022",
+      "configuration": "Release",
+      "targets": ["RAEngine"]
+    }
+  ]
+}

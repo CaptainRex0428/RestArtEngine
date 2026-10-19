@@ -1,0 +1,7 @@
+{
+  "format": "RAEngine.Engine",
+  "version": 1,
+  "name": "RAEngine",
+  "engineVersion": "0.2.0",
+  "engineHash": "dev-0.2.0"
+}

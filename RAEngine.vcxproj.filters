@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="app"><UniqueIdentifier>{A1D4C0D9-DA8C-46F5-86F7-C5B56D11ABF8}</UniqueIdentifier></Filter>
+    <Filter Include="src"><UniqueIdentifier>{B2E5D1EA-EB9D-47G6-97F8-D6C67E22BCF9}</UniqueIdentifier></Filter>
+    <Filter Include="vendor"><UniqueIdentifier>{C3F6E2FB-FC0E-48H7-A8F9-E7D78F33CDA0}</UniqueIdentifier></Filter>
+    <Filter Include="include"><UniqueIdentifier>{D4F7F3FC-FD1F-49I8-B9GA-F8E89F44DEB0}</UniqueIdentifier></Filter>
+    <Filter Include="Shaders"><UniqueIdentifier>{E5F8F4FD-FE2G-4AJ9-CAIB-G9F9AF55EFC0}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="app\MinimalApp.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="app\EditorSmoke.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\Core\Engine.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Assets\AssetLibrary.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Scene\World.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Project\Project.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Editor\SceneEditor.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Editor\ViewportInteraction.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Editor\LoadingScreen.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\ImGui\ImGuiLayer.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Renderer\RenderBackend.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="src\Renderer\SceneRenderer.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="vendor\ImGuizmo\ImGuizmo.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\imgui.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\imgui_draw.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\imgui_tables.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\imgui_widgets.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\backends\imgui_impl_win32.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClCompile Include="vendor\imgui\backends\imgui_impl_dx11.cpp"><Filter>vendor</Filter></ClCompile>
+    <ClInclude Include="app\EditorSmoke.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Core\Engine.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\ImGui\ImGuiLayer.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Renderer\RenderBackend.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Renderer\SceneRenderer.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Renderer\SceneShaders.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Assets\AssetLibrary.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Scene\World.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Project\Project.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Editor\SceneEditor.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Editor\ViewportInteraction.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="include\RAEngine\Editor\LoadingScreen.h"><Filter>include</Filter></ClInclude>
+    <ClInclude Include="vendor\ImGuizmo\ImGuizmo.h"><Filter>vendor</Filter></ClInclude>
+    <None Include="Shaders\Private\Scene.hlsl"><Filter>Shaders</Filter></None>
+    <None Include="Shaders\Materials\Standard.hlsli"><Filter>Shaders</Filter></None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="assets\icons\RAEngine.png" />
+    <None Include="assets\icons\RAEngine.ico" />
+    <None Include="assets\load\load.png" />
+    <ResourceCompile Include="RAEngine.rc" />
+  </ItemGroup>
+</Project>

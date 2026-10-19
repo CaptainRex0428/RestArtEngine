@@ -1,0 +1,294 @@
+#include <RAEngine/Editor/ViewportInteraction.h>
+
+#include <imgui.h>
+#include <ImGuizmo.h>
+#include <DirectXMath.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace rae::editor {
+namespace {
+using namespace DirectX;
+
+XMMATRIX actorMatrix(const scene::Transform& t) {
+    return XMMatrixScaling(t.scale[0], t.scale[1], t.scale[2]) *
+        XMMatrixRotationRollPitchYaw(XMConvertToRadians(t.rotation[0]),
+            XMConvertToRadians(t.rotation[1]), XMConvertToRadians(t.rotation[2])) *
+        XMMatrixTranslation(t.position[0], t.position[1], t.position[2]);
+}
+
+bool validTransform(const scene::Transform& t) {
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(t.position[i]) || !std::isfinite(t.rotation[i]) ||
+            !std::isfinite(t.scale[i]) || std::abs(t.scale[i]) < 0.0001f) return false;
+    return true;
+}
+
+// Moves the orbit focus onto the selected Actor and fits its mesh bounds in
+// view, matching the usual "frame selected" shortcut.
+void focusActor(renderer::SceneSettings& settings, const scene::World& world,
+                const assets::AssetLibrary& library, scene::ActorId selected) {
+    const auto* actor = world.findActor(selected);
+    if (!actor || !validTransform(actor->transform)) return;
+    const auto* mesh = library.findMesh(actor->mesh.meshId);
+    if (!mesh || mesh->vertices.empty()) return;
+    float minimum[3] = {1e30f, 1e30f, 1e30f};
+    float maximum[3] = {-1e30f, -1e30f, -1e30f};
+    for (const auto& vertex : mesh->vertices)
+        for (int axis = 0; axis < 3; ++axis) {
+            minimum[axis] = std::min(minimum[axis], vertex.position[axis]);
+            maximum[axis] = std::max(maximum[axis], vertex.position[axis]);
+        }
+    const float center[3] = {(minimum[0] + maximum[0]) * 0.5f, (minimum[1] + maximum[1]) * 0.5f,
+        (minimum[2] + maximum[2]) * 0.5f};
+    float radius = 0.0f;
+    for (const auto& vertex : mesh->vertices) {
+        const float dx = vertex.position[0] - center[0];
+        const float dy = vertex.position[1] - center[1];
+        const float dz = vertex.position[2] - center[2];
+        radius = std::max(radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    const XMMATRIX matrix = actorMatrix(actor->transform);
+    const XMVECTOR worldCenter = XMVector3TransformCoord(
+        XMVectorSet(center[0], center[1], center[2], 1.0f), matrix);
+    settings.cameraTarget[0] = XMVectorGetX(worldCenter);
+    settings.cameraTarget[1] = XMVectorGetY(worldCenter);
+    settings.cameraTarget[2] = XMVectorGetZ(worldCenter);
+    const float scale = std::max({std::abs(actor->transform.scale[0]),
+        std::abs(actor->transform.scale[1]), std::abs(actor->transform.scale[2])});
+    const float worldRadius = std::max(radius * scale, 0.05f);
+    const float fit = worldRadius / std::tan(XMConvertToRadians(25.0f)) * 1.45f;
+    settings.cameraDistance = std::clamp(fit, 2.0f, 30.0f);
+}
+
+// ImGuizmo's Euler decomposition uses a different rotation order. Extract the
+// engine's row-vector Rz * Rx * Ry explicitly and preserve untouched components.
+bool applyMatrix(const XMFLOAT4X4& matrix, int operation, scene::Transform& transform) {
+    scene::Transform next = transform;
+    if (operation == 0) {
+        next.position[0] = matrix._41;
+        next.position[1] = matrix._42;
+        next.position[2] = matrix._43;
+    } else if (operation == 1) {
+        XMFLOAT4X4 rotation = matrix;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float length = std::sqrt(matrix.m[axis][0] * matrix.m[axis][0] +
+                matrix.m[axis][1] * matrix.m[axis][1] + matrix.m[axis][2] * matrix.m[axis][2]);
+            if (length < .0001f) return false;
+            const float signedLength = std::copysign(length, transform.scale[axis]);
+            for (int column = 0; column < 3; ++column) rotation.m[axis][column] /= signedLength;
+        }
+        const float pitch = std::asin(std::clamp(-rotation._32, -1.0f, 1.0f));
+        const bool singular = std::abs(std::cos(pitch)) < .0001f;
+        next.rotation[0] = XMConvertToDegrees(pitch);
+        next.rotation[1] = XMConvertToDegrees(singular ? std::atan2(-rotation._13, rotation._11) :
+            std::atan2(rotation._31, rotation._33));
+        next.rotation[2] = singular ? 0.0f : XMConvertToDegrees(std::atan2(rotation._12, rotation._22));
+    } else {
+        XMFLOAT4X4 rotation;
+        XMStoreFloat4x4(&rotation, XMMatrixRotationRollPitchYaw(XMConvertToRadians(transform.rotation[0]),
+            XMConvertToRadians(transform.rotation[1]), XMConvertToRadians(transform.rotation[2])));
+        for (int axis = 0; axis < 3; ++axis) {
+            const float scale = matrix.m[axis][0] * rotation.m[axis][0] +
+                matrix.m[axis][1] * rotation.m[axis][1] + matrix.m[axis][2] * rotation.m[axis][2];
+            next.scale[axis] = std::copysign(std::max(std::abs(scale), .001f), scale);
+        }
+    }
+    if (!validTransform(next)) return false;
+    bool changed = false;
+    for (int i = 0; i < 3; ++i)
+        changed |= next.position[i] != transform.position[i] || next.rotation[i] != transform.rotation[i] ||
+            next.scale[i] != transform.scale[i];
+    if (changed) transform = next;
+    return changed;
+}
+
+bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
+                       GXMVECTOR b, HXMVECTOR c, float& distance) {
+    const XMVECTOR edge1 = b - a, edge2 = c - a;
+    const XMVECTOR p = XMVector3Cross(direction, edge2);
+    const float determinant = XMVectorGetX(XMVector3Dot(edge1, p));
+    if (std::abs(determinant) < 1e-8f) return false;
+    const float inverse = 1.0f / determinant;
+    const XMVECTOR delta = origin - a;
+    const float u = XMVectorGetX(XMVector3Dot(delta, p)) * inverse;
+    if (u < 0 || u > 1) return false;
+    const XMVECTOR q = XMVector3Cross(delta, edge1);
+    const float v = XMVectorGetX(XMVector3Dot(direction, q)) * inverse;
+    if (v < 0 || u + v > 1) return false;
+    distance = XMVectorGetX(XMVector3Dot(edge2, q)) * inverse;
+    return distance >= 0;
+}
+
+scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World& world,
+                   const assets::AssetLibrary& assets, FXMMATRIX view, CXMMATRIX projection) {
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const auto unproject = [&](float depth) {
+        return XMVector3Unproject(XMVectorSet(mouse.x, mouse.y, depth, 1),
+            static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
+            static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight),
+            0, 1, projection, view, XMMatrixIdentity());
+    };
+    const XMVECTOR origin = unproject(0), farPoint = unproject(1);
+    const XMVECTOR direction = XMVector3Normalize(farPoint - origin);
+    float nearest = XMVectorGetX(XMVector3Length(farPoint - origin));
+    scene::ActorId hit = 0;
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor.transform)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        if (!mesh || !assets.findMaterial(actor.mesh.materialId)) continue;
+        const XMMATRIX matrix = actorMatrix(actor.transform);
+        for (std::size_t i = 0; i + 2 < mesh->indices.size(); i += 3) {
+            XMVECTOR vertices[3];
+            bool valid = true;
+            for (int j = 0; j < 3; ++j) {
+                const auto index = mesh->indices[i + j];
+                if (index >= mesh->vertices.size()) { valid = false; break; }
+                const float* p = mesh->vertices[index].position;
+                vertices[j] = XMVector3TransformCoord(XMVectorSet(p[0], p[1], p[2], 1), matrix);
+            }
+            float distance = 0;
+            if (valid && intersectTriangle(origin, direction, vertices[0], vertices[1], vertices[2], distance) &&
+                distance < nearest) { nearest = distance; hit = actor.id; }
+        }
+    }
+    return hit;
+}
+} // namespace
+
+bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
+                               const assets::AssetLibrary& assets, scene::ActorId& selected) {
+    hovered_ = focused_ = false;
+    if (settings.viewportWidth < 1 || settings.viewportHeight < 1) { usingGizmo_ = false; return false; }
+    ImGuizmo::BeginFrame();
+    ImGui::SetNextWindowPos({static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY)});
+    ImGui::SetNextWindowSize({static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight)});
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::Begin("Scene Viewport##Interaction", nullptr, flags);
+    hovered_ = ImGui::IsWindowHovered();
+    focused_ = ImGui::IsWindowFocused();
+    const bool popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    ImGuiIO& io = ImGui::GetIO();
+    // WantTextInput is computed from the preceding frame. A click in the scene
+    // can already have deactivated the text field drawn earlier this frame, so
+    // use live item ownership for pointer input and retain the flag for keys.
+    const bool blocked = popup || (!usingGizmo_ && ImGui::IsAnyItemActive());
+    if (!blocked && !io.WantTextInput && !usingGizmo_ && (hovered_ || focused_)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false)) operation_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) operation_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) operation_ = 2;
+        if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) operation_ = (operation_ + 1) % 3;
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) focusActor(settings, world, assets, selected);
+    }
+    ImGui::BeginDisabled(usingGizmo_);
+    const char* labels[] = {"Move [W]", "Rotate [E]", "Scale [R]"};
+    for (int i = 0; i < 3; ++i) {
+        if (i) ImGui::SameLine();
+        const bool active = operation_ == i;
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::SmallButton(labels[i])) operation_ = i;
+        if (active) ImGui::PopStyleColor();
+    }
+    if (ImGui::GetWindowWidth() >= 620.0f) ImGui::SameLine();
+    if (ImGui::SmallButton(local_ ? "Local" : "World")) local_ = !local_;
+    ImGui::SameLine(); ImGui::Checkbox("Snap", &snap_);
+    ImGui::EndDisabled();
+    if (const auto* actor = world.findActor(selected))
+        ImGui::TextColored({1.0f, .75f, .2f, 1.0f}, "%s%s", actor->name.c_str(), operation_ == 2 ? " | Local scale" : "");
+    else ImGui::TextDisabled("Click a scene object to select");
+    const float toolbarBottom = ImGui::GetCursorScreenPos().y;
+    const bool overToolbar = io.MousePos.y < toolbarBottom;
+    const bool canInteract = !blocked && !overToolbar;
+    // Camera drags deliberately ignore ImGui item activation: clicking the
+    // viewport activates the window itself, which would otherwise cancel an
+    // Alt+left-drag orbit before it ever starts.
+    const bool canCamera = !popup && !overToolbar && hovered_ && !usingGizmo_;
+
+    // Right-drag orbits; Alt+left-drag is the DCC-style alternative.
+    const bool altOrbiting = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (canCamera && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+        (io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))) orbiting_ = true;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && !altOrbiting) orbiting_ = false;
+    if (orbiting_ && hovered_) {
+        settings.cameraYaw -= io.MouseDelta.x * .008f;
+        settings.cameraPitch = std::clamp(settings.cameraPitch + io.MouseDelta.y * .008f,
+            renderer::SceneSettings::minPitch, renderer::SceneSettings::maxPitch);
+    }
+    // Middle-mouse drag pans the orbit focus along the camera's right/up axes so
+    // the camera can move freely instead of only orbiting the default target.
+    if (canCamera && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) panning_ = true;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning_ = false;
+    if (panning_ && hovered_) {
+        const float p = std::clamp(settings.cameraPitch, renderer::SceneSettings::minPitch, renderer::SceneSettings::maxPitch);
+        const float d = std::clamp(settings.cameraDistance, 2.0f, 30.0f);
+        const float cosYaw = std::cos(settings.cameraYaw), sinYaw = std::sin(settings.cameraYaw);
+        const float cosPitch = std::cos(p), sinPitch = std::sin(p);
+        // Camera basis: right is pitch independent; up leans back as pitch rises.
+        const XMVECTOR right = XMVectorSet(cosYaw, 0.0f, -sinYaw, 0.0f);
+        const XMVECTOR up = XMVectorSet(-sinYaw * sinPitch, cosPitch, -cosYaw * sinPitch, 0.0f);
+        const float worldPerPixel = 2.0f * d * std::tan(XMConvertToRadians(25.0f)) /
+            std::max(1.0f, static_cast<float>(settings.viewportHeight));
+        const float dx = io.MouseDelta.x * worldPerPixel;
+        const float dy = io.MouseDelta.y * worldPerPixel;
+        // Grab style: the scene follows the cursor, so the camera moves opposite.
+        const XMVECTOR delta = XMVectorAdd(XMVectorScale(right, -dx), XMVectorScale(up, dy));
+        const XMVECTOR panTarget = XMVectorAdd(
+            XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 0.0f), delta);
+        settings.cameraTarget[0] = XMVectorGetX(panTarget);
+        settings.cameraTarget[1] = XMVectorGetY(panTarget);
+        settings.cameraTarget[2] = XMVectorGetZ(panTarget);
+    }
+    if (canInteract && hovered_ && !usingGizmo_ && io.MouseWheel != 0)
+        settings.cameraDistance = std::clamp(settings.cameraDistance * std::pow(.88f, io.MouseWheel), 2.0f, 30.0f);
+
+    const float pitch = std::clamp(settings.cameraPitch, renderer::SceneSettings::minPitch, renderer::SceneSettings::maxPitch);
+    const float distance = std::clamp(settings.cameraDistance, 2.0f, 30.0f);
+    const XMVECTOR target = XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 1.0f);
+    const XMVECTOR eye = XMVectorAdd(target, XMVectorSet(
+        distance * std::cos(pitch) * std::sin(settings.cameraYaw),
+        distance * std::sin(pitch),
+        distance * std::cos(pitch) * std::cos(settings.cameraYaw), 0.0f));
+    const XMMATRIX view = XMMatrixLookAtRH(eye, target, XMVectorSet(0, 1, 0, 0));
+    const XMMATRIX projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50),
+        static_cast<float>(settings.viewportWidth) / static_cast<float>(settings.viewportHeight), .05f, 100);
+    XMFLOAT4X4 viewData, projectionData;
+    XMStoreFloat4x4(&viewData, view); XMStoreFloat4x4(&projectionData, projection);
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::SetRect(static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
+        static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight));
+    ImGuizmo::SetGizmoSizeClipSpace(.18f);
+    ImGuizmo::Enable(!blocked && !orbiting_ && !panning_ && (!overToolbar || usingGizmo_));
+    bool changed = false, gizmoHovered = false;
+    if (auto* actor = world.findActor(selected); actor && actor->visible && validTransform(actor->transform)) {
+        XMFLOAT4X4 matrix;
+        XMStoreFloat4x4(&matrix, actorMatrix(actor->transform));
+        const ImGuizmo::OPERATION operations[] = {ImGuizmo::TRANSLATE, ImGuizmo::ROTATE, ImGuizmo::SCALE};
+        const float step = operation_ == 0 ? .5f : operation_ == 1 ? 15.0f : .1f;
+        const float snap[3] = {step, step, step};
+        // Scale is always along the Actor's own axes: world scaling a rotated
+        // object would require shear, which a position/rotation/scale cannot store.
+        if (ImGuizmo::Manipulate(&viewData._11, &projectionData._11, operations[operation_],
+            local_ || operation_ == 2 ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &matrix._11,
+            nullptr, snap_ ? snap : nullptr)) changed = applyMatrix(matrix, operation_, actor->transform);
+        gizmoHovered = ImGuizmo::IsOver();
+        usingGizmo_ = ImGuizmo::IsUsing();
+    } else usingGizmo_ = false;
+    if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) selected = pick(settings, world, assets, view, projection);
+    ImGui::SetCursorPos({8, std::max(8.0f, static_cast<float>(settings.viewportHeight) - 23.0f)});
+    const char* hint = snap_ ? "Snap: Move 0.5 | Rotate 15 deg | Scale 0.1" :
+        "LMB select | RMB/Alt+LMB orbit | MMB pan | Wheel zoom | F focus";
+    const ImVec2 textPos = ImGui::GetCursorScreenPos();
+    const ImVec2 textSize = ImGui::CalcTextSize(hint);
+    ImGui::GetWindowDrawList()->AddRectFilled({textPos.x - 4, textPos.y - 2},
+        {textPos.x + textSize.x + 4, textPos.y + textSize.y + 2}, IM_COL32(12, 18, 26, 210), 3);
+    ImGui::TextColored({.85f, .9f, 1.0f, 1.0f}, "%s", hint);
+    ImGui::End();
+    return changed;
+}
+
+} // namespace rae::editor

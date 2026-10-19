@@ -1,0 +1,153 @@
+{
+  "actors": [
+    {
+      "id": 1,
+      "mesh": {
+        "materialId": 1,
+        "meshId": 1
+      },
+      "name": "Sphere",
+      "transform": {
+        "position": [
+          2.3367388248443604,
+          1.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "visible": true
+    },
+    {
+      "id": 2,
+      "mesh": {
+        "materialId": 2,
+        "meshId": 2
+      },
+      "name": "Ground",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "visible": true
+    },
+    {
+      "id": 3,
+      "mesh": {
+        "materialId": 1,
+        "meshId": 1
+      },
+      "name": "Sphere",
+      "transform": {
+        "position": [
+          -2.9411988258361816,
+          1.883859634399414,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "visible": true
+    },
+    {
+      "id": 4,
+      "mesh": {
+        "materialId": 1,
+        "meshId": 3
+      },
+      "name": "Cube",
+      "transform": {
+        "position": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "visible": true
+    }
+  ],
+  "format": "RAEngine.Scene",
+  "materials": [
+    {
+      "baseColor": [
+        0.0,
+        0.09774422645568848,
+        1.0
+      ],
+      "grid": false,
+      "id": 1,
+      "metallic": 0.9459999799728394,
+      "name": "Copper",
+      "roughness": 0.1850000023841858
+    },
+    {
+      "baseColor": [
+        0.2199999988079071,
+        0.25,
+        0.30000001192092896
+      ],
+      "grid": true,
+      "id": 2,
+      "metallic": 0.5059999823570251,
+      "name": "Ground",
+      "roughness": 0.5289999842643738
+    }
+  ],
+  "meshes": [
+    {
+      "id": 1,
+      "name": "Sphere",
+      "primitive": "Sphere"
+    },
+    {
+      "id": 2,
+      "name": "Plane",
+      "primitive": "Plane"
+    },
+    {
+      "id": 3,
+      "name": "Cube",
+      "primitive": "Cube"
+    }
+  ],
+  "version": 1
+}
