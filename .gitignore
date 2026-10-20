@@ -78,6 +78,26 @@ imgui.ini
 /screenshots/
 /artifacts/
 
+# ---------------------------------------------------------------------------
+# Zhihu devlog (local only, never commit)
+#
+# Published articles live in the Baidu sync folder, not this repo.
+# Local drafts/exports must carry the .zhihu tag:
+#   .zhihu/                     staging folder
+#   *.zhihu.md                  article draft
+#   *.zhihu.png / *.zhihu.jpg   image draft
+#   /artifacts/zhihu/           temporary captures
+# The writing spec and ledger (docs/ZhihuSeries*.md) are process docs and stay tracked.
+# ---------------------------------------------------------------------------
+/.zhihu/
+/.zhihu-*/
+*.zhihu.md
+*.zhihu.png
+*.zhihu.jpg
+*.zhihu.jpeg
+Zhihu*
+/artifacts/zhihu/
+
 # Operating system junk
 Thumbs.db
 Desktop.ini
