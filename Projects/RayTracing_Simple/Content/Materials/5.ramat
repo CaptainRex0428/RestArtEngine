@@ -1,0 +1,12 @@
+{
+  "format": "RAEngine.Material",
+  "material": {
+    "baseColor": [0.88, 0.84, 0.98],
+    "grid": false,
+    "id": 5,
+    "metallic": 1,
+    "name": "TintedMirror",
+    "roughness": 0.07"
+  },
+  "version": 1
+}

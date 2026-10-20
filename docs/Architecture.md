@@ -25,6 +25,7 @@
 | `Projects/Sandbox/Content/Materials/` | Sandbox 工程的材质参数资产。参数资产与 HLSL 源码分开管理。 |
 | `Projects/Sandbox/Content/Meshes/` | Sandbox 工程的 OBJ 源文件；编辑器导入时复制至当前工程的 Meshes 目录。 |
 | `Projects/Sandbox/Shaders/Materials/Standard.hlsli` | Sandbox 工程可编辑的共享材质 Shader，编辑器 Apply / Save 的源码入口。 |
+| `Projects/RayTracing_Simple/` | 光追测试示例（纯数据）：康奈尔盒 + 两个镜面球，用于观察 `--rt` 解析光追的反射与阴影差异；与 Sandbox 一样通过 `RestArtEngine.exe` 打开，不生成自己的 `.sln`。 |
 | `app/MinimalApp.cpp` | 引擎可执行入口：Win32 窗口、消息循环、Project Manager、编辑器启动、启动加载界面、命令行解析。 |
 | `app/EditorSmoke.cpp` | 引擎 GPU 自测：通过 ImGui 上下文钩子注入真实鼠标/键盘，验证拾取、gizmo、材质与 Shader 流程（`--editor-self-test`）。 |
 | `scripts/` | 引擎验证脚本：`Validate-Render.ps1` 跑渲染自测并比对截图，`Test-Window.ps1` 验证窗口生命周期。 |
@@ -37,20 +38,26 @@
 
 ## 工程描述与路径
 
-默认工程位于 `Projects/Sandbox/`。`.raproject` 中的路径相对描述文件所在目录解析：
+示例工程位于 `Projects/`（`Sandbox` 通用演示、`RayTracing_Simple` 光追测试）。`.raproject` 中的路径相对描述文件所在目录解析：
 
 ```text
-RestArtEngine/                         引擎仓库根目录
+RestArtEngine/                          引擎仓库根目录
 ├─ include/RestArtEngine/、src/         引擎与编辑器源码
-├─ Shaders/                       引擎公共管线与默认模板
+├─ Shaders/                        引擎公共管线与默认模板
 └─ Projects/
-   └─ Sandbox/                    一个独立工程
-      ├─ Sandbox.raproject
-      ├─ Content/                 该工程的资产根目录
+   ├─ Sandbox/                     通用演示工程
+   │  ├─ Sandbox.raproject
+   │  ├─ Content/                  该工程的资产根目录
+   │  │  ├─ Scenes/Default.rascene
+   │  │  ├─ Materials/*.ramat
+   │  │  └─ Meshes/*.obj
+   │  └─ Shaders/Materials/Standard.hlsli
+   └─ RayTracing_Simple/           光追测试工程（康奈尔盒 + 镜面球）
+      ├─ RayTracing_Simple.raproject
+      ├─ Content/
       │  ├─ Scenes/Default.rascene
-      │  ├─ Materials/*.ramat
-      │  └─ Meshes/*.obj
-       ├─ Shaders/Materials/Standard.hlsli
+      │  └─ Materials/*.ramat
+      └─ Shaders/Materials/Standard.hlsli
 ```
 
 `Projects/` 是示例工程的存放约定，并非强制位置。独立工程也可以放在仓库外，用 `.raproject` 的 `engineRoot` 引用这个引擎；工程 Content 不归引擎管理，也不要求根目录存在 `Content/`。

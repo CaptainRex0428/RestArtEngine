@@ -1,0 +1,12 @@
+{
+  "format": "RAEngine.Material",
+  "material": {
+    "baseColor": [0.96, 0.96, 0.96],
+    "grid": false,
+    "id": 4,
+    "metallic": 1,
+    "name": "Mirror",
+    "roughness": 0.03"
+  },
+  "version": 1
+}

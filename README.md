@@ -184,6 +184,11 @@ Projects/Sandbox/            <- 纯数据示例工程
   Content/Materials/*.ramat
   Content/Meshes/*.obj
   Shaders/Materials/Standard.hlsli
+Projects/RayTracing_Simple/ <- 光追测试工程
+  RayTracing_Simple.raproject
+  Content/Scenes/Default.rascene
+  Content/Materials/*.ramat
+  Shaders/Materials/Standard.hlsli
 ```
 
 `.raproject` 示例：
@@ -208,6 +213,20 @@ Projects/Sandbox/            <- 纯数据示例工程
 - `engineVersion` / `engineHash`：绑定身份，与引擎根目录的 `Engine.raeengine` 比对。恢复只接受版本匹配的引擎，切换版本仍需在 Project Manager 中显式确认。
 
 版本或 hash 不匹配时，Project Manager 提供「使用引用的引擎」「更新到当前引擎」「选择引擎…」；`engineRoot` 失效时会尝试按关联自动恢复，恢复不了则明确提示无法打开。
+
+仓库自带两个示例工程，Project Manager 扫描 `Projects/*/*.raproject` 自动列出：
+
+| 工程 | 用途 |
+| --- | --- |
+| `Projects/Sandbox` | 通用演示：内置球 / 平面 / 立方体、程序化网格材质、基础光照与阴影。 |
+| `Projects/RayTracing_Simple` | 光追测试：康奈尔盒（红 / 蓝侧墙、白色地面与顶面）+ 两个镜面球。配合 `--rt` 观察解析光追的反射与阴影；关闭 `--rt` 即为纯光栅化对照。 |
+
+```powershell
+# 打开光追测试工程
+.\bin\windows-x86_64\Debug\RestArtEngine.exe Projects\RayTracing_Simple\RayTracing_Simple.raproject --rt
+```
+
+场景结构（`Content/Scenes/Default.rascene`）：房间 5.8 × 3.4 × 6.0，朝 +Z 开口；两侧墙 90° 侧立，地面 / 顶面 / 后墙共 6.0 × 5.8 / 5.8 × 3.4 的面片；两个球半径 0.55 / 0.50，落在 y = 半径 处。材质全部为参数资产（`Content/Materials/*.ramat`），镜面球为 `metallic = 1`、`roughness ≈ 0.03`，红 / 蓝墙 `baseColor` 用于观察颜色溢出。
 
 ## 渲染管线
 

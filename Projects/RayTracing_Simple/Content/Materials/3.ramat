@@ -1,0 +1,12 @@
+{
+  "format": "RAEngine.Material",
+  "material": {
+    "baseColor": [0.82, 0.80, 0.77],
+    "grid": false,
+    "id": 3,
+    "metallic": 0,
+    "name": "Plaster",
+    "roughness": 0.93"
+  },
+  "version": 1
+}

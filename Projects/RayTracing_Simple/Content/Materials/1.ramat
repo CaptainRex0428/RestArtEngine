@@ -1,0 +1,12 @@
+{
+  "format": "RAEngine.Material",
+  "material": {
+    "baseColor": [0.86, 0.10, 0.11],
+    "grid": false,
+    "id": 1,
+    "metallic": 0,
+    "name": "RedWall",
+    "roughness": 0.85"
+  },
+  "version": 1
+}

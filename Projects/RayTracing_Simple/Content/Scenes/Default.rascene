@@ -1,0 +1,32 @@
+{
+  "actors": [
+    { "id": 1, "mesh": { "materialId": 3, "meshId": 2 }, "name": "Floor",
+      "transform": { "position": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0], "scale": [0.241666666666667, 1.0, 0.25] }, "visible": true },
+    { "id": 2, "mesh": { "materialId": 3, "meshId": 2 }, "name": "Ceiling",
+      "transform": { "position": [0.0, 3.4, 0.0], "rotation": [180.0, 0.0, 0.0], "scale": [0.241666666666667, 1.0, 0.25] }, "visible": true },
+    { "id": 3, "mesh": { "materialId": 3, "meshId": 2 }, "name": "BackWall",
+      "transform": { "position": [0.0, 1.7, -3], "rotation": [90.0, 0.0, 0.0], "scale": [0.241666666666667, 1.0, 0.141666666666667] }, "visible": true },
+    { "id": 4, "mesh": { "materialId": 1, "meshId": 2 }, "name": "RedWall",
+      "transform": { "position": [-2.9, 1.7, 0.0], "rotation": [0.0, 0.0, -90.0], "scale": [0.141666666666667, 1.0, 0.25] }, "visible": true },
+    { "id": 5, "mesh": { "materialId": 2, "meshId": 2 }, "name": "BlueWall",
+      "transform": { "position": [2.9, 1.7, 0.0], "rotation": [0.0, 0.0, 90.0], "scale": [0.141666666666667, 1.0, 0.25] }, "visible": true },
+    { "id": 6, "mesh": { "materialId": 4, "meshId": 1 }, "name": "MirrorSphere",
+      "transform": { "position": [1.05, 0.55, 0.35], "rotation": [0.0, 0.0, 0.0], "scale": [0.55, 0.55, 0.55] }, "visible": true },
+    { "id": 7, "mesh": { "materialId": 5, "meshId": 1 }, "name": "TintedSphere",
+      "transform": { "position": [-1.25, 0.50, -0.90], "rotation": [0.0, 0.0, 0.0], "scale": [0.50, 0.50, 0.50] }, "visible": true }
+  ],
+  "format": "RAEngine.Scene",
+  "materials": [
+    { "baseColor": [0.86, 0.10, 0.11], "grid": false, "id": 1, "metallic": 0.0, "name": "RedWall", "roughness": 0.85 },
+    { "baseColor": [0.10, 0.14, 0.80], "grid": false, "id": 2, "metallic": 0.0, "name": "BlueWall", "roughness": 0.85 },
+    { "baseColor": [0.82, 0.80, 0.77], "grid": false, "id": 3, "metallic": 0.0, "name": "Plaster", "roughness": 0.93 },
+    { "baseColor": [0.96, 0.96, 0.96], "grid": false, "id": 4, "metallic": 1.0, "name": "Mirror", "roughness": 0.03 },
+    { "baseColor": [0.88, 0.84, 0.98], "grid": false, "id": 5, "metallic": 1.0, "name": "TintedMirror", "roughness": 0.07 }
+  ],
+  "meshes": [
+    { "id": 1, "name": "Sphere", "primitive": "Sphere" },
+    { "id": 2, "name": "Plane", "primitive": "Plane" },
+    { "id": 3, "name": "Cube", "primitive": "Cube" }
+  ],
+  "version": 1
+}
