@@ -23,6 +23,9 @@ struct Actor {
 class World {
 public:
     std::vector<Actor> actors;
+    // Scene-wide backdrop. false keeps the procedural sky gradient; true renders
+    // a solid black background, which is what the ray-tracing test scene uses.
+    bool blackBackground = false;
     ActorId createActor(std::string name, assets::AssetId mesh, assets::AssetId material);
     bool removeActor(ActorId id);
     ActorId duplicateActor(ActorId id);

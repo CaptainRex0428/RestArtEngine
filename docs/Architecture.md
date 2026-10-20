@@ -123,7 +123,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 ## 文件与持久化
 
-场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
+场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
 
 独立材质存储为工程 `Content/Materials/{id}.ramat`，同样为 JSON，`format` 为 `RAEngine.Material`，`version` 为 `1`。材质文件包含 ID、名称、Base Color、Roughness 与 Metallic。加载场景使用场景内的材质快照；使用 `Reload material assets` 可显式读入工程独立材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
 

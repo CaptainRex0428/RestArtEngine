@@ -15,6 +15,7 @@
     { "id": 7, "mesh": { "materialId": 5, "meshId": 1 }, "name": "TintedSphere",
       "transform": { "position": [-1.25, 0.50, -0.90], "rotation": [0.0, 0.0, 0.0], "scale": [0.50, 0.50, 0.50] }, "visible": true }
   ],
+  "background": "black",
   "format": "RAEngine.Scene",
   "materials": [
     { "baseColor": [0.86, 0.10, 0.11], "grid": false, "id": 1, "metallic": 0.0, "name": "RedWall", "roughness": 0.85 },

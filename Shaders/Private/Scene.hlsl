@@ -506,6 +506,10 @@ float4 OutputSurface(float3 position, float3 normal, Surface material, float2 uv
 
 float4 Background(float2 uv)
 {
+    // cameraPosition.w is the solid-black backdrop flag written by the renderer
+    // (the field is otherwise unused by the shaders). Scenes that ask for a
+    // black backdrop skip the sky gradient entirely.
+    if (cameraPosition.w > 0.5) return float4(0.0, 0.0, 0.0, 1.0);
     float3 sky = lerp(float3(0.035, 0.055, 0.09), float3(0.15, 0.22, 0.32), saturate(uv.y));
     float vignette = 1.0 - 0.22 * dot(uv - 0.5, uv - 0.5);
     return float4(DisplayColor(sky * vignette), 1.0);

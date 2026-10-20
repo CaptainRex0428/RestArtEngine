@@ -91,6 +91,8 @@ bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& 
     try {
         Json value={{"format","RAEngine.Scene"},{"version",1},{"actors",Json::array()},
             {"materials",Json::array()},{"meshes",Json::array()}};
+        // Written only when non-default so existing sky scenes keep their file shape.
+        if (blackBackground) value["background"]="black";
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         for (const auto& material:library.materials) {
             if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
@@ -127,6 +129,12 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
         assets::AssetLibrary builtin; builtin.createDefaults();
         assets::AssetLibrary staged;
         World next;
+        if (value.contains("background")) {
+            if (!value.at("background").is_string()) throw std::runtime_error("Scene background must be a string.");
+            const auto background=value.at("background").get<std::string>();
+            if (background=="black") next.blackBackground=true;
+            else if (background!="sky") throw std::runtime_error("Unsupported scene background: "+background);
+        }
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         for (const auto& item:value.at("materials")) {
             auto material=assets::detail::readMaterial(item);

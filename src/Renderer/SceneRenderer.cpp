@@ -783,6 +783,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     SceneConstants data{};
     XMStoreFloat4x4(&data.viewProjection, view * projection);
     XMStoreFloat4(&data.cameraPosition, eye);
+    // cameraPosition.w is unused by the shaders; reuse it as the "solid black
+    // backdrop" flag so the scene format can switch the sky gradient off
+    // without changing the locked SceneConstants layout.
+    data.cameraPosition.w = world.blackBackground ? 1.0f : 0.0f;
     data.baseColor = XMFLOAT4(settings.baseColor[0], settings.baseColor[1], settings.baseColor[2], 1);
     XMStoreFloat4(&data.lightDirectionIntensity, XMVector3Normalize(XMVectorSet(-3, 6, -2, 0)));
     data.lightDirectionIntensity.w = settings.lightIntensity;
@@ -924,7 +928,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->PSSetShaderResources(0, 5, shadowResources);
     state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     ID3D11RenderTargetView* backbuffer = state.backbuffer.Get();
-    const float backgroundClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
+    const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
     if (settings.path == RenderPath::Deferred) {
         ID3D11RenderTargetView* targets[3]{};
