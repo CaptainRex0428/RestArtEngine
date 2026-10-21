@@ -424,7 +424,7 @@ bool updateProjectEngineBinding(const std::filesystem::path& folderOrManifest,
         // the nested form so external project managers can migrate their own files.
         value["engineVersion"] = engine.version;
         value["engineHash"] = engine.hash;
-        // The named association defaults to the engine version; the launcher
+        // The named association defaults to the engine version; the Project Manager
         // resolves it to an install path while engineRoot stays the cache.
         value["engineAssociation"] = engine.version;
         // engineRoot is resolved relative to the project manifest's folder.

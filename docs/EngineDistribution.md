@@ -46,7 +46,7 @@ cmake --build --preset windows-debug --target RestArtEngine
 .\build\cmake-vs2022\Debug\RestArtEngine.exe
 ```
 
-`RestArtEngine` 是唯一的构建目标，输出 `RestArtEngine.exe`。它同时是 Project Manager（launcher）和编辑器。
+`RestArtEngine` 是唯一的构建目标，输出 `RestArtEngine.exe`。它同时是 Project Manager 和编辑器。
 
 无参数启动时，程序显示 Project Manager。工程管理器可以创建工程、打开 `.raproject`、列出 `Projects/` 下的示例工程（`Sandbox`、`RayTracing_Simple`），或从 `--project` 参数直接进入工程：
 

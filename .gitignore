@@ -87,7 +87,8 @@ imgui.ini
 #   *.zhihu.md                  article draft
 #   *.zhihu.png / *.zhihu.jpg   image draft
 #   /artifacts/zhihu/           temporary captures
-# The writing spec and ledger (docs/ZhihuSeries*.md) are process docs and stay tracked.
+# The writing spec, ledger, and project-local DevLog skill are machine-local
+# process files; published articles remain outside this repository.
 # ---------------------------------------------------------------------------
 /.zhihu/
 /.zhihu-*/
@@ -95,8 +96,10 @@ imgui.ini
 *.zhihu.png
 *.zhihu.jpg
 *.zhihu.jpeg
-Zhihu*
 /artifacts/zhihu/
+docs/ZhihuSeries.md
+docs/ZhihuSeriesLedger.md
+.agents/skills/restarengine-devlog/
 
 # Operating system junk
 Thumbs.db

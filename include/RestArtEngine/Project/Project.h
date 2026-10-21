@@ -56,7 +56,7 @@ struct ProjectPaths {
     // a legacy project and it can be upgraded by the project manager.
     std::string engineVersion;
     std::string engineHash;
-    // Named engine association (UE-style). The launcher resolves it through
+    // Named engine association (UE-style). The Project Manager resolves it through
     // the engine registry; engineRoot remains a concrete fallback/cache so a
     // project can still be opened directly with --project.
     std::string engineAssociation;
@@ -80,7 +80,7 @@ struct ProjectBuildFiles {
 };
 
 // Just the manifest identity/link fields, read without resolving or validating
-// the engine link. The launcher uses this to recover a project whose engineRoot
+// the Project Manager uses this to recover a project whose engineRoot
 // is missing or stale by resolving `engineAssociation` through the registry.
 struct ProjectManifestInfo {
     std::filesystem::path manifest;
@@ -92,7 +92,7 @@ struct ProjectManifestInfo {
 };
 
 // A per-user registry of installed engines, keyed by a named association.  The
-// launcher resolves a project's `engineAssociation` through this list when a
+// Project Manager resolves a project's `engineAssociation` through this list when a
 // project's cached engineRoot is missing or the user switches engine versions.
 struct EngineRegistryEntry {
     std::string association;
@@ -151,7 +151,7 @@ bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& re
 
 // Reads only the manifest identity/link fields (name, association, version,
 // hash) without resolving or validating engineRoot. Returns false for a broken
-// manifest. Used by the launcher to recover a project whose engineRoot is
+// manifest. Used by the Project Manager to recover a project whose engineRoot is
 // missing or stale by resolving engineAssociation through the registry.
 bool loadProjectManifestInfo(const std::filesystem::path& folderOrManifest, ProjectManifestInfo& result, std::string& error);
 } // namespace rae::project

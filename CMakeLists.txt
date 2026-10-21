@@ -22,10 +22,10 @@ target_include_directories(DearImGui PUBLIC
 target_include_directories(DearImGui PRIVATE vendor/imgui/backends)
 target_link_libraries(DearImGui PRIVATE d3d11 dxgi d3dcompiler dwmapi)
 
-# The single engine executable: project manager (launcher), editor, and renderer.
+# The single engine executable: project manager, editor, and renderer.
 # It owns the project selection screen and editor entry point; users build and
 # run `RestArtEngine` directly. The project manager doubles as the version selector,
-# so there is no separate launcher target.
+# so there is no separate project-manager target.
 add_executable(RestArtEngine
     app/MinimalApp.cpp
     app/EditorSmoke.cpp

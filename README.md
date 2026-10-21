@@ -23,7 +23,7 @@ A C++20 / DirectX 11 scene rendering engine and editor for technical artists
 
 RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestArtEngine.vcxproj`（或 CMake 目标 `RestArtEngine`）得到 `RestArtEngine.exe`，它同时扮演两个角色——
 
-- **Project Manager（launcher）**：不带参数启动时显示，用于创建 / 打开 / 选择 `.raproject` 工程；
+- **Project Manager**：不带参数启动时显示，用于创建 / 打开 / 选择 `.raproject` 工程；
 - **场景编辑器**：带 `--project` 启动时直接进入，编辑 Actor、静态 Mesh、材质与 HLSL。
 
 工程（`.raproject`）是**纯数据**：`Content/` 场景与材质、工程自己的 `Shaders/`。它不包含 C++ 代码，也不生成自己的 `.sln`；编译引擎永远只打开仓库根目录的 `RestArtEngine.sln`。
@@ -135,7 +135,7 @@ CMake 目标：
 ## 快速开始
 
 ```powershell
-# 1) 打开工程管理器（launcher）
+# 1) 打开工程管理器
 .\build\cmake-vs2022\Debug\RestArtEngine.exe
 
 # 2) 直接打开示例工程（等价写法：--project Projects\Sandbox\Sandbox.raproject）

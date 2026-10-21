@@ -79,7 +79,14 @@ try {
     if(-not $process.WaitForExit(10000)) {throw 'Application did not close after WM_CLOSE'}
     if($process.ExitCode -ne 0) {throw "Application exit code: $($process.ExitCode)"}
     $events.Add('PASS: WM_CLOSE ends the application with exit code 0.')
-    $events.Add((Get-Content (Join-Path $outputDir 'stdout.txt') -Raw).Trim())
+    $stdoutPath = Join-Path $outputDir 'stdout.txt'
+    if (Test-Path -LiteralPath $stdoutPath) {
+        $stdoutContent = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $stdoutContent) {
+            $stdout = $stdoutContent.Trim()
+            if ($stdout) { $events.Add($stdout) }
+        }
+    }
     $events | Set-Content -LiteralPath (Join-Path $root 'artifacts/window-test.txt') -Encoding utf8
     $events
 } finally {
