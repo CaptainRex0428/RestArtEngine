@@ -158,25 +158,21 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
 } // namespace
 
 bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
-                               const assets::AssetLibrary& assets, scene::ActorId& selected, bool floating) {
+                               const assets::AssetLibrary& assets, scene::ActorId& selected,
+                               bool inputBlocked) {
     hovered_ = focused_ = false;
     if (settings.viewportWidth < 1 || settings.viewportHeight < 1) { usingGizmo_ = false; return false; }
     ImGuizmo::BeginFrame();
-    const ImGuiCond placement = floating ? ImGuiCond_FirstUseEver : ImGuiCond_Always;
-    ImGui::SetNextWindowPos({static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY)}, placement);
-    ImGui::SetNextWindowSize({static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight)}, placement);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
-    if (!floating) flags |= ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    // The viewport is the renderer's screen-space surface. Keep its rectangle
+    // tied to SceneSettings so picking, gizmos and GPU rendering share one
+    // coordinate system; the surrounding editor panels remain native windows.
+    ImGui::SetNextWindowPos({static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY)}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight)}, ImGuiCond_Always);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground |
+        ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (inputBlocked) flags |= ImGuiWindowFlags_NoInputs;
     ImGui::Begin("Scene Viewport##Interaction", nullptr, flags);
-    if (floating) {
-        const auto position = ImGui::GetWindowPos();
-        const auto size = ImGui::GetWindowSize();
-        settings.viewportX = static_cast<int>(position.x);
-        settings.viewportY = static_cast<int>(position.y);
-        settings.viewportWidth = static_cast<int>(size.x);
-        settings.viewportHeight = static_cast<int>(size.y);
-    }
     hovered_ = ImGui::IsWindowHovered();
     focused_ = ImGui::IsWindowFocused();
     const bool popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);

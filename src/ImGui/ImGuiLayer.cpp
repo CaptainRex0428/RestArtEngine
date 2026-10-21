@@ -99,6 +99,11 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
     frameCount_ = 0;
     auto& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Use Dear ImGui's native window interaction for the editor panels:
+    // title bars move windows and borders resize them without custom layout
+    // bookkeeping in SceneEditor.
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
+    io.ConfigWindowsResizeFromEdges = true;
     io.IniFilename = nullptr;
     io.Fonts->AddFontDefault();
     // Keep the built-in monospace Latin glyphs and merge a locally installed CJK font.

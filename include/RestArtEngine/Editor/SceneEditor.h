@@ -6,13 +6,13 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace rae::editor {
 
 // UI orchestration is isolated from the runtime scene/assets and renderer.
 class SceneEditor {
 public:
-    void setLayoutPersistence(bool enabled) { layoutPersistenceEnabled_ = enabled; }
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
     void requestClose() { closeRequested_ = true; }
@@ -47,16 +47,8 @@ private:
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
     bool expandedEditor_ = false;
-    bool outlinerFloating_ = false;
-    bool detailsFloating_ = false;
-    bool settingsFloating_ = false;
-    bool contentFloating_ = false;
-    bool viewportFloating_ = false;
-    bool layoutPersistenceEnabled_ = false;
-    int savedLayoutMask_ = -1;
-
-    void loadLayoutState();
-    void saveLayoutState();
+    struct PanelLayoutEntry { float x = 0, y = 0, width = 0, height = 0; };
+    std::vector<PanelLayoutEntry> panelLayout_;
 };
 
 // Resolve from --project, working directory, then executable ancestors.

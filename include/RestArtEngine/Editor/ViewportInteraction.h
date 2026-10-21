@@ -9,7 +9,7 @@ namespace rae::editor {
 class ViewportInteraction {
 public:
     bool draw(renderer::SceneSettings&, scene::World&, const assets::AssetLibrary&,
-              scene::ActorId& selected, bool floating = false);
+              scene::ActorId& selected, bool inputBlocked = false);
     bool isUsing() const { return usingGizmo_; }
     bool isHovered() const { return hovered_; }
     bool isFocused() const { return focused_; }

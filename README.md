@@ -148,7 +148,7 @@ CMake 目标：
 - Content 页签导入 OBJ、编辑材质、编辑 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
-顶部左侧的 `Layout` 按钮可以把 Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 切换为悬浮面板。悬浮面板支持拖动、调宽高和重新排列；`Dock all panels` 恢复默认布局。交互式编辑器会把布局保存到本机的 `RestArtEngine.imgui.ini`，Content 内的编辑器标签也支持拖拽重排。
+顶部左侧的 `Layout` 按钮提供布局提示和重置入口。Outliner、Details、Viewport settings 和 Content & Editors 都是 Dear ImGui 原生窗口，默认可直接拖动标题栏、调整窗口宽高和重新排列；窗口靠近屏幕或其他面板边缘释放时会自动吸附，Scene Viewport 会按贴边面板重新计算大小并覆盖在其后方，避免黑色空洞。窗口位置、尺寸和标签顺序由本机的 `RestArtEngine.imgui.ini` 保存。Scene Viewport 保持与渲染和拾取坐标同步，Content 内的编辑器标签也支持拖拽重排。
 
 ## 场景操作
 

@@ -245,6 +245,47 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         "Editor viewport does not expose the selectable shadow method control.");
     SmokeInput input;
     input.attach(context);
+    const auto findWindow = [&](const char* name) {
+        for (auto* window : context->Windows)
+            if (std::strcmp(window->Name, name) == 0) return window;
+        return static_cast<ImGuiWindow*>(nullptr);
+    };
+    // Moving the bottom editor panel into the middle must release the bottom
+    // edge and give the renderer the newly available height. Releasing it
+    // near the edge snaps it back and restores the original viewport reserve.
+    if (auto* content = findWindow("Content & Editors")) {
+        const int initialHeight = settings.viewportHeight;
+        const ImVec2 start{content->Pos.x + 70.0f, content->Pos.y + 10.0f};
+        input.mouse = start;
+        capture("ui_layout", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+        capture("ui_layout", true);
+        input.mouse = {start.x + 120.0f, 180.0f};
+        capture("ui_layout", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+        capture("ui_layout", true);
+        // SceneEditor applies the newly recorded panel layout on the next
+        // frame so the viewport and panel draw order stay stable.
+        capture("ui_layout", true);
+        require(settings.viewportHeight > initialHeight + 80,
+            "Moving Content & Editors did not release the bottom viewport reserve.");
+        content = findWindow("Content & Editors");
+        require(content != nullptr, "Content & Editors window disappeared after moving.");
+        const ImVec2 restoreStart{content->Pos.x + 70.0f, content->Pos.y + 10.0f};
+        input.mouse = restoreStart;
+        capture("ui_layout", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+        capture("ui_layout", true);
+        input.mouse = {2.0f, static_cast<float>(settings.viewportHeight + settings.viewportY - content->Size.y + 2.0f)};
+        capture("ui_layout", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+        capture("ui_layout", true);
+        capture("ui_layout", true);
+        require(settings.viewportHeight <= initialHeight + 8,
+            "Content & Editors did not snap back to the bottom edge. viewport=" +
+            std::to_string(settings.viewportHeight) + " initial=" + std::to_string(initialHeight) +
+            ".");
+    }
     const auto click = [&](ImVec2 position) {
         input.mouse = position;
         // Establish hover before pressing: tab items intentionally reject same-frame

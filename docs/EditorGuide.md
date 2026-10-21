@@ -12,7 +12,7 @@
 
 ## 面板布局
 
-编辑器顶部左侧的 **Layout** 小按钮打开面板布局菜单。默认布局把 Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 放在固定区域；勾选某个面板的 **floating** 选项后，该面板会变成可拖动、可调整宽高的独立窗口。悬浮面板可以拖到任意位置，多个面板可以通过标题栏拖拽重新排列；视口也支持同样的悬浮方式。**Dock all panels** 恢复默认区域，**Float all panels** 便于一次性整理布局，**Reset saved layout** 清除本机保存的面板位置和尺寸。
+编辑器顶部左侧的 **Layout** 小按钮打开布局菜单。Outliner、Details、Viewport settings 和 Content & Editors 使用 Dear ImGui 原生窗口；直接拖动标题栏或窗口边框即可移动和调整宽高，多个窗口可以自由重排。窗口释放时靠近屏幕边缘或其他面板边缘会自动吸附、贴合；贴边面板覆盖的区域会从 Scene Viewport 中扣除，视口随布局重新计算大小，不会留下黑色空洞。**Reset saved layout** 清除本机保存的窗口位置、尺寸和标签顺序。Scene Viewport 是渲染器的屏幕空间表面，保持与渲染和拾取坐标同步，由周围面板的布局决定大小。
 
 交互式编辑器会把窗口布局保存到本机的 `RestArtEngine.imgui.ini`，重启引擎后继续使用上次的布局。自动化自测不加载该文件，以保持截图和验证结果稳定。Content & Editors 内部的 Meshes、Material Editor、Shader Editor 标签支持拖拽重排。
 

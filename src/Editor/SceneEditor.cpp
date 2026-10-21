@@ -10,6 +10,8 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <utility>
+#include <vector>
 
 namespace rae::editor {
 namespace {
@@ -34,14 +36,121 @@ const char* meshType(assets::MeshPrimitive type) {
     }
 }
 constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoCollapse;
-void beginPanel(const char* name, ImVec2 position, ImVec2 size, bool floating,
+struct PanelRect {
+    const char* name = nullptr;
+    ImVec2 position{};
+    ImVec2 size{};
+};
+
+constexpr float panelSnapDistance = 14.0f;
+
+void snapPanelToEdges(ImVec2& position, const ImVec2& size, const ImVec2& display,
+                      const std::vector<PanelRect>& existing) {
+    const float toolbarBottom = 90.0f;
+    if (std::abs(position.x) <= panelSnapDistance) position.x = 0.0f;
+    if (std::abs(position.x + size.x - display.x) <= panelSnapDistance)
+        position.x = std::max(0.0f, display.x - size.x);
+    if (std::abs(position.y - toolbarBottom) <= panelSnapDistance) position.y = toolbarBottom;
+    if (std::abs(position.y + size.y - display.y) <= panelSnapDistance)
+        position.y = std::max(toolbarBottom, display.y - size.y);
+    for (const auto& panel : existing) {
+        const bool overlapsY = position.y < panel.position.y + panel.size.y &&
+            position.y + size.y > panel.position.y;
+        const bool overlapsX = position.x < panel.position.x + panel.size.x &&
+            position.x + size.x > panel.position.x;
+        if (overlapsY) {
+            if (std::abs(position.x - (panel.position.x + panel.size.x)) <= panelSnapDistance)
+                position.x = panel.position.x + panel.size.x;
+            if (std::abs(position.x + size.x - panel.position.x) <= panelSnapDistance)
+                position.x = panel.position.x - size.x;
+        }
+        if (overlapsX) {
+            if (std::abs(position.y - (panel.position.y + panel.size.y)) <= panelSnapDistance)
+                position.y = panel.position.y + panel.size.y;
+            if (std::abs(position.y + size.y - panel.position.y) <= panelSnapDistance)
+                position.y = panel.position.y - size.y;
+        }
+    }
+    position.x = std::clamp(position.x, 0.0f, std::max(0.0f, display.x - size.x));
+    position.y = std::clamp(position.y, toolbarBottom, std::max(toolbarBottom, display.y - size.y));
+}
+
+void recordPanel(std::vector<PanelRect>& panels, const char* name, const ImVec2& display) {
+    ImVec2 position = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    // Snap only when the drag/resize ends. This leaves ImGui in charge while
+    // the user is moving a window and avoids fighting its internal state.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+        (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) ||
+         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))) {
+        snapPanelToEdges(position, size, display, panels);
+        ImGui::SetWindowPos(position, ImGuiCond_Always);
+    }
+    panels.push_back({name, position, size});
+}
+
+void computeViewportRect(const std::vector<PanelRect>& panels, const ImVec2& display,
+                         renderer::SceneSettings& settings) {
+    const float top = 90.0f;
+    float left = 0.0f, right = display.x, bottom = display.y;
+    for (const auto& panel : panels) {
+        const bool overlapsEditor = panel.position.y < display.y &&
+            panel.position.y + panel.size.y > top;
+        if (!overlapsEditor) continue;
+        if (std::abs(panel.position.y + panel.size.y - display.y) <= panelSnapDistance &&
+            std::abs(panel.position.x) <= panelSnapDistance &&
+            panel.size.x >= display.x * .7f)
+            bottom = std::min(bottom, panel.position.y);
+    }
+    const float coverageHeight = std::max(1.0f, bottom - top);
+    const auto edgeCoverage = [&](bool leftEdge) {
+        std::vector<std::pair<float, float>> intervals;
+        for (const auto& panel : panels) {
+            const bool touches = leftEdge
+                ? std::abs(panel.position.x) <= panelSnapDistance
+                : std::abs(panel.position.x + panel.size.x - display.x) <= panelSnapDistance;
+            if (!touches) continue;
+            const float begin = std::max(top, panel.position.y);
+            const float end = std::min(bottom, panel.position.y + panel.size.y);
+            if (end > begin) intervals.push_back({begin, end});
+        }
+        std::sort(intervals.begin(), intervals.end());
+        float covered = 0.0f, begin = 0.0f, end = 0.0f;
+        for (const auto& interval : intervals) {
+            if (end <= begin) { begin = interval.first; end = interval.second; }
+            else if (interval.first <= end) end = std::max(end, interval.second);
+            else { covered += end - begin; begin = interval.first; end = interval.second; }
+        }
+        if (end > begin) covered += end - begin;
+        return covered / coverageHeight;
+    };
+    if (edgeCoverage(true) >= .7f) {
+        for (const auto& panel : panels)
+            if (std::abs(panel.position.x) <= panelSnapDistance)
+                left = std::max(left, panel.position.x + panel.size.x);
+    }
+    if (edgeCoverage(false) >= .7f) {
+        for (const auto& panel : panels)
+            if (std::abs(panel.position.x + panel.size.x - display.x) <= panelSnapDistance)
+                right = std::min(right, panel.position.x);
+    }
+    const float width = right - left;
+    const float height = bottom - top;
+    if (width < 64.0f || height < 64.0f) return;
+    settings.viewportX = static_cast<int>(left);
+    settings.viewportY = static_cast<int>(top);
+    settings.viewportWidth = static_cast<int>(width);
+    settings.viewportHeight = static_cast<int>(height);
+}
+
+void beginPanel(const char* name, ImVec2 position, ImVec2 size,
                 ImGuiWindowFlags extra = 0) {
-    const ImGuiCond placement = floating ? ImGuiCond_FirstUseEver : ImGuiCond_Always;
-    ImGui::SetNextWindowPos(position, placement);
-    ImGui::SetNextWindowSize(size, placement);
-    ImGuiWindowFlags flags = panelFlags | extra;
-    if (!floating) flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    ImGui::Begin(name, nullptr, flags);
+    // Regular Dear ImGui windows are movable and resizable by default. The
+    // initial editor arrangement is only a first-use hint; afterward ImGui's
+    // .ini settings own the position and size.
+    ImGui::SetNextWindowPos(position, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    ImGui::Begin(name, nullptr, panelFlags | extra);
 }
 void message(const std::string& text) {
     if (!text.empty()) ImGui::TextWrapped("%s", text.c_str());
@@ -51,38 +160,6 @@ std::string pathText(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
 }
 
-constexpr const char* panelLayoutFile = "RestArtEngine.panels.ini";
-
-}
-
-void SceneEditor::loadLayoutState() {
-    if (!layoutPersistenceEnabled_) return;
-    std::ifstream input(panelLayoutFile);
-    int mask = -1;
-    if (input) input >> mask;
-    if (mask < 0 || mask > 31) return;
-    outlinerFloating_ = (mask & 1) != 0;
-    detailsFloating_ = (mask & 2) != 0;
-    settingsFloating_ = (mask & 4) != 0;
-    contentFloating_ = (mask & 8) != 0;
-    viewportFloating_ = (mask & 16) != 0;
-    savedLayoutMask_ = mask;
-}
-
-void SceneEditor::saveLayoutState() {
-    if (!layoutPersistenceEnabled_) return;
-    // Kept as a compact bit mask so the file remains readable and easy to
-    // migrate when a panel is added later.
-    const int mask = (outlinerFloating_ ? 1 : 0) |
-        (detailsFloating_ ? 2 : 0) |
-        (settingsFloating_ ? 4 : 0) |
-        (contentFloating_ ? 8 : 0) |
-        (viewportFloating_ ? 16 : 0);
-    if (mask == savedLayoutMask_) return;
-    std::ofstream output(panelLayoutFile, std::ios::trunc);
-    if (!output) return;
-    output << mask << '\n';
-    savedLayoutMask_ = mask;
 }
 
 project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject,
@@ -118,7 +195,6 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
 }
 bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
     project_ = project;
-    loadLayoutState();
     assets_.createDefaults();
     world_.createDefaultScene();
     const auto scenePath = project_.defaultScene;
@@ -482,35 +558,35 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     const float side = display.x < 1200 ? 230.0f : 280.0f;
     const float bottom = expandedEditor_ ? display.y * .65f : std::clamp(display.y * .34f, 220.0f, 360.0f);
     const float middle = display.y - 100 - bottom;
-    settings.viewportX = static_cast<int>(side);
-    settings.viewportY = 90;
-    settings.viewportWidth = static_cast<int>(display.x - 2 * side);
-    settings.viewportHeight = static_cast<int>(middle);
-    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90}, false,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+    std::vector<PanelRect> panels;
+    // Reserve the renderer surface from the panel layout collected during the
+    // previous frame. Panels are drawn after the viewport below, so detached
+    // windows stay visible above the scene while the viewport reflows.
+    if (!panelLayout_.empty()) {
+        std::vector<PanelRect> previousPanels;
+        previousPanels.reserve(panelLayout_.size());
+        for (const auto& entry : panelLayout_)
+            previousPanels.push_back({nullptr, {entry.x, entry.y}, {entry.width, entry.height}});
+        computeViewportRect(previousPanels, display, settings);
+    }
+    if (settings.viewportWidth < 1 || settings.viewportHeight < 1) {
+        settings.viewportX = static_cast<int>(side);
+        settings.viewportY = 90;
+        settings.viewportWidth = static_cast<int>(display.x - 2 * side);
+        settings.viewportHeight = static_cast<int>(middle);
+    }
+    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90},
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
     if (ImGui::SmallButton("Layout")) ImGui::OpenPopup("Editor layout");
     if (ImGui::BeginPopup("Editor layout")) {
-        ImGui::TextDisabled("Drag floating panels to rearrange them");
+        ImGui::TextDisabled("Drag title bars or resize borders to rearrange panels");
         ImGui::Separator();
-        ImGui::Checkbox("World Outliner floating", &outlinerFloating_);
-        ImGui::Checkbox("Details floating", &detailsFloating_);
-        ImGui::Checkbox("Viewport settings floating", &settingsFloating_);
-        ImGui::Checkbox("Content & Editors floating", &contentFloating_);
-        ImGui::Checkbox("Scene Viewport floating", &viewportFloating_);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Dock all panels")) {
-            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = false;
-        }
-        if (ImGui::MenuItem("Float all panels")) {
-            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = true;
-        }
         if (ImGui::MenuItem("Reset saved layout")) {
             ImGui::LoadIniSettingsFromMemory("", 0);
-            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = false;
         }
         ImGui::EndPopup();
     }
-    saveLayoutState();
     ImGui::SameLine();
     if (ImGui::Button("Save Scene")) saveScene();
     ImGui::SameLine();
@@ -530,14 +606,28 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::TextDisabled("Project: %s | DX11 / %s | %.1f FPS | F1 UI, F2 pipeline, F3 rays, RMB orbit, wheel zoom",
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
-    beginPanel("World Outliner", {0, 90}, {side, middle * .42f}, outlinerFloating_);
-    drawOutliner(); ImGui::End();
-    beginPanel("Details", {0, 90 + middle * .42f}, {side, middle * .58f}, detailsFloating_);
+
+    // Render the scene first so regular ImGui panels can cover it when they
+    // are moved into the middle or attached to another panel edge.
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    bool panelUnderMouse = false;
+    for (const auto& panel : panelLayout_) {
+        panelUnderMouse |= mouse.x >= panel.x && mouse.x <= panel.x + panel.width &&
+            mouse.y >= panel.y && mouse.y <= panel.y + panel.height;
+    }
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, panelUnderMouse);
+
+    beginPanel("World Outliner", {0, 90}, {side, middle * .42f});
+    drawOutliner();
+    recordPanel(panels, "World Outliner", display);
+    ImGui::End();
+    beginPanel("Details", {0, 90 + middle * .42f}, {side, middle * .58f});
     drawDetails();
     actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    recordPanel(panels, "Details", display);
     ImGui::End();
 
-    beginPanel("Viewport settings", {display.x - side, 90}, {side, middle}, settingsFloating_);
+    beginPanel("Viewport settings", {display.x - side, 90}, {side, middle});
     ImGui::TextDisabled("Scene");
     ImGui::Text("Actors: %zu", world_.actors.size());
     ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
@@ -580,9 +670,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     message(renderer.rayTracingStatus(world_, assets_));
     ImGui::SeparatorText("Activity");
     message(status_);
+    recordPanel(panels, "Viewport settings", display);
     ImGui::End();
 
-    beginPanel("Content & Editors", {0, display.y - bottom}, {display.x, bottom}, contentFloating_);
+    beginPanel("Content & Editors", {0, display.y - bottom}, {display.x, bottom});
     if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
         if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
@@ -593,8 +684,12 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         }
         ImGui::EndTabBar();
     }
+    recordPanel(panels, "Content & Editors", display);
     ImGui::End();
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, viewportFloating_);
+    panelLayout_.clear();
+    panelLayout_.reserve(panels.size());
+    for (const auto& panel : panels)
+        panelLayout_.push_back({panel.position.x, panel.position.y, panel.size.x, panel.size.y});
     if (!ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))

@@ -586,7 +586,6 @@ int wmain(int argc, wchar_t** argv) {
         if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
-        editor.setLayoutPersistence(interactive);
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
         if (editorSelfTest) {
             runEditorSmoke(renderer, ui, editor, project, captureDir);
