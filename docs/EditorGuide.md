@@ -10,6 +10,18 @@
 
 如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格列表、材质编辑与 Shader 编辑页；尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。较长的源码可勾选 `Expand editor` 扩大底部编辑区域。
 
+## 面板布局
+
+编辑器顶部左侧的 **Layout** 小按钮打开面板布局菜单。默认布局把 Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 放在固定区域；勾选某个面板的 **floating** 选项后，该面板会变成可拖动、可调整宽高的独立窗口。悬浮面板可以拖到任意位置，多个面板可以通过标题栏拖拽重新排列；视口也支持同样的悬浮方式。**Dock all panels** 恢复默认区域，**Float all panels** 便于一次性整理布局，**Reset saved layout** 清除本机保存的面板位置和尺寸。
+
+交互式编辑器会把窗口布局保存到本机的 `RestArtEngine.imgui.ini`，重启引擎后继续使用上次的布局。自动化自测不加载该文件，以保持截图和验证结果稳定。Content & Editors 内部的 Meshes、Material Editor、Shader Editor 标签支持拖拽重排。
+
+## Rider 编译按钮
+
+Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild Selected Projects** 动作，不生成额外的 Shell Run Configuration。右键主工具栏选择 **Customize Toolbar**，在 **Build bar** 下添加对应动作即可；需要图标时，在同一处使用 **Edit Icon** 选择 Rider 内置图标。该按钮只执行编译，不会自动启动 `RestArtEngine.exe`。工具栏和图标属于 Rider 的全局 `customization.xml`，不由 Premake 写入项目 `.idea`。
+
+如果点击绿色运行按钮后出现 `Process creation exception`，那是启动配置的问题，不是编译失败。重新生成 Premake 工程后，`RestArtEngine.vcxproj.user` 会为 Debug、Release 和 Dist 写入正确的 `RestArtEngine.exe` 调试路径。
+
 ## Actor 与 Mesh
 
 1. 在 Outliner 中选择 Actor，或直接左键点击视口中的网格。Details 显示其名称、可见性、位置、旋转与缩放。

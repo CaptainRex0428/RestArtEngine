@@ -33,12 +33,15 @@ const char* meshType(assets::MeshPrimitive type) {
     default: return "Imported OBJ";
     }
 }
-constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
-void beginPanel(const char* name, ImVec2 position, ImVec2 size, ImGuiWindowFlags extra = 0) {
-    ImGui::SetNextWindowPos(position);
-    ImGui::SetNextWindowSize(size);
-    ImGui::Begin(name, nullptr, panelFlags | extra);
+constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoCollapse;
+void beginPanel(const char* name, ImVec2 position, ImVec2 size, bool floating,
+                ImGuiWindowFlags extra = 0) {
+    const ImGuiCond placement = floating ? ImGuiCond_FirstUseEver : ImGuiCond_Always;
+    ImGui::SetNextWindowPos(position, placement);
+    ImGui::SetNextWindowSize(size, placement);
+    ImGuiWindowFlags flags = panelFlags | extra;
+    if (!floating) flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    ImGui::Begin(name, nullptr, flags);
 }
 void message(const std::string& text) {
     if (!text.empty()) ImGui::TextWrapped("%s", text.c_str());
@@ -48,6 +51,38 @@ std::string pathText(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
 }
 
+constexpr const char* panelLayoutFile = "RestArtEngine.panels.ini";
+
+}
+
+void SceneEditor::loadLayoutState() {
+    if (!layoutPersistenceEnabled_) return;
+    std::ifstream input(panelLayoutFile);
+    int mask = -1;
+    if (input) input >> mask;
+    if (mask < 0 || mask > 31) return;
+    outlinerFloating_ = (mask & 1) != 0;
+    detailsFloating_ = (mask & 2) != 0;
+    settingsFloating_ = (mask & 4) != 0;
+    contentFloating_ = (mask & 8) != 0;
+    viewportFloating_ = (mask & 16) != 0;
+    savedLayoutMask_ = mask;
+}
+
+void SceneEditor::saveLayoutState() {
+    if (!layoutPersistenceEnabled_) return;
+    // Kept as a compact bit mask so the file remains readable and easy to
+    // migrate when a panel is added later.
+    const int mask = (outlinerFloating_ ? 1 : 0) |
+        (detailsFloating_ ? 2 : 0) |
+        (settingsFloating_ ? 4 : 0) |
+        (contentFloating_ ? 8 : 0) |
+        (viewportFloating_ ? 16 : 0);
+    if (mask == savedLayoutMask_) return;
+    std::ofstream output(panelLayoutFile, std::ios::trunc);
+    if (!output) return;
+    output << mask << '\n';
+    savedLayoutMask_ = mask;
 }
 
 project::ProjectPaths resolveProject(const std::filesystem::path& explicitProject,
@@ -83,6 +118,7 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
 }
 bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
     project_ = project;
+    loadLayoutState();
     assets_.createDefaults();
     world_.createDefaultScene();
     const auto scenePath = project_.defaultScene;
@@ -450,7 +486,32 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     settings.viewportY = 90;
     settings.viewportWidth = static_cast<int>(display.x - 2 * side);
     settings.viewportHeight = static_cast<int>(middle);
-    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90}, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90}, false,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+    if (ImGui::SmallButton("Layout")) ImGui::OpenPopup("Editor layout");
+    if (ImGui::BeginPopup("Editor layout")) {
+        ImGui::TextDisabled("Drag floating panels to rearrange them");
+        ImGui::Separator();
+        ImGui::Checkbox("World Outliner floating", &outlinerFloating_);
+        ImGui::Checkbox("Details floating", &detailsFloating_);
+        ImGui::Checkbox("Viewport settings floating", &settingsFloating_);
+        ImGui::Checkbox("Content & Editors floating", &contentFloating_);
+        ImGui::Checkbox("Scene Viewport floating", &viewportFloating_);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Dock all panels")) {
+            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = false;
+        }
+        if (ImGui::MenuItem("Float all panels")) {
+            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = true;
+        }
+        if (ImGui::MenuItem("Reset saved layout")) {
+            ImGui::LoadIniSettingsFromMemory("", 0);
+            outlinerFloating_ = detailsFloating_ = settingsFloating_ = contentFloating_ = viewportFloating_ = false;
+        }
+        ImGui::EndPopup();
+    }
+    saveLayoutState();
+    ImGui::SameLine();
     if (ImGui::Button("Save Scene")) saveScene();
     ImGui::SameLine();
     if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
@@ -469,14 +530,14 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::TextDisabled("Project: %s | DX11 / %s | %.1f FPS | F1 UI, F2 pipeline, F3 rays, RMB orbit, wheel zoom",
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
-    beginPanel("World Outliner", {0, 90}, {side, middle * .42f});
+    beginPanel("World Outliner", {0, 90}, {side, middle * .42f}, outlinerFloating_);
     drawOutliner(); ImGui::End();
-    beginPanel("Details", {0, 90 + middle * .42f}, {side, middle * .58f});
+    beginPanel("Details", {0, 90 + middle * .42f}, {side, middle * .58f}, detailsFloating_);
     drawDetails();
     actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     ImGui::End();
 
-    beginPanel("Viewport settings", {display.x - side, 90}, {side, middle});
+    beginPanel("Viewport settings", {display.x - side, 90}, {side, middle}, settingsFloating_);
     ImGui::TextDisabled("Scene");
     ImGui::Text("Actors: %zu", world_.actors.size());
     ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
@@ -521,8 +582,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     message(status_);
     ImGui::End();
 
-    beginPanel("Content & Editors", {0, display.y - bottom}, {display.x, bottom});
-    if (ImGui::BeginTabBar("Editors")) {
+    beginPanel("Content & Editors", {0, display.y - bottom}, {display.x, bottom}, contentFloating_);
+    if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
         if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
             openMaterialTab_ = false; drawMaterial(); ImGui::EndTabItem();
@@ -533,7 +594,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         ImGui::EndTabBar();
     }
     ImGui::End();
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_);
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, viewportFloating_);
     if (!ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))

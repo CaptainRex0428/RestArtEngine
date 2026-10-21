@@ -574,6 +574,7 @@ int wmain(int argc, wchar_t** argv) {
         rae::imgui::ImGuiLayer ui;
         if (!ui.initialize(window.handle, renderer.device(), renderer.context()))
             throw std::runtime_error("Dear ImGui initialization failed");
+        if (interactive) ui.setIniFilename("RestArtEngine.imgui.ini");
         rae::editor::LoadingScreen loading;
         if (interactive) {
             std::string loadingError;
@@ -585,6 +586,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
+        editor.setLayoutPersistence(interactive);
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
         if (editorSelfTest) {
             runEditorSmoke(renderer, ui, editor, project, captureDir);

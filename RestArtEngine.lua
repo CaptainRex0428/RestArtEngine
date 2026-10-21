@@ -53,6 +53,8 @@ project "RestArtEngine"
 	location (LocationDir)
 	targetdir (EXEDir)
 	objdir (ObjectDir)
+	debugcommand (EXEDir .. "/RestArtEngine.exe")
+	debugdir (EXEDir)
 
 	filter "system:windows"
 		systemversion "latest"

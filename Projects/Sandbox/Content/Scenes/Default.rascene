@@ -103,58 +103,6 @@
         ]
       },
       "visible": true
-    },
-    {
-      "id": 5,
-      "mesh": {
-        "materialId": 3,
-        "meshId": 1
-      },
-      "name": "Sphere",
-      "transform": {
-        "position": [
-          6.129081726074219,
-          2.6437721252441406,
-          1.776665449142456
-        ],
-        "rotation": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      },
-      "visible": true
-    },
-    {
-      "id": 6,
-      "mesh": {
-        "materialId": 3,
-        "meshId": 3
-      },
-      "name": "Cube",
-      "transform": {
-        "position": [
-          -5.943134307861328,
-          1.9861724376678467,
-          1.8135199546813965
-        ],
-        "rotation": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      },
-      "visible": true
     }
   ],
   "format": "RAEngine.Scene",

@@ -20,6 +20,9 @@ public:
     void shutdown() noexcept;
     void beginFrame(float deltaSeconds) noexcept;
     void endFrame() noexcept;
+    // Enables persistent window positions/sizes for interactive editor sessions.
+    // Automated validation keeps the default null filename for deterministic frames.
+    void setIniFilename(const char* filename) noexcept;
 
     [[nodiscard]] bool isInitialized() const noexcept { return initialized_; }
     [[nodiscard]] std::uint64_t frameCount() const noexcept { return frameCount_; }

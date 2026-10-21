@@ -148,6 +148,8 @@ CMake 目标：
 - Content 页签导入 OBJ、编辑材质、编辑 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
+顶部左侧的 `Layout` 按钮可以把 Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 切换为悬浮面板。悬浮面板支持拖动、调宽高和重新排列；`Dock all panels` 恢复默认布局。交互式编辑器会把布局保存到本机的 `RestArtEngine.imgui.ini`，Content 内的编辑器标签也支持拖拽重排。
+
 ## 场景操作
 
 | 操作 | 效果 |

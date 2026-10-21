@@ -169,6 +169,14 @@ void ImGuiLayer::endFrame() noexcept {
     previousFrameContext_ = nullptr;
 }
 
+void ImGuiLayer::setIniFilename(const char* filename) noexcept {
+    if (!context_) return;
+    auto* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(context_));
+    ImGui::GetIO().IniFilename = filename;
+    ImGui::SetCurrentContext(previous);
+}
+
 bool ImGuiLayer::handleMessage(void* window, unsigned message,
                                std::uintptr_t wparam, std::intptr_t lparam) {
     if (!window) return false;
