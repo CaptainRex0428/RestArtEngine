@@ -36,6 +36,7 @@ add_executable(RestArtEngine
     src/Scene/World.cpp
     src/Project/Project.cpp
     src/ImGui/ImGuiLayer.cpp
+    src/Editor/EditorDockManager.cpp
     src/Editor/SceneEditor.cpp
     src/Editor/ViewportInteraction.cpp
     src/Editor/LoadingScreen.cpp

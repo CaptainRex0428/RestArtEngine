@@ -8,6 +8,7 @@
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <cmath>
+#include <iostream>
 #include <string>
 
 // The backend intentionally leaves this declaration to its consumer.
@@ -15,7 +16,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 
 namespace rae::imgui {
 namespace {
-constexpr wchar_t contextProperty[] = L"RAEngine.ImGuiLayer";
+// Private property on engine-owned HWNDs. Integer atoms do not allocate from
+// the session-wide string atom table (SetProp with a string can fail with
+// ERROR_NOT_ENOUGH_MEMORY when that table is exhausted).
+const ATOM contextAtom = GlobalAddAtomW(MAKEINTATOM(0x5241));
+const wchar_t* const contextProperty = MAKEINTATOM(contextAtom);
 
 void applyEditorTheme() {
     ImGui::StyleColorsDark();
@@ -84,9 +89,9 @@ ImGuiLayer::~ImGuiLayer() { shutdown(); }
 
 bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceContext* deviceContext) {
     shutdown();
-    if (!window || !device || !deviceContext) return false;
+    if (!window || !device || !deviceContext) { std::cerr << "ImGui: missing window/device/context\n"; return false; }
     const auto hwnd = static_cast<HWND>(window);
-    if (!IsWindow(hwnd) || GetPropW(hwnd, contextProperty)) return false;
+    if (!IsWindow(hwnd) || GetPropW(hwnd, contextProperty)) { std::cerr << "ImGui: invalid or already attached window\n"; return false; }
     IMGUI_CHECKVERSION();
     auto* previous = ImGui::GetCurrentContext();
     context_ = ImGui::CreateContext();
@@ -98,10 +103,9 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
     window_ = window;
     frameCount_ = 0;
     auto& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Use Dear ImGui's native window interaction for the editor panels:
-    // title bars move windows and borders resize them without custom layout
-    // bookkeeping in SceneEditor.
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+    // Native docking owns split/tab/float interactions. Platform multi-viewports
+    // stay disabled: floating panels remain inside the main DX11 swap chain.
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.ConfigWindowsResizeFromEdges = true;
     io.IniFilename = nullptr;
@@ -120,7 +124,13 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
     platformInitialized_ = ImGui_ImplWin32_Init(window);
     if (platformInitialized_) rendererInitialized_ = ImGui_ImplDX11_Init(device, deviceContext);
     initialized_ = platformInitialized_ && rendererInitialized_;
-    if (initialized_ && !SetPropW(hwnd, contextProperty, this)) initialized_ = false;
+    if (initialized_ && !SetPropW(hwnd, contextProperty, this)) {
+        std::cerr << "ImGui: cannot attach window context, Win32 error " << GetLastError() << '\n';
+        initialized_ = false;
+    }
+    if (!platformInitialized_ || !rendererInitialized_)
+        std::cerr << "ImGui: backend initialization failed (platform=" << platformInitialized_
+            << ", renderer=" << rendererInitialized_ << ")\n";
     if (!initialized_) shutdown();
     ImGui::SetCurrentContext(previous);
     return initialized_;

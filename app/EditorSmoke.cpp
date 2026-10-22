@@ -8,6 +8,8 @@
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <array>
+#include <vector>
 
 namespace {
 void require(bool value, const std::string& error) { if (!value) throw std::runtime_error(error); }
@@ -15,6 +17,11 @@ std::string contents(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
 }
+struct ImGuiContextScope {
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    explicit ImGuiContextScope(ImGuiContext* context) { ImGui::SetCurrentContext(context); }
+    ~ImGuiContextScope() { ImGui::SetCurrentContext(previous); }
+};
 // Inject after the Win32 backend gathers input, immediately before ImGui consumes it.
 // This exercises normal widget behavior without moving the user's desktop cursor.
 struct SmokeInput {
@@ -58,6 +65,8 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         ui.beginFrame(1.0f / 60.0f);
         context = ImGui::GetCurrentContext();
         settings.viewportWidth = settings.viewportHeight = 0;
+        settings.editorViewport = false;
+        settings.viewportVisible = true;
         if (drawEditor) {
             bool vsync = false, screenshot = false;
             if (recordUiText) ImGui::LogToBuffer();
@@ -65,6 +74,16 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             if (recordUiText) {
                 renderedUiText = context->LogBuffer.c_str();
                 ImGui::LogFinish();
+            }
+            if (settings.viewportVisible) {
+                const auto* viewport = ImGui::FindWindowByName("Scene Viewport##Interaction");
+                require(viewport != nullptr, "Visible renderer viewport has no ImGui window.");
+                const auto& rect = viewport->WorkRect;
+                require(std::abs(settings.viewportX - rect.Min.x) <= 1 &&
+                    std::abs(settings.viewportY - rect.Min.y) <= 1 &&
+                    std::abs(settings.viewportWidth - rect.GetWidth()) <= 2 &&
+                    std::abs(settings.viewportHeight - rect.GetHeight()) <= 2,
+                    "Scene renderer rectangle differs from this frame's dock content rectangle.");
             }
         }
         require(renderer.render(settings, world, assets, error), error);
@@ -250,42 +269,194 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             if (std::strcmp(window->Name, name) == 0) return window;
         return static_cast<ImGuiWindow*>(nullptr);
     };
-    // Moving the bottom editor panel into the middle must release the bottom
-    // edge and give the renderer the newly available height. Releasing it
-    // near the edge snaps it back and restores the original viewport reserve.
-    if (auto* content = findWindow("Content & Editors")) {
-        const int initialHeight = settings.viewportHeight;
-        const ImVec2 start{content->Pos.x + 70.0f, content->Pos.y + 10.0f};
+    const std::array<const char*, 5> panelNames = {"World Outliner", "Details", "Viewport settings",
+        "Content & Editors", "Scene Viewport##Interaction"};
+    const ImGuiID dockspaceId = ImHashStr("RestArtEngine.DockSpace.v1");
+    for (const auto* name : panelNames) {
+        const auto* window = findWindow(name);
+        require(window && window->DockId && window->DockNode,
+            std::string("Default layout did not dock ") + name);
+    }
+    const auto dragDock = [&](ImVec2 start, ImVec2 end) {
         input.mouse = start;
         capture("ui_layout", true);
         input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
         capture("ui_layout", true);
-        input.mouse = {start.x + 120.0f, 180.0f};
-        capture("ui_layout", true);
-        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
-        capture("ui_layout", true);
-        // SceneEditor applies the newly recorded panel layout on the next
-        // frame so the viewport and panel draw order stay stable.
-        capture("ui_layout", true);
-        require(settings.viewportHeight > initialHeight + 80,
-            "Moving Content & Editors did not release the bottom viewport reserve.");
-        content = findWindow("Content & Editors");
-        require(content != nullptr, "Content & Editors window disappeared after moving.");
-        const ImVec2 restoreStart{content->Pos.x + 70.0f, content->Pos.y + 10.0f};
-        input.mouse = restoreStart;
-        capture("ui_layout", true);
-        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
-        capture("ui_layout", true);
-        input.mouse = {2.0f, static_cast<float>(settings.viewportHeight + settings.viewportY - content->Size.y + 2.0f)};
+        for (int step = 1; step <= 5; ++step) {
+            input.mouse = {start.x + (end.x - start.x) * step / 5.0f,
+                start.y + (end.y - start.y) * step / 5.0f};
+            capture("ui_layout", true);
+        }
+        // Docking previews need a held frame after reaching the target.
         capture("ui_layout", true);
         input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
         capture("ui_layout", true);
         capture("ui_layout", true);
-        require(settings.viewportHeight <= initialHeight + 8,
-            "Content & Editors did not snap back to the bottom edge. viewport=" +
-            std::to_string(settings.viewportHeight) + " initial=" + std::to_string(initialHeight) +
-            ".");
+        capture("ui_layout", true);
+    };
+    const auto dockTabCenter = [](const ImGuiWindow* window) {
+        if (window->DockNode && window->DockNode->TabBar) {
+            const auto* bar = window->DockNode->TabBar;
+            for (const auto& tab : bar->Tabs)
+                if (tab.Window == window)
+                    return ImVec2(bar->BarRect.Min.x + tab.Offset + tab.Width * .5f,
+                        (bar->BarRect.Min.y + bar->BarRect.Max.y) * .5f);
+        }
+        return ImVec2(window->Pos.x + 70.0f, window->Pos.y + 10.0f);
+    };
+    // Exercise native docking with actual mouse events, not the former custom
+    // edge-snap code: remove the bottom pane, then merge it with a left tab.
+    const int initialHeight = settings.viewportHeight;
+    dragDock(dockTabCenter(findWindow("Content & Editors")), {context->IO.DisplaySize.x * .55f, 140.0f});
+    auto* content = findWindow("Content & Editors");
+    require(content && (!content->DockNode || content->DockNode->IsFloatingNode()),
+        "Dragging the Content dock tab did not detach it.");
+    require(settings.viewportHeight > initialHeight + 80,
+        "Undocking the bottom panel did not expand the scene viewport.");
+    capture("dock_floating", true);
+
+    const auto verifyLayoutRoundtrip = [&](const char* filename) {
+        ImGuiContextScope active(context);
+        std::size_t size = 0;
+        const char* data = ImGui::SaveIniSettingsToMemory(&size);
+        const std::string saved(data, size);
+        require(saved.find("[Docking][Data]") != std::string::npos,
+            "Saved layout does not contain native docking state.");
+        std::ofstream(output / filename, std::ios::binary) << saved;
+        struct WindowState { ImGuiID id, dock; short order; ImVec2ih pos, size; };
+        std::array<WindowState, 5> expected{};
+        for (std::size_t i = 0; i < panelNames.size(); ++i) {
+            const auto* state = ImGui::FindWindowSettingsByID(findWindow(panelNames[i])->ID);
+            require(state != nullptr, "Panel missing from saved layout.");
+            expected[i] = {state->ID, state->DockId, state->DockOrder, state->Pos, state->Size};
+        }
+        struct NodeState { ImGuiID id, first, second, selected; ImGuiAxis axis; };
+        std::vector<NodeState> expectedNodes;
+        const std::function<void(const ImGuiDockNode*)> rememberNode = [&](const ImGuiDockNode* node) {
+            if (!node) return;
+            expectedNodes.push_back({node->ID, node->ChildNodes[0] ? node->ChildNodes[0]->ID : 0,
+                node->ChildNodes[1] ? node->ChildNodes[1]->ID : 0, node->SelectedTabId, node->SplitAxis});
+            rememberNode(node->ChildNodes[0]);
+            rememberNode(node->ChildNodes[1]);
+        };
+        rememberNode(ImGui::DockBuilderGetNode(dockspaceId));
+        // A fresh context has no live windows or layout history. This checks
+        // the same serialized state a restarted editor consumes, while the
+        // active renderer's context and .ini file remain untouched.
+        ImGuiContext* restored = ImGui::CreateContext();
+        ImGui::SetCurrentContext(restored);
+        ImGui::GetIO().IniFilename = nullptr;
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        ImGui::LoadIniSettingsFromMemory(saved.data(), saved.size());
+        bool matched = ImGui::DockBuilderGetNode(dockspaceId) != nullptr;
+        for (const auto& before : expected) {
+            const auto* after = ImGui::FindWindowSettingsByID(before.id);
+            matched &= after && after->DockId == before.dock && (!before.dock || after->DockOrder == before.order) &&
+                after->Pos.x == before.pos.x && after->Pos.y == before.pos.y &&
+                after->Size.x == before.size.x && after->Size.y == before.size.y;
+            if (before.dock) matched &= ImGui::DockBuilderGetNode(before.dock) != nullptr;
+        }
+        for (const auto& before : expectedNodes) {
+            const auto* after = ImGui::DockBuilderGetNode(before.id);
+            matched &= after && after->SplitAxis == before.axis && after->SelectedTabId == before.selected &&
+                (after->ChildNodes[0] ? after->ChildNodes[0]->ID : 0) == before.first &&
+                (after->ChildNodes[1] ? after->ChildNodes[1]->ID : 0) == before.second;
+        }
+        ImGui::DestroyContext(restored);
+        ImGui::SetCurrentContext(context);
+        require(matched, "Fresh-context layout restore lost docking, tab order or floating bounds.");
+    };
+    verifyLayoutRoundtrip("layout-floating.ini");
+    const auto* details = findWindow("Details");
+    dragDock(dockTabCenter(content), details->DockNode->Rect().GetCenter());
+    content = findWindow("Content & Editors");
+    details = findWindow("Details");
+    require(content->DockId != 0 && content->DockId == details->DockId,
+        "Dropping Content on the native center target did not merge the dock tabs.");
+    verifyLayoutRoundtrip("layout-tabbed.ini");
+    capture("dock_tabbed", true);
+
+    // Split the central node through ImGui's native builder, exercising the
+    // renderer's response to a different layout topology as well as dragging.
+    const int widthBeforeSplit = settings.viewportWidth;
+    {
+        ImGuiContextScope active(context);
+        const ImGuiID central = findWindow("Scene Viewport##Interaction")->DockId;
+        const ImGuiID right = ImGui::DockBuilderSplitNode(central, ImGuiDir_Right, .3f, nullptr, nullptr);
+        ImGui::DockBuilderDockWindow("Content & Editors", right);
+        ImGui::DockBuilderFinish(dockspaceId);
     }
+    capture("dock_split", true);
+    capture("dock_split", true);
+    require(settings.viewportWidth < widthBeforeSplit - 80,
+        "Splitting the scene dock did not resize the renderer viewport.");
+    verifyLayoutRoundtrip("layout-split.ini");
+    {
+        ImGuiContextScope active(context);
+        ImGui::DockBuilderDockWindow("Scene Viewport##Interaction", findWindow("Viewport settings")->DockId);
+        ImGui::DockBuilderFinish(dockspaceId);
+    }
+    capture("dock_hidden", true);
+    capture("dock_hidden", true);
+    {
+        auto* node = findWindow("Viewport settings")->DockNode;
+        require(node && node->TabBar, "Merged viewport did not create a tab group.");
+        node->TabBar->NextSelectedTabId = findWindow("Viewport settings")->TabId;
+    }
+    capture("dock_hidden", true);
+    capture("dock_hidden", true);
+    require(!settings.viewportVisible && settings.viewportWidth == 0 && settings.viewportHeight == 0,
+        "An inactive Scene Viewport tab still requests scene rendering.");
+    editor.resetLayout();
+    capture("ui_layout", true);
+    capture("ui_layout", true);
+    require(std::abs(settings.viewportHeight - initialHeight) <= 2,
+        "Reset layout did not restore the original scene viewport height.");
+    dragDock(dockTabCenter(findWindow("Scene Viewport##Interaction")), {450, 190});
+    const auto* floatingViewport = findWindow("Scene Viewport##Interaction");
+    require(settings.viewportVisible && floatingViewport &&
+        (!floatingViewport->DockNode || floatingViewport->DockNode->IsFloatingNode()),
+        "Scene Viewport did not remain renderable after detaching its dock tab.");
+    capture("dock_viewport_floating", true);
+    // The editor now composites an SRV instead of revealing the swapchain.
+    // Verify both render paths still produce equivalent scene pixels through
+    // that surface, including when the Scene Viewport is a floating window.
+    settings.path = renderer::RenderPath::Forward;
+    capture("editor_surface_forward", true);
+    settings.path = renderer::RenderPath::Deferred;
+    capture("editor_surface_deferred", true);
+    const auto editorForward = contents(output / "editor_surface_forward.bmp");
+    const auto editorDeferred = contents(output / "editor_surface_deferred.bmp");
+    require(editorForward.size() == editorDeferred.size() && editorForward.size() > 54,
+        "Editor scene surface captures have incompatible dimensions.");
+    double editorDifference = 0;
+    for (std::size_t i = 54; i < editorForward.size(); ++i)
+        if ((i - 54) % 4 != 3) editorDifference += std::abs(
+            static_cast<int>(static_cast<unsigned char>(editorForward[i])) -
+            static_cast<int>(static_cast<unsigned char>(editorDeferred[i])));
+    const double editorMeanDifference = editorDifference / ((editorForward.size() - 54) * .75);
+    require(editorMeanDifference < 2.0, "Forward/deferred editor surface difference exceeds 2/255.");
+    std::cout << "Forward/deferred editor surface mean RGB difference: " << editorMeanDifference << "/255\n";
+    editor.resetLayout();
+    capture("ui_layout", true);
+    capture("ui_layout", true);
+    const ImVec2 splitter{settings.viewportX + settings.viewportWidth * .5f,
+        findWindow("Content & Editors")->Pos.y - 1.0f};
+    dragDock(splitter, {splitter.x, splitter.y - 70.0f});
+    require(settings.viewportHeight < initialHeight - 40,
+        "Dragging the native bottom splitter did not resize the scene viewport.");
+    capture("dock_resized", true);
+    editor.resetLayout();
+    capture("ui_layout", true);
+    capture("ui_layout", true);
+    std::array<ImGuiID, 5> docksBeforeHiding{};
+    for (std::size_t i = 0; i < panelNames.size(); ++i) docksBeforeHiding[i] = findWindow(panelNames[i])->DockId;
+    for (int frame = 0; frame < 3; ++frame) capture("editor_hidden");
+    capture("ui_layout", true);
+    capture("ui_layout", true);
+    for (std::size_t i = 0; i < panelNames.size(); ++i)
+        require(findWindow(panelNames[i])->DockId == docksBeforeHiding[i],
+            "Hiding and reopening the editor changed its dock layout.");
     const auto click = [&](ImVec2 position) {
         input.mouse = position;
         // Establish hover before pressing: tab items intentionally reject same-frame
@@ -593,7 +764,8 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     std::cout << "PASS: Actor transforms, mesh/material assignment, shader Apply, failed compile rollback, "
         "binding validation, shader Save/Reload, scene roundtrip, Shader Editor mouse/text Apply, "
         "viewport picking, translation/rotation/local-scale gizmo drags, camera orbit/pan/focus, "
-        "Actor deletion and text-input Delete isolation.\n";
+        "Actor deletion, text-input Delete isolation, native dock drag/merge/split, "
+        "viewport reflow and fresh-context layout persistence.\n";
     std::cout << "D3D11 debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
         << "; validation errors: " << renderer.validationErrorCount() << '\n';
 }

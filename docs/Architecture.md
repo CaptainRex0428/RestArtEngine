@@ -13,7 +13,7 @@
 | `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、`StaticMeshComponent` 与场景序列化；不依赖 ImGui 或 DX11。 |
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
-| `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
+| `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
 | `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
@@ -29,7 +29,7 @@
 | `app/MinimalApp.cpp` | 引擎可执行入口：Win32 窗口、消息循环、Project Manager、编辑器启动、启动加载界面、命令行解析。 |
 | `app/EditorSmoke.cpp` | 引擎 GPU 自测：通过 ImGui 上下文钩子注入真实鼠标/键盘，验证拾取、gizmo、材质与 Shader 流程（`--editor-self-test`）。 |
 | `scripts/` | 引擎验证脚本：`Validate-Render.ps1` 跑渲染自测并比对截图，`Test-Window.ps1` 验证窗口生命周期。 |
-| `vendor/` | 随仓库提供的第三方代码和许可证，如 Dear ImGui、ImGuizmo、nlohmann/json。ImGuizmo 用于编辑器变换手柄，版本与来源记录在 `docs/vendor/ImGuizmo.md`。 |
+| `vendor/` | 随仓库提供的第三方代码和许可证，如 Dear ImGui、ImGuizmo、nlohmann/json。Dear ImGui Docking 版本与来源记录在 `docs/vendor/ImGui.md`；ImGuizmo 用于编辑器变换手柄，记录在 `docs/vendor/ImGuizmo.md`。 |
 | `docs/` | 架构、文件格式与编辑工作流文档。 |
 | `artifacts/`、`screenshots/` | 验证日志与截图，属于输出，不应作为资产源目录。 |
 | `build*/` | 编译生成物，不在这些目录维护源码、材质或 Shader。 |
@@ -121,6 +121,16 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 内置 Mesh 包含 Sphere、Plane 和 Cube，OBJ 用于导入其他静态网格。当前顶点布局是 Position / Normal，OBJ 可以使用正索引或负索引、多边形会三角化，没有法线时生成法线。不包含 UV、切线、贴图、MTL 材质分组、骨骼或动画导入；复杂非凸多边形建议在 DCC 中预先三角化。
 
+## 编辑器布局与视口合成
+
+编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护五个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用仅用于创建和恢复默认布局。
+
+DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。当前只启用主窗口内 Docking，没有启用 ImGui 的操作系统多视口窗口功能。
+
+场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的屏幕矩形；投影宽高比、鼠标拾取及 Gizmo 使用同一矩形。这样停靠、分割和浮动无需保留旧位置的渲染区域，图像也按窗口的层级参与遮挡。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
+
+Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotGuiStudy.md)。本轮使用 ImGui 实现停靠体系，没有将 Godot 的 GUI 运行时引入引擎。
+
 ## 文件与持久化
 
 场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
@@ -176,6 +186,7 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 | DX11 资源、G-buffer、阴影、光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
 | 材质开放函数 | `Shaders/Materials/Standard.hlsli` 的 `EvaluateMaterial()` |
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
+| 面板身份、默认 Dock 树、布局恢复 | `src/Editor/EditorDockManager.cpp` |
 | 视口拾取、变换手柄、相机 | `src/Editor/ViewportInteraction.cpp` |
 | 启动加载界面与背景图 | `src/Editor/LoadingScreen.cpp`、`assets/load/load.png` |
 | 新的公开接口 | `include/RestArtEngine/<模块>/`，实现放 `src/<模块>/` |

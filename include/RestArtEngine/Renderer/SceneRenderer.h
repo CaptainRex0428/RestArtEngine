@@ -56,6 +56,10 @@ struct SceneSettings {
     // Lit=0, Unlit=1, Albedo=2, World normals=3, World position=4.
     int debugView = 0;
     int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
+    // Editor panels composite the scene texture through their own window draw
+    // list. An inactive dock tab must not fall back to fullscreen rendering.
+    bool editorViewport = false;
+    bool viewportVisible = true;
 };
 
 // Native D3D11 preview renderer. The broader RHI remains separate until its
@@ -97,6 +101,11 @@ public:
     void shutdown();
     ID3D11Device* device() const;
     ID3D11DeviceContext* context() const;
+    // D3D11 SRV borrowed until resize/shutdown. Available before the UI builds
+    // its draw list; render() fills it before the UI submits that draw list.
+    void* sceneTexture() const;
+    std::uint32_t sceneTextureWidth() const;
+    std::uint32_t sceneTextureHeight() const;
     std::string adapterName() const;
     bool validationEnabled() const;
     std::uint32_t validationErrorCount() const;

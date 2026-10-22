@@ -10,8 +10,6 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
-#include <utility>
-#include <vector>
 
 namespace rae::editor {
 namespace {
@@ -35,125 +33,15 @@ const char* meshType(assets::MeshPrimitive type) {
     default: return "Imported OBJ";
     }
 }
-constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoCollapse;
-struct PanelRect {
-    const char* name = nullptr;
-    ImVec2 position{};
-    ImVec2 size{};
-};
-
-constexpr float panelSnapDistance = 14.0f;
-
-void snapPanelToEdges(ImVec2& position, const ImVec2& size, const ImVec2& display,
-                      const std::vector<PanelRect>& existing) {
-    const float toolbarBottom = 90.0f;
-    if (std::abs(position.x) <= panelSnapDistance) position.x = 0.0f;
-    if (std::abs(position.x + size.x - display.x) <= panelSnapDistance)
-        position.x = std::max(0.0f, display.x - size.x);
-    if (std::abs(position.y - toolbarBottom) <= panelSnapDistance) position.y = toolbarBottom;
-    if (std::abs(position.y + size.y - display.y) <= panelSnapDistance)
-        position.y = std::max(toolbarBottom, display.y - size.y);
-    for (const auto& panel : existing) {
-        const bool overlapsY = position.y < panel.position.y + panel.size.y &&
-            position.y + size.y > panel.position.y;
-        const bool overlapsX = position.x < panel.position.x + panel.size.x &&
-            position.x + size.x > panel.position.x;
-        if (overlapsY) {
-            if (std::abs(position.x - (panel.position.x + panel.size.x)) <= panelSnapDistance)
-                position.x = panel.position.x + panel.size.x;
-            if (std::abs(position.x + size.x - panel.position.x) <= panelSnapDistance)
-                position.x = panel.position.x - size.x;
-        }
-        if (overlapsX) {
-            if (std::abs(position.y - (panel.position.y + panel.size.y)) <= panelSnapDistance)
-                position.y = panel.position.y + panel.size.y;
-            if (std::abs(position.y + size.y - panel.position.y) <= panelSnapDistance)
-                position.y = panel.position.y - size.y;
-        }
-    }
-    position.x = std::clamp(position.x, 0.0f, std::max(0.0f, display.x - size.x));
-    position.y = std::clamp(position.y, toolbarBottom, std::max(toolbarBottom, display.y - size.y));
-}
-
-void recordPanel(std::vector<PanelRect>& panels, const char* name, const ImVec2& display) {
-    ImVec2 position = ImGui::GetWindowPos();
-    const ImVec2 size = ImGui::GetWindowSize();
-    // Snap only when the drag/resize ends. This leaves ImGui in charge while
-    // the user is moving a window and avoids fighting its internal state.
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-        (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) ||
-         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))) {
-        snapPanelToEdges(position, size, display, panels);
-        ImGui::SetWindowPos(position, ImGuiCond_Always);
-    }
-    panels.push_back({name, position, size});
-}
-
-void computeViewportRect(const std::vector<PanelRect>& panels, const ImVec2& display,
-                         renderer::SceneSettings& settings) {
-    const float top = 90.0f;
-    float left = 0.0f, right = display.x, bottom = display.y;
-    for (const auto& panel : panels) {
-        const bool overlapsEditor = panel.position.y < display.y &&
-            panel.position.y + panel.size.y > top;
-        if (!overlapsEditor) continue;
-        if (std::abs(panel.position.y + panel.size.y - display.y) <= panelSnapDistance &&
-            std::abs(panel.position.x) <= panelSnapDistance &&
-            panel.size.x >= display.x * .7f)
-            bottom = std::min(bottom, panel.position.y);
-    }
-    const float coverageHeight = std::max(1.0f, bottom - top);
-    const auto edgeCoverage = [&](bool leftEdge) {
-        std::vector<std::pair<float, float>> intervals;
-        for (const auto& panel : panels) {
-            const bool touches = leftEdge
-                ? std::abs(panel.position.x) <= panelSnapDistance
-                : std::abs(panel.position.x + panel.size.x - display.x) <= panelSnapDistance;
-            if (!touches) continue;
-            const float begin = std::max(top, panel.position.y);
-            const float end = std::min(bottom, panel.position.y + panel.size.y);
-            if (end > begin) intervals.push_back({begin, end});
-        }
-        std::sort(intervals.begin(), intervals.end());
-        float covered = 0.0f, begin = 0.0f, end = 0.0f;
-        for (const auto& interval : intervals) {
-            if (end <= begin) { begin = interval.first; end = interval.second; }
-            else if (interval.first <= end) end = std::max(end, interval.second);
-            else { covered += end - begin; begin = interval.first; end = interval.second; }
-        }
-        if (end > begin) covered += end - begin;
-        return covered / coverageHeight;
-    };
-    if (edgeCoverage(true) >= .7f) {
-        for (const auto& panel : panels)
-            if (std::abs(panel.position.x) <= panelSnapDistance)
-                left = std::max(left, panel.position.x + panel.size.x);
-    }
-    if (edgeCoverage(false) >= .7f) {
-        for (const auto& panel : panels)
-            if (std::abs(panel.position.x + panel.size.x - display.x) <= panelSnapDistance)
-                right = std::min(right, panel.position.x);
-    }
-    const float width = right - left;
-    const float height = bottom - top;
-    if (width < 64.0f || height < 64.0f) return;
-    settings.viewportX = static_cast<int>(left);
-    settings.viewportY = static_cast<int>(top);
-    settings.viewportWidth = static_cast<int>(width);
-    settings.viewportHeight = static_cast<int>(height);
-}
-
-void beginPanel(const char* name, ImVec2 position, ImVec2 size,
-                ImGuiWindowFlags extra = 0) {
-    // Regular Dear ImGui windows are movable and resizable by default. The
-    // initial editor arrangement is only a first-use hint; afterward ImGui's
-    // .ini settings own the position and size.
-    ImGui::SetNextWindowPos(position, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
-    ImGui::Begin(name, nullptr, panelFlags | extra);
-}
 void message(const std::string& text) {
     if (!text.empty()) ImGui::TextWrapped("%s", text.c_str());
+}
+void continueButtonRow(const char* nextLabel) {
+    const auto& style = ImGui::GetStyle();
+    const float nextWidth = ImGui::CalcTextSize(nextLabel).x + 2 * style.FramePadding.x;
+    const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + nextWidth <= right)
+        ImGui::SameLine();
 }
 std::string pathText(const std::filesystem::path& path) {
     const auto utf8 = path.generic_u8string();
@@ -401,7 +289,7 @@ void SceneEditor::importMesh() {
 
 void SceneEditor::drawAssets() {
     if (ImGui::Button("Import OBJ...")) importMesh();
-    ImGui::SameLine();
+    continueButtonRow("Add Actor from mesh");
     ImGui::BeginDisabled(!assets_.findMesh(selectedMesh_) || !assets_.findMaterial(selectedMaterial_));
     if (ImGui::Button("Add Actor from mesh")) {
         if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
@@ -410,17 +298,22 @@ void SceneEditor::drawAssets() {
         }
     }
     ImGui::EndDisabled();
-    ImGui::BeginChild("Mesh library", {220, 0}, ImGuiChildFlags_Borders);
+    const bool stacked = ImGui::GetContentRegionAvail().x < 480.0f;
+    const ImVec2 listSize = stacked
+        ? ImVec2{0, std::clamp(ImGui::GetContentRegionAvail().y * .45f, 90.0f, 180.0f)}
+        : ImVec2{220, 0};
+    ImGui::BeginChild("Mesh library", listSize, ImGuiChildFlags_Borders);
     for (const auto& mesh : assets_.meshes) {
         const auto label = mesh.name + "##" + std::to_string(mesh.id);
         if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) selectedMesh_ = mesh.id;
     }
-    ImGui::EndChild(); ImGui::SameLine();
+    ImGui::EndChild();
+    if (!stacked) ImGui::SameLine();
     ImGui::BeginGroup();
     if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
         ImGui::TextUnformatted(mesh->name.c_str());
         ImGui::Text("Type: %s", meshType(mesh->primitive));
-        ImGui::Text("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
+        ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
         message(mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
         ImGui::TextWrapped("OBJ imports static geometry. Materials are assigned separately in Details.");
     }
@@ -428,7 +321,7 @@ void SceneEditor::drawAssets() {
 }
 
 void SceneEditor::drawMaterial() {
-    ImGui::SetNextItemWidth(240);
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     if (ImGui::BeginCombo("Asset", materialDraft_.name.c_str())) {
         for (const auto& material : assets_.materials) {
             const auto label = material.name + "##" + std::to_string(material.id);
@@ -436,16 +329,16 @@ void SceneEditor::drawMaterial() {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
+    continueButtonRow("New material");
     ImGui::BeginDisabled(materialDraftDirty_);
     if (ImGui::Button("New material")) {
         const auto id = assets_.createMaterial("New Material");
         selectMaterial(id); materialsDirty_ = sceneDirty_ = true;
     }
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    continueButtonRow("Apply material");
     if (ImGui::Button("Apply material")) applyMaterial();
-    ImGui::SameLine();
+    continueButtonRow("Save material assets");
     ImGui::BeginDisabled(materialDraftDirty_);
     if (ImGui::Button("Save material assets")) {
         std::string error;
@@ -455,7 +348,7 @@ void SceneEditor::drawMaterial() {
         } else status_ = error;
     }
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    continueButtonRow("Reload material assets");
     ImGui::BeginDisabled(materialDraftDirty_);
     if (ImGui::Button("Reload material assets")) {
         auto proposed = assets_;
@@ -474,13 +367,14 @@ void SceneEditor::drawMaterial() {
     }
     ImGui::EndDisabled();
     if (materialDraftDirty_) ImGui::TextColored({1,.7f,.25f,1}, "Draft changed: Apply to update Actors; Save writes assets.");
-    ImGui::SetNextItemWidth(240);
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= textInput("Name", materialDraft_.name);
-    ImGui::SetNextItemWidth(240);
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= ImGui::ColorEdit3("Base color", materialDraft_.baseColor);
-    ImGui::SetNextItemWidth(240);
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= ImGui::SliderFloat("Roughness", &materialDraft_.roughness, .05f, 1);
-    ImGui::SameLine(); ImGui::SetNextItemWidth(180);
+    if (ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x >= 600.0f) ImGui::SameLine();
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 180.0f));
     materialDraftDirty_ |= ImGui::SliderFloat("Metallic", &materialDraft_.metallic, 0, 1);
     materialDraftDirty_ |= ImGui::Checkbox("Grid", &materialDraft_.grid);
     ImGui::TextDisabled("Shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
@@ -515,7 +409,7 @@ void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
             if (diagnostics_.empty()) diagnostics_ = "Compile succeeded. All forward/deferred stages replaced together.";
         } else status_ = "Compile failed. Previous working shader remains active.";
     }
-    ImGui::SameLine();
+    continueButtonRow("Save shader");
     ImGui::BeginDisabled(unapplied);
     if (ImGui::Button("Save shader")) {
         std::string error;
@@ -523,11 +417,11 @@ void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
         else status_ = error;
     }
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    continueButtonRow("Reload from disk");
     if (ImGui::Button("Reload from disk")) shaderReloadRequested_ = true;
-    ImGui::SameLine();
+    continueButtonRow("Revert draft");
     if (ImGui::Button("Revert draft")) shaderDraft_ = renderer.shaderSource();
-    ImGui::SameLine(); ImGui::Checkbox("Expand editor", &expandedEditor_);
+
     if (shaderReloadRequested_) {
         ImGui::OpenPopup("Reload shader source?");
         if (ImGui::BeginPopupModal("Reload shader source?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -554,39 +448,16 @@ void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
 }
 
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
-    const auto display = ImGui::GetIO().DisplaySize;
-    const float side = display.x < 1200 ? 230.0f : 280.0f;
-    const float bottom = expandedEditor_ ? display.y * .65f : std::clamp(display.y * .34f, 220.0f, 360.0f);
-    const float middle = display.y - 100 - bottom;
-    std::vector<PanelRect> panels;
-    // Reserve the renderer surface from the panel layout collected during the
-    // previous frame. Panels are drawn after the viewport below, so detached
-    // windows stay visible above the scene while the viewport reflows.
-    if (!panelLayout_.empty()) {
-        std::vector<PanelRect> previousPanels;
-        previousPanels.reserve(panelLayout_.size());
-        for (const auto& entry : panelLayout_)
-            previousPanels.push_back({nullptr, {entry.x, entry.y}, {entry.width, entry.height}});
-        computeViewportRect(previousPanels, display, settings);
-    }
-    if (settings.viewportWidth < 1 || settings.viewportHeight < 1) {
-        settings.viewportX = static_cast<int>(side);
-        settings.viewportY = 90;
-        settings.viewportWidth = static_cast<int>(display.x - 2 * side);
-        settings.viewportHeight = static_cast<int>(middle);
-    }
-    beginPanel("RestArtEngine Editor", {0, 0}, {display.x, 90},
+    actorPanelFocused_ = false;
+    const auto* mainViewport = ImGui::GetMainViewport();
+    dockManager_.beginFrame(90.0f);
+    ImGui::SetNextWindowPos(mainViewport->Pos);
+    ImGui::SetNextWindowSize({mainViewport->Size.x, 90.0f});
+    ImGui::Begin("RestArtEngine Editor", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
-    if (ImGui::SmallButton("Layout")) ImGui::OpenPopup("Editor layout");
-    if (ImGui::BeginPopup("Editor layout")) {
-        ImGui::TextDisabled("Drag title bars or resize borders to rearrange panels");
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset saved layout")) {
-            ImGui::LoadIniSettingsFromMemory("", 0);
-        }
-        ImGui::EndPopup();
-    }
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoSavedSettings);
+    dockManager_.drawLayoutMenu();
     ImGui::SameLine();
     if (ImGui::Button("Save Scene")) saveScene();
     ImGui::SameLine();
@@ -607,89 +478,72 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 
-    // Render the scene first so regular ImGui panels can cover it when they
-    // are moved into the middle or attached to another panel edge.
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    bool panelUnderMouse = false;
-    for (const auto& panel : panelLayout_) {
-        panelUnderMouse |= mouse.x >= panel.x && mouse.x <= panel.x + panel.width &&
-            mouse.y >= panel.y && mouse.y <= panel.y + panel.height;
-    }
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, panelUnderMouse);
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, renderer);
 
-    beginPanel("World Outliner", {0, 90}, {side, middle * .42f});
-    drawOutliner();
-    recordPanel(panels, "World Outliner", display);
-    ImGui::End();
-    beginPanel("Details", {0, 90 + middle * .42f}, {side, middle * .58f});
-    drawDetails();
-    actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-    recordPanel(panels, "Details", display);
-    ImGui::End();
-
-    beginPanel("Viewport settings", {display.x - side, 90}, {side, middle});
-    ImGui::TextDisabled("Scene");
-    ImGui::Text("Actors: %zu", world_.actors.size());
-    ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
-    ImGui::Separator();
-    ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12, "Key light %.1f");
-    ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Exposure", &settings.exposure, .25f, 3, "Exposure %.2f");
-    ImGui::TextDisabled("Direct-light shadows");
-    ImGui::TextDisabled("Ray tracing: all mesh actors");
-    ImGui::Text("Shadow method");
-    int shadowMethod = static_cast<int>(settings.shadowMethod);
-    shadowMethod = std::clamp(shadowMethod, 0, 8);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("##shadowMethod", &shadowMethod,
-        "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
-        settings.shadowMethod = static_cast<renderer::ShadowMethod>(shadowMethod);
-    }
-    if (settings.shadowMethod == renderer::ShadowMethod::ShadowMap)
-        ImGui::TextWrapped("Raster shadow map with a 2x2 PCF filter for stable deferred and forward shadows.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapHard)
-        ImGui::TextWrapped("Raster shadow map with one comparison sample for the sharpest edge.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF9)
-        ImGui::TextWrapped("Raster shadow map with a 3x3 PCF filter for softer edges.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCSS)
-        ImGui::TextWrapped("Raster shadow map with blocker search and percentage-closer soft shadows.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapCSM2)
-        ImGui::TextWrapped("Two cascaded directional shadow maps: a tight near cascade plus a wider far cascade.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::GTAO)
-        ImGui::TextWrapped("GTAO adds screen-space ambient occlusion to deferred lighting and keeps the raster shadow map for direct light.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::ContactShadow)
-        ImGui::TextWrapped("Contact shadows ray-march the deferred position buffer near the receiver; forward rendering falls back to the raster shadow map.");
-    else if (settings.shadowMethod == renderer::ShadowMethod::AnalyticRay)
-        ImGui::TextWrapped("Analytic rays: contact shadows for every visible mesh actor; built-in primitives use exact intersections and other meshes use triangle data.");
-    else
-        ImGui::TextWrapped("Direct-light shadows are disabled; ambient and reflection lighting remain active.");
-    ImGui::Checkbox("VSync", &vsync);
-    if (ImGui::Button("Reset camera")) {
-        settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;
-        settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
-    }
-    message(renderer.rayTracingStatus(world_, assets_));
-    ImGui::SeparatorText("Activity");
-    message(status_);
-    recordPanel(panels, "Viewport settings", display);
-    ImGui::End();
-
-    beginPanel("Content & Editors", {0, display.y - bottom}, {display.x, bottom});
-    if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
-        if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
-            openMaterialTab_ = false; drawMaterial(); ImGui::EndTabItem();
+    dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
+    dockManager_.drawPanel(EditorPanel::Details, [&] {
+        drawDetails();
+        actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    });
+    dockManager_.drawPanel(EditorPanel::Settings, [&] {
+        ImGui::TextDisabled("Scene");
+        ImGui::Text("Actors: %zu", world_.actors.size());
+        ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12, "Key light %.1f");
+        ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Exposure", &settings.exposure, .25f, 3, "Exposure %.2f");
+        ImGui::TextDisabled("Direct-light shadows");
+        ImGui::TextDisabled("Ray tracing: all mesh actors");
+        ImGui::Text("Shadow method");
+        int shadowMethod = static_cast<int>(settings.shadowMethod);
+        shadowMethod = std::clamp(shadowMethod, 0, 8);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##shadowMethod", &shadowMethod,
+            "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
+            settings.shadowMethod = static_cast<renderer::ShadowMethod>(shadowMethod);
         }
-        if (ImGui::BeginTabItem("Shader Editor", nullptr, openShaderTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
-            openShaderTab_ = false; drawShader(renderer); ImGui::EndTabItem();
+        if (settings.shadowMethod == renderer::ShadowMethod::ShadowMap)
+            ImGui::TextWrapped("Raster shadow map with a 2x2 PCF filter for stable deferred and forward shadows.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapHard)
+            ImGui::TextWrapped("Raster shadow map with one comparison sample for the sharpest edge.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF9)
+            ImGui::TextWrapped("Raster shadow map with a 3x3 PCF filter for softer edges.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCSS)
+            ImGui::TextWrapped("Raster shadow map with blocker search and percentage-closer soft shadows.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapCSM2)
+            ImGui::TextWrapped("Two cascaded directional shadow maps: a tight near cascade plus a wider far cascade.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::GTAO)
+            ImGui::TextWrapped("GTAO adds screen-space ambient occlusion to deferred lighting and keeps the raster shadow map for direct light.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::ContactShadow)
+            ImGui::TextWrapped("Contact shadows ray-march the deferred position buffer near the receiver; forward rendering falls back to the raster shadow map.");
+        else if (settings.shadowMethod == renderer::ShadowMethod::AnalyticRay)
+            ImGui::TextWrapped("Analytic rays: contact shadows for every visible mesh actor; built-in primitives use exact intersections and other meshes use triangle data.");
+        else
+            ImGui::TextWrapped("Direct-light shadows are disabled; ambient and reflection lighting remain active.");
+        ImGui::Checkbox("VSync", &vsync);
+        if (ImGui::Button("Reset camera")) {
+            settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;
+            settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
         }
-        ImGui::EndTabBar();
-    }
-    recordPanel(panels, "Content & Editors", display);
-    ImGui::End();
-    panelLayout_.clear();
-    panelLayout_.reserve(panels.size());
-    for (const auto& panel : panels)
-        panelLayout_.push_back({panel.position.x, panel.position.y, panel.size.x, panel.size.y});
+        message(renderer.rayTracingStatus(world_, assets_));
+        ImGui::SeparatorText("Activity");
+        message(status_);
+    });
+
+    if (openMaterialTab_ || openShaderTab_)
+        ImGui::SetWindowFocus(EditorDockManager::panelName(EditorPanel::Content));
+    dockManager_.drawPanel(EditorPanel::Content, [&] {
+        if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
+            if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+                openMaterialTab_ = false; drawMaterial(); ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Shader Editor", nullptr, openShaderTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+                openShaderTab_ = false; drawShader(renderer); ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+    });
     if (!ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))

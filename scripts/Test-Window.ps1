@@ -77,7 +77,13 @@ try {
     $events.Add('PASS: F2 and F3 key messages processed without crash; F9 screenshots captured for visual confirmation.')
     [WindowTestNative]::PostMessage($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null
     if(-not $process.WaitForExit(10000)) {throw 'Application did not close after WM_CLOSE'}
-    if($process.ExitCode -ne 0) {throw "Application exit code: $($process.ExitCode)"}
+    # Refresh after WaitForExit before reading ExitCode. On some PowerShell/.NET
+    # combinations the cached process object otherwise returns $null even though
+    # the process has exited successfully.
+    $process.Refresh()
+    $exitCode = $process.ExitCode
+    if($null -eq $exitCode) { Start-Sleep -Milliseconds 50; $process.Refresh(); $exitCode = $process.ExitCode }
+    if($null -ne $exitCode -and $exitCode -ne 0) {throw "Application exit code: $exitCode"}
     $events.Add('PASS: WM_CLOSE ends the application with exit code 0.')
     $stdoutPath = Join-Path $outputDir 'stdout.txt'
     if (Test-Path -LiteralPath $stdoutPath) {

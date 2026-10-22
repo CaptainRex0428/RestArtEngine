@@ -631,6 +631,17 @@ int wmain(int argc, wchar_t** argv) {
             }
             const auto now = std::chrono::steady_clock::now();
             const float dt = std::chrono::duration<float>(now - previous).count(); previous = now;
+            if (selfTest && frame == 9) {
+                // Native docking needs its initial layout/auto-fit frames before
+                // a first screenshot, just as in the editor interaction tests.
+                for (int warmup = 0; warmup < 2; ++warmup) {
+                    ui.beginFrame(1.0f / 60.0f);
+                    bool unusedCapture = false;
+                    editor.draw(settings, renderer, vsync, unusedCapture);
+                    if (!renderer.render(settings, error)) throw std::runtime_error(error);
+                    ui.endFrame();
+                }
+            }
             ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
             auto& io = ImGui::GetIO();
             if (!io.WantTextInput) {
@@ -662,6 +673,8 @@ int wmain(int argc, wchar_t** argv) {
             }
             bool capture = ImGui::IsKeyPressed(ImGuiKey_F9);
             settings.viewportX = settings.viewportY = settings.viewportWidth = settings.viewportHeight = 0;
+            settings.editorViewport = false;
+            settings.viewportVisible = true;
             if (showUI && (!selfTest || frame == 9)) editor.draw(settings, renderer, vsync, capture);
             if (windowState.closeRequested) { editor.requestClose(); windowState.closeRequested = false; }
             if (editor.drawCloseDialog(renderer)) running = false;

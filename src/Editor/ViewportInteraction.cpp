@@ -1,4 +1,5 @@
 #include <RestArtEngine/Editor/ViewportInteraction.h>
+#include <RestArtEngine/Editor/EditorDockManager.h>
 
 #include <imgui.h>
 #include <ImGuizmo.h>
@@ -159,20 +160,48 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
 
 bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
                                const assets::AssetLibrary& assets, scene::ActorId& selected,
-                               bool inputBlocked) {
+                               renderer::SceneRenderer& renderer) {
     hovered_ = focused_ = false;
-    if (settings.viewportWidth < 1 || settings.viewportHeight < 1) { usingGizmo_ = false; return false; }
+    settings.editorViewport = true;
+    settings.viewportVisible = false;
+    settings.viewportWidth = settings.viewportHeight = 0;
     ImGuizmo::BeginFrame();
-    // The viewport is the renderer's screen-space surface. Keep its rectangle
-    // tied to SceneSettings so picking, gizmos and GPU rendering share one
-    // coordinate system; the surrounding editor panels remain native windows.
-    ImGui::SetNextWindowPos({static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY)}, ImGuiCond_Always);
-    ImGui::SetNextWindowSize({static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight)}, ImGuiCond_Always);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (inputBlocked) flags |= ImGuiWindowFlags_NoInputs;
-    ImGui::Begin("Scene Viewport##Interaction", nullptr, flags);
+    ImGui::SetNextWindowSize({640, 480}, ImGuiCond_FirstUseEver);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    const bool visible = ImGui::Begin(EditorDockManager::panelName(EditorPanel::Viewport), nullptr,
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    if (!visible) {
+        usingGizmo_ = orbiting_ = panning_ = false;
+        ImGui::End();
+        return false;
+    }
+    // This frame's dock content rectangle is the common coordinate system for
+    // rendering, picking and Gizmo. The tab bar and window title are excluded.
+    const ImVec2 contentMin = ImGui::GetCursorScreenPos();
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const float targetWidth = static_cast<float>(renderer.sceneTextureWidth());
+    const float targetHeight = static_cast<float>(renderer.sceneTextureHeight());
+    const int left = static_cast<int>(std::clamp(contentMin.x, 0.0f, targetWidth));
+    const int top = static_cast<int>(std::clamp(contentMin.y, 0.0f, targetHeight));
+    const int imageRight = static_cast<int>(std::clamp(contentMin.x + available.x, 0.0f, targetWidth));
+    const int bottom = static_cast<int>(std::clamp(contentMin.y + available.y, 0.0f, targetHeight));
+    settings.viewportX = left;
+    settings.viewportY = top;
+    settings.viewportWidth = std::max(0, imageRight - left);
+    settings.viewportHeight = std::max(0, bottom - top);
+    if (settings.viewportWidth < 1 || settings.viewportHeight < 1 || !renderer.sceneTexture()) {
+        usingGizmo_ = orbiting_ = panning_ = false;
+        ImGui::End();
+        return false;
+    }
+    settings.viewportVisible = true;
+    const ImVec2 imageMin{static_cast<float>(left), static_cast<float>(top)};
+    const ImVec2 imageMax{static_cast<float>(imageRight), static_cast<float>(bottom)};
+    ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(renderer.sceneTexture())),
+        imageMin, imageMax, {imageMin.x / targetWidth, imageMin.y / targetHeight},
+        {imageMax.x / targetWidth, imageMax.y / targetHeight});
+    ImGui::SetCursorScreenPos({imageMin.x + 8, imageMin.y + 8});
     hovered_ = ImGui::IsWindowHovered();
     focused_ = ImGui::IsWindowFocused();
     const bool popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
@@ -266,7 +295,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     ImGuizmo::SetRect(static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
         static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight));
     ImGuizmo::SetGizmoSizeClipSpace(.18f);
-    ImGuizmo::Enable(!blocked && !orbiting_ && !panning_ && (!overToolbar || usingGizmo_));
+    ImGuizmo::Enable(!blocked && (hovered_ || usingGizmo_) && !orbiting_ && !panning_ && (!overToolbar || usingGizmo_));
     bool changed = false, gizmoHovered = false;
     if (auto* actor = world.findActor(selected); actor && actor->visible && validTransform(actor->transform)) {
         XMFLOAT4X4 matrix;
@@ -284,7 +313,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     } else usingGizmo_ = false;
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) selected = pick(settings, world, assets, view, projection);
-    ImGui::SetCursorPos({8, std::max(8.0f, static_cast<float>(settings.viewportHeight) - 23.0f)});
+    ImGui::SetCursorScreenPos({imageMin.x + 8, std::max(imageMin.y + 8, imageMax.y - 23)});
     const char* hint = snap_ ? "Snap: Move 0.5 | Rotate 15 deg | Scale 0.1" :
         "LMB select | RMB/Alt+LMB orbit | MMB pan | Wheel zoom | F focus";
     const ImVec2 textPos = ImGui::GetCursorScreenPos();

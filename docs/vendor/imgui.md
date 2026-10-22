@@ -1,12 +1,23 @@
-﻿# Dear ImGui dependency
+# Dear ImGui dependency
 
-Upstream: https://github.com/ocornut/imgui
+Source: https://github.com/ocornut/imgui
 
-Pinned release: **v1.91.9b** (git submodule). License: MIT, see `vendor/imgui/LICENSE.txt`.
+Release: [v1.91.9b-docking](https://github.com/ocornut/imgui/releases/tag/v1.91.9b-docking)
 
-This directory is a git submodule holding the unmodified core source files,
-required headers, and Win32 / DirectX 11 backend files from that release.
-Run `git submodule update --init` after cloning the repository.
+Commit: `4806a1924ff6181180bf5e4b8b79ab4394118875` (git submodule, detached HEAD).
 
-RAEngine-specific styling and context ownership live in
-`src/ImGui/ImGuiLayer.cpp`, outside this third-party source directory.
+License: MIT. The original license is retained in `vendor/imgui/LICENSE.txt` and included by the CMake install rules.
+
+This is the docking variant of the existing 1.91.9b dependency. It provides `ImGuiConfigFlags_DockingEnable`, `DockSpace`, dock tabs, splitters and docking layout persistence. The core sources and Win32/DX11 backends remain upstream sources without RestArtEngine patches.
+
+The editor enables docking in its ImGui context. Native OS multi-viewport windows are a separate feature and require explicit platform/renderer integration; enabling docking alone does not enable them.
+
+The internal `DockBuilder` API is version-sensitive. Keep default-layout construction isolated in the editor docking manager and verify it when updating ImGui.
+
+After cloning or updating the parent repository, initialize the pinned dependencies with:
+
+```powershell
+git submodule update --init --recursive
+```
+
+Version updates must change the submodule reference and this document together, then run the editor smoke checks against the matching upstream headers and backends.

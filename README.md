@@ -60,7 +60,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 **编辑器**
 
-- Outliner / Details / Content 三栏 + 可展开底部编辑器，Dear ImGui 界面。
+- Dear ImGui Docking 工作区：Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 可分割停靠、合并标签及悬浮。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
 - 材质参数草稿 → Apply → Save 两段式提交；`Grid` 程序化网格材质。
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
@@ -148,7 +148,9 @@ CMake 目标：
 - Content 页签导入 OBJ、编辑材质、编辑 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
-顶部左侧的 `Layout` 按钮提供布局提示和重置入口。Outliner、Details、Viewport settings 和 Content & Editors 都是 Dear ImGui 原生窗口，默认可直接拖动标题栏、调整窗口宽高和重新排列；窗口靠近屏幕或其他面板边缘释放时会自动吸附，Scene Viewport 会按贴边面板重新计算大小并覆盖在其后方，避免黑色空洞。窗口位置、尺寸和标签顺序由本机的 `RestArtEngine.imgui.ini` 保存。Scene Viewport 保持与渲染和拾取坐标同步，Content 内的编辑器标签也支持拖拽重排。
+编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理五个面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。当前未启用独立操作系统窗口或跨显示器多视口。
+
+顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左侧 Outliner / Details、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；Content 内的编辑器标签仍可拖拽重排。首次使用 Docking 时会建立新的默认布局，替换旧版自由窗口的位置安排。
 
 ## 场景操作
 
@@ -238,7 +240,8 @@ Projects/RayTracing_Simple/ <- 光追测试工程
 Deferred: G-buffer ×3  →  全屏光照（GTAO / Contact Shadow / 解析光追阴影可选）
 Forward : 背景 + 几何  →  绘制时直接着色
         ↓
-        ImGui 叠加 → Present
+        编辑器：场景渲染纹理 → ImGui 视口图像与面板 → Present
+        无 UI：直接绘制到交换链 → Present
 ```
 
 - 常量缓冲契约（CPU / HLSL 双向锁定，运行时用 `D3DReflect` 校验）：
@@ -347,7 +350,7 @@ RestArtEngine.exe --help
 
 | 依赖 | 版本 | 许可 | 位置 |
 | --- | --- | --- | --- |
-| Dear ImGui | v1.91.9b | MIT | `vendor/imgui/LICENSE.txt` |
+| Dear ImGui | v1.91.9b-docking | MIT | `vendor/imgui/LICENSE.txt` |
 | ImGuizmo | `105e4fde45e4e74aae8973d98750820ef7aca7e2` | MIT | `vendor/ImGuizmo/LICENSE` |
 | nlohmann/json | v3.12.0 | MIT | `vendor/nlohmann/LICENSE.MIT` |
 

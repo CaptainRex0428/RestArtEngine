@@ -8,13 +8,21 @@
 
 以下提到的 `Content/` 和材质 `Shaders/` 都是**当前工程内的目录**。默认 Sandbox 分别对应引擎仓库内的 `Projects/Sandbox/Content/` 和 `Projects/Sandbox/Shaders/`。引擎根目录只保留公共 Shader 管线与默认材质模板，编辑器不会将工程材质或导入网格保存到引擎根目录。
 
-如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格列表、材质编辑与 Shader 编辑页；尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。较长的源码可勾选 `Expand editor` 扩大底部编辑区域。
+如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格列表、材质编辑与 Shader 编辑页；尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。阅读较长源码时可拖动分隔条扩大 Content & Editors，或将该面板拖到其他停靠区域。
 
 ## 面板布局
 
-编辑器顶部左侧的 **Layout** 小按钮打开布局菜单。Outliner、Details、Viewport settings 和 Content & Editors 使用 Dear ImGui 原生窗口；直接拖动标题栏或窗口边框即可移动和调整宽高，多个窗口可以自由重排。窗口释放时靠近屏幕边缘或其他面板边缘会自动吸附、贴合；贴边面板覆盖的区域会从 Scene Viewport 中扣除，视口随布局重新计算大小，不会留下黑色空洞。**Reset saved layout** 清除本机保存的窗口位置、尺寸和标签顺序。Scene Viewport 是渲染器的屏幕空间表面，保持与渲染和拾取坐标同步，由周围面板的布局决定大小。
+五个面板（World Outliner、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左侧 Outliner / Details、右侧设置、底部 Content 和中央场景视口。
 
-交互式编辑器会把窗口布局保存到本机的 `RestArtEngine.imgui.ini`，重启引擎后继续使用上次的布局。自动化自测不加载该文件，以保持截图和验证结果稳定。Content & Editors 内部的 Meshes、Material Editor、Shader Editor 标签支持拖拽重排。
+- 拖动面板标签，或悬浮窗口的标题栏，在停靠预览出现时松开鼠标。
+- 放到目标区域的左、右、上、下停靠目标，可分割区域；放到中央目标，可将两个面板合并到同一个标签组。
+- 拖离标签组可悬浮，再拖回停靠目标即可回嵌。悬浮范围限于主编辑器窗口，当前不支持独立操作系统窗口或跨显示器拖出。
+- 拖动相邻面板间的分隔条调整占比；悬浮窗口可通过边框调整尺寸。Scene Viewport 会跟随本帧内容区域改变大小。
+- 顶部 **Layout** 菜单可以聚焦指定面板；**Restore default layout** 重建默认五面板布局。
+
+Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机和 Gizmo 使用该图像的当前屏幕矩形。视口窗口浮动或与其他面板合并标签后，场景图像仍跟随它显示，不占用原位置的固定矩形。
+
+交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局，之后保留用户的停靠安排。自动化自测不加载个人布局文件。Content & Editors 内部的 Meshes、Material Editor、Shader Editor 标签仍可拖拽重排。
 
 ## Rider 编译按钮
 

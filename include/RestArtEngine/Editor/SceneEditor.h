@@ -6,7 +6,7 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <filesystem>
 #include <string>
-#include <vector>
+#include <RestArtEngine/Editor/EditorDockManager.h>
 
 namespace rae::editor {
 
@@ -15,6 +15,7 @@ class SceneEditor {
 public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
+    void resetLayout() { dockManager_.resetLayout(); }
     void requestClose() { closeRequested_ = true; }
     bool drawCloseDialog(renderer::SceneRenderer&); // true only after explicit exit or a clean close
     scene::World& world() { return world_; }
@@ -46,9 +47,7 @@ private:
     bool sceneDirty_ = false, materialsDirty_ = false, materialDraftDirty_ = false;
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
-    bool expandedEditor_ = false;
-    struct PanelLayoutEntry { float x = 0, y = 0, width = 0, height = 0; };
-    std::vector<PanelLayoutEntry> panelLayout_;
+    EditorDockManager dockManager_;
 };
 
 // Resolve from --project, working directory, then executable ancestors.

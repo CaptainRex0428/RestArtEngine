@@ -281,6 +281,8 @@ struct SceneRenderer::Impl {
     ComPtr<IDXGISwapChain> swapChain;
     ComPtr<ID3D11InfoQueue> infoQueue;
     ComPtr<ID3D11RenderTargetView> backbuffer;
+    ComPtr<ID3D11RenderTargetView> sceneTarget;
+    ComPtr<ID3D11ShaderResourceView> sceneView;
     ComPtr<ID3D11DepthStencilView> depth;
     ComPtr<ID3D11Texture2D> shadowTexture;
     ComPtr<ID3D11DepthStencilView> shadowDepth;
@@ -334,6 +336,15 @@ struct SceneRenderer::Impl {
         texture.Reset();
         if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create depth", error)) return false;
         if (failed(device->CreateDepthStencilView(texture.Get(), nullptr, &depth), "Create depth view", error)) return false;
+
+        // Keep scene color separate from the swap chain so docked and floating
+        // editor windows composite it with normal UI clipping and z ordering.
+        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        texture.Reset();
+        if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create scene color", error)) return false;
+        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &sceneTarget), "Create scene color target", error)) return false;
+        if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &sceneView), "Create scene color SRV", error)) return false;
 
         // A persistent directional shadow map. Keep this independent from the
         // camera depth buffer so it can be sampled by both forward and deferred
@@ -727,6 +738,7 @@ bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::strin
     state.context->ClearState();
     state.context->Flush();
     state.backbuffer.Reset(); state.depth.Reset();
+    state.sceneTarget.Reset(); state.sceneView.Reset();
     state.shadowTexture.Reset(); state.shadowDepth.Reset();
     for (auto& view : state.shadowDepthSlices) view.Reset();
     state.shadowView.Reset();
@@ -763,6 +775,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     error.clear();
     auto& state = *impl_;
     if (!state.device || !state.backbuffer) { error = "Renderer has no render target."; return false; }
+    const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
+    if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
+        return clear(editorClear, error);
     const int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(state.width) - 1) : 0;
     const int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(state.height) - 1) : 0;
     const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(state.width) - viewportX) : static_cast<int>(state.width);
@@ -927,7 +942,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
     state.context->PSSetShaderResources(0, 5, shadowResources);
     state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
-    ID3D11RenderTargetView* backbuffer = state.backbuffer.Get();
+    ID3D11RenderTargetView* backbuffer = settings.editorViewport ? state.sceneTarget.Get() : state.backbuffer.Get();
     const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
     if (settings.path == RenderPath::Deferred) {
@@ -950,6 +965,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error)) return false;
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
+    if (settings.editorViewport) {
+        backbuffer = state.backbuffer.Get();
+        state.context->ClearRenderTargetView(backbuffer, editorClear);
+    }
     state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
     const HRESULT removed = state.device->GetDeviceRemovedReason();
     return !failed(removed, "Render/device status", error);
@@ -1059,6 +1078,9 @@ void SceneRenderer::shutdown() {
 
 ID3D11Device* SceneRenderer::device() const { return impl_->device.Get(); }
 ID3D11DeviceContext* SceneRenderer::context() const { return impl_->context.Get(); }
+void* SceneRenderer::sceneTexture() const { return impl_->sceneView.Get(); }
+std::uint32_t SceneRenderer::sceneTextureWidth() const { return impl_->width; }
+std::uint32_t SceneRenderer::sceneTextureHeight() const { return impl_->height; }
 std::string SceneRenderer::adapterName() const { return impl_->adapter; }
 bool SceneRenderer::validationEnabled() const { return impl_->infoQueue != nullptr; }
 
