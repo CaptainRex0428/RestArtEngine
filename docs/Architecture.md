@@ -117,7 +117,7 @@ SceneEditor
 
 `ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Details，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
 
-Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜单与场景上下文中的 Delete 快捷键都只移除 Actor 实例，保留共享资产。文本输入会屏蔽场景快捷键，避免编辑名称、材质或 Shader 时误操作。当前没有多选、Undo / Redo 或组件父子层级。
+Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜单与场景上下文中的 Delete 快捷键都只移除 Actor 实例，保留共享资产。文本输入会屏蔽场景快捷键，避免编辑名称、材质或 Shader 时误操作。当前没有多选和组件父子层级；Actor 增删 / 复制与 Gizmo 拖拽支持撤销重做（见 [UndoTransactions.md](UndoTransactions.md)）。
 
 内置 Mesh 包含 Sphere、Plane 和 Cube，OBJ 用于导入其他静态网格。当前顶点布局是 Position / Normal，OBJ 可以使用正索引或负索引、多边形会三角化，没有法线时生成法线。不包含 UV、切线、贴图、MTL 材质分组、骨骼或动画导入；复杂非凸多边形建议在 DCC 中预先三角化。
 
@@ -145,7 +145,7 @@ Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotG
 | --- | --- | --- |
 | `World` / Actor 列表 | World / Level、World Outliner | 单场景，无 Level Streaming、父子层级或蓝图。 |
 | Actor 的 Transform 与 `StaticMeshComponent` | Actor / Static Mesh Component | 一个静态网格组件，无任意组件栈。 |
-| 视口变换手柄与网格拾取 | 视口选择及移动 / 旋转 / 缩放工具 | 单 Actor 操作，无多选、Undo / Redo；使用 Y 轴向上的引擎坐标。 |
+| 视口变换手柄与网格拾取 | 视口选择及移动 / 旋转 / 缩放工具 | 单 Actor 操作，无多选；编辑事务覆盖 Actor 增删与 Gizmo 拖拽；使用 Y 轴向上的引擎坐标。 |
 | `MeshAsset` | Static Mesh 资产 | 内置几何与 OBJ，无 FBX / Nanite / LOD 工具链。 |
 | `MaterialAsset` 参数编辑 | Material Instance 的参数调节 | 共享标准 Shader，尚无节点图、材质继承或纹理采样参数。 |
 | Shader 编辑器 Apply | 修改后编译并更新预览 | 编译共享 HLSL，当前为 DX11 Shader Model 5。 |

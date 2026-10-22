@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <RestArtEngine/Editor/EditorDockManager.h>
+#include <RestArtEngine/Editor/UndoStack.h>
 
 namespace rae::editor {
 
@@ -21,10 +22,25 @@ public:
     scene::World& world() { return world_; }
     assets::AssetLibrary& assets() { return assets_; }
     scene::ActorId selectedActor() const { return selectedActor_; }
+    // Editor transactions (Ctrl+Z / Ctrl+Y). Exposed so the self-test and any
+    // future command palette drive exactly the same path as the Edit menu.
+    bool undo();
+    bool redo();
+    [[nodiscard]] const UndoStack& undoStack() const noexcept { return undo_; }
 private:
     void drawOutliner();
     void drawDetails();
     void deleteSelectedActor();
+    void drawEditMenu();
+    // Records the mutation that just happened; both directions are captured as
+    // copies so replaying never reads the live selection.
+    void pushActorCreated(scene::Actor actor, const std::string& label);
+    void pushActorDeleted(const scene::Actor& actor, std::size_t index);
+    // Tracks gizmo drags: remembers the last settled transform, then commits one
+    // undo entry when the drag ends (UE-style scope around the interaction).
+    void trackTransformEdit();
+    void eraseActor(scene::ActorId id);
+    void insertActor(std::size_t index, const scene::Actor& actor);
     void drawAssets();
     void drawMaterial();
     void drawShader(renderer::SceneRenderer&);
@@ -48,6 +64,12 @@ private:
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
     EditorDockManager dockManager_;
+    UndoStack undo_;
+    scene::Transform settledTransform_{};
+    scene::ActorId settledTransformActor_ = 0;
+    scene::Transform dragStartTransform_{};
+    scene::ActorId dragActor_ = 0;
+    bool dragging_ = false;
 };
 
 // Resolve from --project, working directory, then executable ancestors.

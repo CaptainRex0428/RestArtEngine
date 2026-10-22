@@ -738,6 +738,25 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         std::memcmp(&world.findActor(2)->transform, &groundBeforeDelete.transform, sizeof(scene::Transform)) == 0,
         "Deleting the selected Actor changed the remaining ground Actor.");
     capture("actor_deleted", true);
+    // Undo/redo (Godot-style transaction stack) through the real shortcut path:
+    // Ctrl+Z restores the deleted Actor, Ctrl+Y removes it again, and a second
+    // Ctrl+Z restores it so the follow-up steps start from a known state.
+    const auto pressChord = [&](ImGuiKeyChord modifier, ImGuiKey key) {
+        input.events = [modifier, key](ImGuiIO& io) { io.AddKeyEvent((ImGuiKey)modifier, true); io.AddKeyEvent(key, true); };
+        capture("ui_interaction", true);
+        input.events = [modifier, key](ImGuiIO& io) { io.AddKeyEvent(key, false); io.AddKeyEvent((ImGuiKey)modifier, false); };
+        capture("ui_interaction", true);
+    };
+    pressChord(ImGuiMod_Ctrl, ImGuiKey_Z);
+    require(world.findActor(1) && world.actors.size() == actorCount,
+        "Ctrl+Z did not restore the deleted Actor.");
+    require(editor.selectedActor() == 1, "Undo did not reselect the restored Actor.");
+    pressChord(ImGuiMod_Ctrl, ImGuiKey_Y);
+    require(!world.findActor(1) && world.actors.size() + 1 == actorCount,
+        "Ctrl+Y did not remove the Actor again.");
+    pressChord(ImGuiMod_Ctrl, ImGuiKey_Z);
+    require(world.findActor(1) && world.actors.size() == actorCount,
+        "Second Ctrl+Z did not restore the Actor.");
     world.createDefaultScene();
     capture("ui_interaction", true);
     click(projectPoint(-.35f, 1.35f, 0));

@@ -38,6 +38,7 @@ add_executable(RestArtEngine
     src/ImGui/ImGuiLayer.cpp
     src/Editor/EditorDockManager.cpp
     src/Editor/SceneEditor.cpp
+    src/Editor/UndoStack.cpp
     src/Editor/ViewportInteraction.cpp
     src/Editor/LoadingScreen.cpp
     vendor/ImGuizmo/src/ImGuizmo.cpp

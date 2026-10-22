@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 
@@ -157,11 +158,107 @@ bool SceneEditor::dirty(const renderer::SceneRenderer& renderer) const {
         shaderDraft_ != renderer.shaderSource() || renderer.shaderSource() != shaderSaved_;
 }
 
+void SceneEditor::eraseActor(scene::ActorId id) {
+    auto& actors = world_.actors;
+    actors.erase(std::remove_if(actors.begin(), actors.end(),
+        [id](const scene::Actor& actor) { return actor.id == id; }), actors.end());
+    if (selectedActor_ == id) selectedActor_ = actors.empty() ? 0 : actors.front().id;
+}
+
+void SceneEditor::insertActor(std::size_t index, const scene::Actor& actor) {
+    auto& actors = world_.actors;
+    if (index > actors.size()) index = actors.size();
+    actors.insert(actors.begin() + static_cast<std::ptrdiff_t>(index), actor);
+}
+
+void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
+    // Undo removes the new Actor, redo puts the same copy back. Both directions
+    // capture the identity by value so a later selection change cannot leak in.
+    const scene::ActorId id = actor.id;
+    undo_.push(label,
+        [this, id] { eraseActor(id); sceneDirty_ = true; },
+        [this, actor] { world_.actors.push_back(actor); selectedActor_ = actor.id; sceneDirty_ = true; });
+}
+
+void SceneEditor::pushActorDeleted(const scene::Actor& actor, std::size_t index) {
+    const scene::Actor snapshot = actor;
+    undo_.push("Delete " + actor.name,
+        [this, snapshot, index] { insertActor(index, snapshot); selectedActor_ = snapshot.id; sceneDirty_ = true; },
+        [this, id = actor.id] { eraseActor(id); sceneDirty_ = true; });
+}
+
+void SceneEditor::trackTransformEdit() {
+    if (viewport_.isUsing()) {
+        if (!dragging_) {
+            dragging_ = true;
+            dragActor_ = selectedActor_;
+            const auto* actor = world_.findActor(dragActor_);
+            // Prefer the transform settled before the drag started; fall back to
+            // the live value when the selection changed since the last frame.
+            dragStartTransform_ = (settledTransformActor_ == dragActor_ && actor)
+                ? settledTransform_ : (actor ? actor->transform : scene::Transform{});
+        }
+        return;
+    }
+    if (dragging_) {
+        dragging_ = false;
+        const scene::ActorId id = dragActor_;
+        const auto* actor = world_.findActor(id);
+        dragActor_ = 0;
+        settledTransformActor_ = 0;
+        if (actor && id && std::memcmp(&actor->transform, &dragStartTransform_, sizeof(scene::Transform)) != 0) {
+            const auto before = dragStartTransform_;
+            const auto after = actor->transform;
+            const std::string name = actor->name;
+            undo_.push("Transform " + name,
+                [this, id, before] { if (auto* target = world_.findActor(id)) { target->transform = before; sceneDirty_ = true; } },
+                [this, id, after] { if (auto* target = world_.findActor(id)) { target->transform = after; sceneDirty_ = true; } });
+        }
+        return;
+    }
+    // Nothing is being dragged: remember the visible transform as the next
+    // drag's "before" snapshot.
+    const auto* actor = world_.findActor(selectedActor_);
+    if (actor) {
+        settledTransform_ = actor->transform;
+        settledTransformActor_ = actor->id;
+    } else {
+        settledTransformActor_ = 0;
+    }
+}
+
+bool SceneEditor::undo() {
+    if (!undo_.undo()) return false;
+    sceneDirty_ = true;
+    status_ = "Undo: " + undo_.redoLabel();
+    return true;
+}
+
+bool SceneEditor::redo() {
+    if (!undo_.redo()) return false;
+    sceneDirty_ = true;
+    status_ = "Redo: " + undo_.undoLabel();
+    return true;
+}
+
+void SceneEditor::drawEditMenu() {
+    if (!ImGui::BeginMenu("Edit")) return;
+    const std::string undoText = undo_.canUndo() ? "Undo " + undo_.undoLabel() : std::string("Undo");
+    if (ImGui::MenuItem(undoText.c_str(), "Ctrl+Z", false, undo_.canUndo())) undo();
+    const std::string redoText = undo_.canRedo() ? "Redo " + undo_.redoLabel() : std::string("Redo");
+    if (ImGui::MenuItem(redoText.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false, undo_.canRedo())) redo();
+    ImGui::EndMenu();
+}
+
 void SceneEditor::deleteSelectedActor() {
     if (!selectedActor_ || viewport_.isUsing()) return;
     const auto* actor = world_.findActor(selectedActor_);
     const std::string name = actor ? actor->name : "Actor";
+    const scene::Actor snapshot = actor ? *actor : scene::Actor{};
+    std::size_t index = 0;
+    while (index < world_.actors.size() && world_.actors[index].id != selectedActor_) ++index;
     if (world_.removeActor(selectedActor_)) {
+        if (actor) pushActorDeleted(snapshot, index);
         selectedActor_ = 0;
         sceneDirty_ = true;
         status_ = "Deleted " + name + ". Save Scene to persist.";
@@ -173,6 +270,7 @@ void SceneEditor::drawOutliner() {
     if (ImGui::Button("+ Sphere")) {
         selectedActor_ = world_.createActor("Sphere", 1, selectedMaterial_);
         world_.findActor(selectedActor_)->transform.position[1] = 1;
+        pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
         sceneDirty_ = true;
     }
     ImGui::EndDisabled();
@@ -181,12 +279,18 @@ void SceneEditor::drawOutliner() {
     if (ImGui::Button("+ Cube")) {
         selectedActor_ = world_.createActor("Cube", 3, selectedMaterial_);
         world_.findActor(selectedActor_)->transform.position[1] = 1;
+        pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
         sceneDirty_ = true;
     }
     ImGui::EndDisabled();
     if (ImGui::Button("Duplicate") && selectedActor_) {
         const auto id = world_.duplicateActor(selectedActor_);
-        if (id) { selectedActor_ = id; world_.findActor(id)->transform.position[0] += 2.5f; sceneDirty_ = true; }
+        if (id) {
+            selectedActor_ = id;
+            world_.findActor(id)->transform.position[0] += 2.5f;
+            pushActorCreated(*world_.findActor(id), "Duplicate Actor");
+            sceneDirty_ = true;
+        }
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!selectedActor_ || viewport_.isUsing());
@@ -294,6 +398,7 @@ void SceneEditor::drawAssets() {
     if (ImGui::Button("Add Actor from mesh")) {
         if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
             selectedActor_ = world_.createActor(mesh->name, mesh->id, selectedMaterial_);
+            pushActorCreated(*world_.findActor(selectedActor_), "Add " + mesh->name);
             sceneDirty_ = true;
         }
     }
@@ -459,6 +564,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         ImGuiWindowFlags_NoSavedSettings);
     dockManager_.drawLayoutMenu();
     ImGui::SameLine();
+    drawEditMenu();
+    ImGui::SameLine();
     if (ImGui::Button("Save Scene")) saveScene();
     ImGui::SameLine();
     if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
@@ -478,7 +585,22 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 
+
+    // Editor transactions follow the Godot/UE convention: Ctrl+Z undoes, Ctrl+Y
+    // (or Ctrl+Shift+Z) redoes. Text fields keep their own undo, so the editor
+    // shortcuts stay quiet while an input owns the keyboard, and a gizmo drag is
+    // always a single step rather than one entry per frame.
+    if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
+            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y)) {
+            redo();
+        } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) {
+            undo();
+        }
+    }
+
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, renderer);
+    trackTransformEdit();
 
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
     dockManager_.drawPanel(EditorPanel::Details, [&] {
@@ -555,6 +677,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             if (ImGui::Button("Load & replace")) {
                 std::string error;
                 if (world_.load(project_.defaultScene, assets_, error)) {
+                    // History entries reference Actors from the replaced scene.
+                    undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
                     materialDraftDirty_ = materialsDirty_ = sceneDirty_ = false;
                     pendingMaterial_ = 0;

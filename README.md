@@ -66,6 +66,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。
+- 编辑事务：Actor 增删 / 复制与 Gizmo 拖拽可撤销重做（Ctrl+Z / Ctrl+Y）。
 - 启动加载界面：全屏背景 + 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
 
 **工程与分发**
@@ -361,6 +362,7 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 ## 文档
 
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
+- [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
 - [工程管理](docs/ProjectManagement.md)：引擎身份、工程链接、Project Manager 流程
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节
