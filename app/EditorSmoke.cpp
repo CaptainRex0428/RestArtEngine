@@ -57,6 +57,12 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     auto& world = editor.world();
     auto& assets = editor.assets();
     world.createDefaultScene(); assets.createDefaults();
+    // Command registry: the same ids back the buttons, the Edit menu and the
+    // keyboard, and enablement tracks editor state.
+    require(editor.commands().contains("actor.delete") && editor.commands().contains("edit.undo"),
+        "Editor command registry is missing core commands.");
+    require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
+        "Delete command enablement does not follow the Actor selection.");
     renderer::SceneSettings settings;
     std::string error;
     ImGuiContext* context = nullptr;
@@ -255,6 +261,12 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
 
     // Restore default content for a useful editor screenshot.
     world.createDefaultScene(); assets.createDefaults();
+    // Command registry: the same ids back the buttons, the Edit menu and the
+    // keyboard, and enablement tracks editor state.
+    require(editor.commands().contains("actor.delete") && editor.commands().contains("edit.undo"),
+        "Editor command registry is missing core commands.");
+    require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
+        "Delete command enablement does not follow the Actor selection.");
     settings.rayTracing = false;
     capture("editor_warmup", true);
     capture("editor", true, true);

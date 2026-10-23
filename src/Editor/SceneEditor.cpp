@@ -96,7 +96,67 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     shaderDraft_ = shaderSaved_ = renderer.shaderSource();
     shaderDraft_.reserve(std::max<std::size_t>(65536, shaderDraft_.size() * 2));
     status_ = "Project loaded. Actor edits are live; Material and Shader edits require Apply.";
+    registerCommands();
     return true;
+}
+
+void SceneEditor::registerCommands() {
+    // Single place that defines every editor action: the Edit menu, the panel
+    // buttons and the keyboard all resolve through these ids.
+    commands_.add("edit.undo", "edit", "Undo", "Ctrl+Z", ImGuiMod_Ctrl | ImGuiKey_Z,
+        [this] { undo(); }, [this] { return undo_.canUndo(); });
+    commands_.add("edit.redo", "edit", "Redo", "Ctrl+Y", ImGuiMod_Ctrl | ImGuiKey_Y,
+        [this] { redo(); }, [this] { return undo_.canRedo(); });
+    commands_.add("edit.redoAlt", "hidden", "Redo (Shift)", "Ctrl+Shift+Z",
+        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, [this] { redo(); },
+        [this] { return undo_.canRedo(); });
+    commands_.add("actor.duplicate", "edit", "Duplicate Actor", "Ctrl+D", ImGuiMod_Ctrl | ImGuiKey_D,
+        [this] { duplicateSelectedActor(); },
+        [this] { return selectedActor_ != 0 && !viewport_.isUsing(); });
+    commands_.add("actor.delete", "edit", "Delete Actor", "Delete", ImGuiKey_Delete,
+        [this] { deleteSelectedActor(); },
+        [this] { return selectedActor_ != 0 && !viewport_.isUsing(); });
+    commands_.add("actor.addSphere", "actor", "+ Sphere", "", 0,
+        [this] {
+            selectedActor_ = world_.createActor("Sphere", 1, selectedMaterial_);
+            world_.findActor(selectedActor_)->transform.position[1] = 1;
+            pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
+            sceneDirty_ = true;
+        },
+        [this] { return assets_.findMesh(1) != nullptr && assets_.findMaterial(selectedMaterial_) != nullptr; });
+    commands_.add("actor.addCube", "actor", "+ Cube", "", 0,
+        [this] {
+            selectedActor_ = world_.createActor("Cube", 3, selectedMaterial_);
+            world_.findActor(selectedActor_)->transform.position[1] = 1;
+            pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
+            sceneDirty_ = true;
+        },
+        [this] { return assets_.findMesh(3) != nullptr && assets_.findMaterial(selectedMaterial_) != nullptr; });
+    commands_.add("scene.save", "scene", "Save Scene", "Ctrl+S", ImGuiMod_Ctrl | ImGuiKey_S,
+        [this] { saveScene(); });
+    commands_.add("layout.restore", "layout", "Restore Default Layout", "", 0,
+        [this] { dockManager_.resetLayout(); });
+}
+
+bool SceneEditor::commandButton(std::string_view id) {
+    const auto* info = commands_.info(id);
+    if (!info) return false;
+    const bool usable = commands_.enabled(id);
+    ImGui::BeginDisabled(!usable);
+    const bool pressed = ImGui::Button(info->label.c_str());
+    ImGui::EndDisabled();
+    if (pressed) commands_.invoke(id);
+    return pressed;
+}
+
+void SceneEditor::duplicateSelectedActor() {
+    if (!selectedActor_) return;
+    const auto id = world_.duplicateActor(selectedActor_);
+    if (!id) return;
+    selectedActor_ = id;
+    world_.findActor(id)->transform.position[0] += 2.5f;
+    pushActorCreated(*world_.findActor(id), "Duplicate Actor");
+    sceneDirty_ = true;
 }
 
 void SceneEditor::selectMaterial(assets::AssetId id) {
@@ -243,10 +303,16 @@ bool SceneEditor::redo() {
 
 void SceneEditor::drawEditMenu() {
     if (!ImGui::BeginMenu("Edit")) return;
-    const std::string undoText = undo_.canUndo() ? "Undo " + undo_.undoLabel() : std::string("Undo");
-    if (ImGui::MenuItem(undoText.c_str(), "Ctrl+Z", false, undo_.canUndo())) undo();
-    const std::string redoText = undo_.canRedo() ? "Redo " + undo_.redoLabel() : std::string("Redo");
-    if (ImGui::MenuItem(redoText.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false, undo_.canRedo())) redo();
+    for (const auto& command : commands_.commands()) {
+        if (command.info.group != "edit") continue;
+        const bool usable = !command.enabled || command.enabled();
+        // Undo/redo show the pending action name, like Godot's history entries.
+        std::string label = command.info.label;
+        if (command.info.id == "edit.undo" && undo_.canUndo()) label += " " + undo_.undoLabel();
+        if (command.info.id == "edit.redo" && undo_.canRedo()) label += " " + undo_.redoLabel();
+        if (ImGui::MenuItem(label.c_str(), command.info.shortcut.c_str(), false, usable))
+            commands_.invoke(command.info.id);
+    }
     ImGui::EndMenu();
 }
 
@@ -267,34 +333,16 @@ void SceneEditor::deleteSelectedActor() {
 
 void SceneEditor::drawOutliner() {
     ImGui::BeginDisabled(!assets_.findMesh(1) || !assets_.findMaterial(selectedMaterial_));
-    if (ImGui::Button("+ Sphere")) {
-        selectedActor_ = world_.createActor("Sphere", 1, selectedMaterial_);
-        world_.findActor(selectedActor_)->transform.position[1] = 1;
-        pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
-        sceneDirty_ = true;
-    }
+    commandButton("actor.addSphere");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!assets_.findMesh(3) || !assets_.findMaterial(selectedMaterial_));
-    if (ImGui::Button("+ Cube")) {
-        selectedActor_ = world_.createActor("Cube", 3, selectedMaterial_);
-        world_.findActor(selectedActor_)->transform.position[1] = 1;
-        pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
-        sceneDirty_ = true;
-    }
+    commandButton("actor.addCube");
     ImGui::EndDisabled();
-    if (ImGui::Button("Duplicate") && selectedActor_) {
-        const auto id = world_.duplicateActor(selectedActor_);
-        if (id) {
-            selectedActor_ = id;
-            world_.findActor(id)->transform.position[0] += 2.5f;
-            pushActorCreated(*world_.findActor(id), "Duplicate Actor");
-            sceneDirty_ = true;
-        }
-    }
+    commandButton("actor.duplicate");
     ImGui::SameLine();
     ImGui::BeginDisabled(!selectedActor_ || viewport_.isUsing());
-    if (ImGui::Button("Delete")) deleteSelectedActor();
+    commandButton("actor.delete");
     ImGui::EndDisabled();
     ImGui::Separator();
     ImGui::BeginChild("Actor list", {0, 0});
@@ -566,7 +614,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::SameLine();
     drawEditMenu();
     ImGui::SameLine();
-    if (ImGui::Button("Save Scene")) saveScene();
+    commandButton("scene.save");
     ImGui::SameLine();
     if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
     ImGui::SameLine();
@@ -586,18 +634,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::End();
 
 
-    // Editor transactions follow the Godot/UE convention: Ctrl+Z undoes, Ctrl+Y
-    // (or Ctrl+Shift+Z) redoes. Text fields keep their own undo, so the editor
-    // shortcuts stay quiet while an input owns the keyboard, and a gizmo drag is
-    // always a single step rather than one entry per frame.
-    if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) {
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
-            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y)) {
-            redo();
-        } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) {
-            undo();
-        }
-    }
+    // Shortcuts resolve through the command registry, so the Edit menu, the
+    // panel buttons and the keyboard cannot drift apart. Text fields keep their
+    // own undo, and a gizmo drag owns the keyboard until it ends.
+    if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) commands_.processShortcuts();
 
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, renderer);
     trackTransformEdit();

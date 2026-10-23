@@ -8,6 +8,7 @@
 #include <string>
 #include <RestArtEngine/Editor/EditorDockManager.h>
 #include <RestArtEngine/Editor/UndoStack.h>
+#include <RestArtEngine/Editor/EditorCommands.h>
 
 namespace rae::editor {
 
@@ -27,11 +28,17 @@ public:
     bool undo();
     bool redo();
     [[nodiscard]] const UndoStack& undoStack() const noexcept { return undo_; }
+    // Editor command registry (shortcuts + Edit menu). Exposed for tests so the
+    // same ids the UI uses can be invoked and their enablement inspected.
+    [[nodiscard]] const EditorCommandRegistry& commands() const noexcept { return commands_; }
 private:
     void drawOutliner();
     void drawDetails();
     void deleteSelectedActor();
+    void duplicateSelectedActor();
+    void registerCommands();
     void drawEditMenu();
+    bool commandButton(std::string_view id);
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.
     void pushActorCreated(scene::Actor actor, const std::string& label);
@@ -64,6 +71,7 @@ private:
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
     EditorDockManager dockManager_;
+    EditorCommandRegistry commands_;
     UndoStack undo_;
     scene::Transform settledTransform_{};
     scene::ActorId settledTransformActor_ = 0;
