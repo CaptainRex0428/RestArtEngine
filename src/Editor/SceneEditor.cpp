@@ -718,7 +718,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::SameLine(); ImGui::Checkbox("Ray tracing", &settings.rayTracing);
     ImGui::SameLine(); capture |= ImGui::Button("Capture");
     ImGui::SameLine();
-    ImGui::TextDisabled("Project: %s | DX11 / %s | %.0f FPS | F1 UI, F2 pipeline, F3 rays",
+    ImGui::TextDisabled("Project: %s | DX11 / %s | %.0f FPS | F1 UI, F2 pipeline, F3 rays, F11 fullscreen",
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 

@@ -170,10 +170,11 @@ CMake 目标：
 | F1 | 显示 / 隐藏控制面板 |
 | F2 | 切换 Forward / Deferred |
 | F3 | 开关光追阴影与反射 |
+| F11 | 视口全屏（无边框覆盖显示器并隐藏编辑器面板；再按或 Esc 恢复） |
 | F9 / Capture 按钮 | 保存当前画面 |
 | Esc / 关闭窗口 | 退出（有未保存修改时会询问） |
 
-文本输入时 W / E / R / Space / Delete 不会作用于场景。当前为单 Actor 操作，尚无 Undo / Redo 与多选。
+文本输入时 W / E / R / Space / Delete 不会作用于场景。视口支持多选（Ctrl / Shift 点击），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y）。
 
 Viewport settings 还可调 Key light、Exposure、VSync、Shadow method，并支持 Reset camera（同时复位焦点）。
 

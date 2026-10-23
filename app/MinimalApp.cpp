@@ -34,6 +34,11 @@ struct WindowState {
     // destroying the project manager can leave a thread-wide WM_QUIT in the
     // queue that terminates the editor loop before its first frame.
     bool quitOnDestroy = false;
+    // F11 borderless fullscreen restores this captured state on toggle back.
+    bool fullscreen = false;
+    bool uiBeforeFullscreen = true;
+    LONG_PTR windowedStyle = 0;
+    WINDOWPLACEMENT windowedPlacement{};
 };
 
 // RestArtEngine.rc embeds assets/icons/RAEngine.ico (generated from the project logo
@@ -91,6 +96,34 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     }
     if (uiHandled) return 1;
     return DefWindowProcW(window, message, wp, lp);
+}
+
+// F11 toggles a borderless fullscreen covering the monitor that owns the window
+// (the same immersive behaviour UE's editor uses). The previous style and
+// placement are restored on the way back; the swap chain follows through the
+// regular WM_SIZE -> renderer.resize path.
+void toggleFullscreen(HWND window, WindowState& state) {
+    if (!window) return;
+    if (!state.fullscreen) {
+        state.windowedPlacement.length = sizeof(WINDOWPLACEMENT);
+        if (!GetWindowPlacement(window, &state.windowedPlacement)) return;
+        state.windowedStyle = GetWindowLongPtrW(window, GWL_STYLE);
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(MONITORINFO);
+        if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+        SetWindowLongPtrW(window, GWL_STYLE, (state.windowedStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+        SetWindowPos(window, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
+            monitor.rcMonitor.right - monitor.rcMonitor.left,
+            monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        state.fullscreen = true;
+    } else {
+        SetWindowLongPtrW(window, GWL_STYLE, state.windowedStyle);
+        SetWindowPlacement(window, &state.windowedPlacement);
+        SetWindowPos(window, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        state.fullscreen = false;
+    }
 }
 
 struct WindowOwner {
@@ -645,10 +678,38 @@ int wmain(int argc, wchar_t** argv) {
             ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
             auto& io = ImGui::GetIO();
             if (!io.WantTextInput) {
-                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) editor.requestClose();
-                if (ImGui::IsKeyPressed(ImGuiKey_F1)) showUI = !showUI;
+                // F11 is "viewport fullscreen", not "UI fullscreen": the window
+                // goes borderless over the monitor and the editor panels are
+                // hidden so the scene covers the whole screen. Escape and F1
+                // leave that mode instead of closing the window.
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    if (windowState.fullscreen) {
+                        toggleFullscreen(window.handle, windowState);
+                        showUI = windowState.uiBeforeFullscreen;
+                    } else {
+                        editor.requestClose();
+                    }
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
+                    if (windowState.fullscreen) {
+                        toggleFullscreen(window.handle, windowState);
+                        showUI = windowState.uiBeforeFullscreen;
+                    } else {
+                        showUI = !showUI;
+                    }
+                }
                 if (ImGui::IsKeyPressed(ImGuiKey_F2)) settings.path = settings.path == RenderPath::Forward ? RenderPath::Deferred : RenderPath::Forward;
                 if (ImGui::IsKeyPressed(ImGuiKey_F3)) settings.rayTracing = !settings.rayTracing;
+                if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
+                    const bool entering = !windowState.fullscreen;
+                    toggleFullscreen(window.handle, windowState);
+                    if (entering) {
+                        windowState.uiBeforeFullscreen = showUI;
+                        showUI = false;
+                    } else {
+                        showUI = windowState.uiBeforeFullscreen;
+                    }
+                }
             }
             if (!showUI && !io.WantCaptureMouse && !selfTest) {
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
