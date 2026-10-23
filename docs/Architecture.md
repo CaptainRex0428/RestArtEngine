@@ -14,7 +14,7 @@
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
 | `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
-| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；当前工作区新增 `EditorTheme` 配色与本机偏好读写，尚未提交验证。 |
+| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
 | `Projects/Sandbox/Sandbox.raproject` | 默认 Sandbox 工程描述，声明引擎、工程资产、工程 Shader 与默认场景的位置。 |
@@ -139,7 +139,7 @@ Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotG
 
 `UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Details 变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条，多选复制仍逐个记录。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
 
-截至 2026-10-23，工作区的 `EditorTheme` 已集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。主题代码尚未提交，本轮仅核对源码，未验证其构建与运行效果。
+`EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换（提交 `d62960b`）；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。两套配色已分别截图验证。
 
 ## 文件与持久化
 
@@ -197,7 +197,7 @@ Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotG
 | 材质开放函数 | `Shaders/Materials/Standard.hlsli` 的 `EvaluateMaterial()` |
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
 | 编辑命令、快捷键与撤销历史 | `src/Editor/EditorCommands.cpp`、`src/Editor/UndoStack.cpp`；动作接入在 `SceneEditor.cpp` |
-| 编辑器配色与主题偏好（当前工作区） | `src/ImGui/EditorTheme.cpp`、`src/ImGui/ImGuiLayer.cpp` |
+| 编辑器配色与主题偏好 | `src/ImGui/EditorTheme.cpp`、`src/ImGui/ImGuiLayer.cpp` |
 | 面板身份、默认 Dock 树、布局恢复 | `src/Editor/EditorDockManager.cpp` |
 | 视口拾取、变换手柄、相机 | `src/Editor/ViewportInteraction.cpp` |
 | 启动加载界面与背景图 | `src/Editor/LoadingScreen.cpp`、`assets/load/load.png` |

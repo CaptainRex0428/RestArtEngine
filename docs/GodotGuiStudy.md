@@ -15,7 +15,7 @@
 | 多选、整组 Gizmo、批量删除 | 已提交，`b02936e` | 多选复制逐个记历史；删除撤销不恢复完整多选集合 |
 | 双行工具栏 | 已提交，`fdee08c` | 高度从 ImGui 样式计算 |
 | F11 视口全屏 | 已提交，`bed8459` | 无边框主窗口并隐藏面板，不是独立 Dock 窗口 |
-| Black / Dark Blue 主题与偏好保存 | 当前工作区已写入，尚未提交 | 已补测试代码，本次未重新构建或运行验证 |
+| Black / Dark Blue 主题与偏好保存 | 已提交，`d62960b` | 两套配色截图验证；偏好为进程工作目录下的本机文件 |
 
 本机保留的 `artifacts/editor-docking-validation2/`、`artifacts/docking-render-validation2/` 与 `artifacts/editor-interactive-smoke/` 是 Docking 阶段的验证产物，其中渲染比对数据见 `artifacts/docking-render-validation2/validation-results.json`。这些输出不提交，也不能用来证明后续命令、多选、F11 或主题改动已通过回归。本次同步仅核对源码与文档，不新增运行测试结论。
 
@@ -60,7 +60,7 @@ Dear ImGui Docking
 ├── 主窗口内悬浮与回嵌
 └── RestArtEngine.imgui.ini 原生布局持久化
 
-EditorTheme（当前工作区，尚未提交）
+EditorTheme（提交 d62960b）
 ├── Black / Dark Blue 配色与共用几何样式
 └── RestArtEngine.theme.ini 偏好读写
 ```
