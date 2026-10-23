@@ -683,13 +683,20 @@ void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
     actorPanelFocused_ = false;
     const auto* mainViewport = ImGui::GetMainViewport();
-    dockManager_.beginFrame(90.0f);
+    // Standard two-row toolbar: row 1 is menus + scene actions, row 2 is render
+    // settings + status. The height is derived from the current style so a font,
+    // DPI or padding change can never make the bar overlap the docked panels.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float rowHeight = ImGui::GetFrameHeight();
+    const float toolbarHeight = style.WindowPadding.y * 2.0f + rowHeight * 2.0f + style.ItemSpacing.y + 1.0f;
+    dockManager_.beginFrame(toolbarHeight);
     ImGui::SetNextWindowPos(mainViewport->Pos);
-    ImGui::SetNextWindowSize({mainViewport->Size.x, 90.0f});
+    ImGui::SetNextWindowSize({mainViewport->Size.x, toolbarHeight});
     ImGui::Begin("RestArtEngine Editor", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoSavedSettings);
+    // Row 1: menus and scene-wide actions.
     dockManager_.drawLayoutMenu();
     ImGui::SameLine();
     drawEditMenu();
@@ -699,8 +706,9 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
     ImGui::SameLine();
     if (ImGui::Button("Save All")) saveAll(renderer);
-    ImGui::SameLine(); ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
     ImGui::SameLine();
+    ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
+    // Row 2 starts on a new line automatically (no SameLine after the status).
     ImGui::SetNextItemWidth(110);
     int path = settings.path == renderer::RenderPath::Deferred ? 1 : 0;
     if (ImGui::Combo("##pipeline", &path, "Forward\0Deferred\0"))
@@ -709,7 +717,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::Combo("##view", &settings.debugView, "Lit\0Unlit\0Albedo\0World normals\0World position\0");
     ImGui::SameLine(); ImGui::Checkbox("Ray tracing", &settings.rayTracing);
     ImGui::SameLine(); capture |= ImGui::Button("Capture");
-    ImGui::TextDisabled("Project: %s | DX11 / %s | %.1f FPS | F1 UI, F2 pipeline, F3 rays, RMB orbit, wheel zoom",
+    ImGui::SameLine();
+    ImGui::TextDisabled("Project: %s | DX11 / %s | %.0f FPS | F1 UI, F2 pipeline, F3 rays",
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 
