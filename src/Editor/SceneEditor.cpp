@@ -247,6 +247,15 @@ void SceneEditor::pushActorDeleted(const scene::Actor& actor, std::size_t index)
         [this, id = actor.id] { eraseActor(id); sceneDirty_ = true; });
 }
 
+void SceneEditor::pushDetailsTransform(scene::ActorId id, const scene::Transform& before,
+                                       const scene::Transform& after, const char* field) {
+    if (!id || std::memcmp(&before, &after, sizeof(scene::Transform)) == 0) return;
+    undo_.push(std::string("Edit ") + field,
+        [this, id, before] { if (auto* target = world_.findActor(id)) { target->transform = before; sceneDirty_ = true; } },
+        [this, id, after] { if (auto* target = world_.findActor(id)) { target->transform = after; sceneDirty_ = true; } },
+        UndoStack::Merge{"details." + std::to_string(id) + "." + field, 700});
+}
+
 void SceneEditor::trackTransformEdit() {
     if (viewport_.isUsing()) {
         if (!dragging_) {
@@ -371,15 +380,21 @@ void SceneEditor::drawDetails() {
     ImGui::SeparatorText("Transform");
     ImGui::SetNextItemWidth(-1);
     sceneDirty_ |= ImGui::DragFloat3("##position", actor->transform.position, .03f, -1000, 1000, "%.2f");
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Position");
     ImGui::TextDisabled("Position X / Y / Z");
     ImGui::SetNextItemWidth(-1);
     sceneDirty_ |= ImGui::DragFloat3("##rotation", actor->transform.rotation, .5f, -360, 360, "%.1f");
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Rotation");
     ImGui::TextDisabled("Rotation X / Y / Z (degrees)");
     ImGui::SetNextItemWidth(-1);
     if (ImGui::DragFloat3("##scale", actor->transform.scale, .02f, .01f, 100, "%.2f")) {
         for (auto& value : actor->transform.scale) value = std::clamp(value, .01f, 100.0f);
         sceneDirty_ = true;
     }
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Scale");
     ImGui::TextDisabled("Scale X / Y / Z");
     ImGui::SeparatorText("Static Mesh Component");
     const auto* mesh = assets_.findMesh(actor->mesh.meshId);

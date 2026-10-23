@@ -1,12 +1,29 @@
 #include <RestArtEngine/Editor/UndoStack.h>
+#include <chrono>
 
 namespace rae::editor {
 
-void UndoStack::push(std::string label, Callback undo, Callback redo) {
+namespace {
+long long nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
+
+void UndoStack::push(std::string label, Callback undo, Callback redo, Merge merge) {
     if (!undo || !redo) return;
+    const auto now = nowMs();
+    // MERGE_ENDS: keep the original undo (the oldest state) and let the newest
+    // redo win, but only while the same edit keeps arriving inside the window.
+    if (!merge.key.empty() && !entries_.empty() && cursor_ == entries_.size() &&
+        entries_.back().mergeKey == merge.key && now - entries_.back().commitMs <= merge.windowMs) {
+        entries_.back().redo = std::move(redo);
+        entries_.back().commitMs = now;
+        return;
+    }
     // Committing a new action invalidates everything that was undone.
     entries_.resize(cursor_);
-    entries_.push_back(Entry{std::move(label), std::move(undo), std::move(redo)});
+    entries_.push_back(Entry{std::move(label), std::move(undo), std::move(redo), std::move(merge.key), now});
     cursor_ = entries_.size();
     // Drop the oldest steps once the cap is exceeded so memory stays bounded.
     if (maxSteps_ > 0 && entries_.size() > maxSteps_) {

@@ -63,6 +63,18 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         "Editor command registry is missing core commands.");
     require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
         "Delete command enablement does not follow the Actor selection.");
+    {
+        // UndoStack merge (Godot MERGE_ENDS): same-key commits inside the window
+        // collapse into one entry that keeps the oldest undo state.
+        rae::editor::UndoStack merged;
+        int value = 0;
+        merged.push("Edit A", [&] { value = 0; }, [&] { value = 1; }, { "k", 1000 });
+        merged.push("Edit B", [&] { value = 0; }, [&] { value = 2; }, { "k", 1000 });
+        require(merged.size() == 1, "Merged commits created more than one history entry.");
+        require(merged.undo() && value == 0, "Merged undo did not restore the oldest state.");
+        require(merged.redo() && value == 2, "Merged redo did not apply the latest state.");
+        require(merged.size() == 1, "Undo/redo changed the merged history size.");
+    }
     renderer::SceneSettings settings;
     std::string error;
     ImGuiContext* context = nullptr;
@@ -267,6 +279,18 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         "Editor command registry is missing core commands.");
     require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
         "Delete command enablement does not follow the Actor selection.");
+    {
+        // UndoStack merge (Godot MERGE_ENDS): same-key commits inside the window
+        // collapse into one entry that keeps the oldest undo state.
+        rae::editor::UndoStack merged;
+        int value = 0;
+        merged.push("Edit A", [&] { value = 0; }, [&] { value = 1; }, { "k", 1000 });
+        merged.push("Edit B", [&] { value = 0; }, [&] { value = 2; }, { "k", 1000 });
+        require(merged.size() == 1, "Merged commits created more than one history entry.");
+        require(merged.undo() && value == 0, "Merged undo did not restore the oldest state.");
+        require(merged.redo() && value == 2, "Merged redo did not apply the latest state.");
+        require(merged.size() == 1, "Undo/redo changed the merged history size.");
+    }
     settings.rayTracing = false;
     capture("editor_warmup", true);
     capture("editor", true, true);

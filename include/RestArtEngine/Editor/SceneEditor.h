@@ -43,6 +43,9 @@ private:
     // copies so replaying never reads the live selection.
     void pushActorCreated(scene::Actor actor, const std::string& label);
     void pushActorDeleted(const scene::Actor& actor, std::size_t index);
+    // Details-panel transform edit: one merged entry per finished drag.
+    void pushDetailsTransform(scene::ActorId id, const scene::Transform& before,
+                             const scene::Transform& after, const char* field);
     // Tracks gizmo drags: remembers the last settled transform, then commits one
     // undo entry when the drag ends (UE-style scope around the interaction).
     void trackTransformEdit();
@@ -75,6 +78,7 @@ private:
     UndoStack undo_;
     scene::Transform settledTransform_{};
     scene::ActorId settledTransformActor_ = 0;
+    scene::Transform detailsBefore_{};
     scene::Transform dragStartTransform_{};
     scene::ActorId dragActor_ = 0;
     bool dragging_ = false;

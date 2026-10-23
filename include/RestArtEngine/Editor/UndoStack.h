@@ -21,9 +21,18 @@ class UndoStack {
 public:
     using Callback = std::function<void()>;
 
+    // Merge policy for consecutive commits of the same logical edit. Modeled on
+    // Godot's UndoRedo::MERGE_ENDS: a same-key commit inside the window keeps the
+    // oldest undo direction and refreshes only the redo direction, so a slider
+    // dragged back and forth still undoes in one step.
+    struct Merge {
+        std::string key;   // empty disables merging
+        int windowMs = 0;  // merge only when the previous commit is this recent
+    };
+
     // Records a new action after `cursor_`, dropping any redo tail. The caller
     // is responsible for applying the edit itself; `redo` only replays it.
-    void push(std::string label, Callback undo, Callback redo);
+    void push(std::string label, Callback undo, Callback redo, Merge merge = {});
     bool undo();
     bool redo();
 
@@ -42,6 +51,8 @@ private:
         std::string label;
         Callback undo;
         Callback redo;
+        std::string mergeKey;
+        long long commitMs = 0;
     };
     std::vector<Entry> entries_;
     // entries_[0, cursor_) is the applied prefix; the rest is the redo tail.
