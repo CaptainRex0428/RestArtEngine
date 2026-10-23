@@ -67,6 +67,9 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。
 - 编辑事务：Actor 增删 / 复制与 Gizmo 拖拽可撤销重做（Ctrl+Z / Ctrl+Y）；连续数值拖动合并为一条。
+- 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Details 编辑主 Actor。
+- 编辑命令：菜单、按钮与快捷键通过命令注册表执行已接入的动作；双行工具栏按样式计算高度。
+- F11 视口全屏：窗口无边框覆盖当前显示器并隐藏面板，再按 F11 或 Esc 恢复。
 - 启动加载界面：全屏背景 + 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
 
 **工程与分发**
@@ -174,7 +177,7 @@ CMake 目标：
 | F9 / Capture 按钮 | 保存当前画面 |
 | Esc / 关闭窗口 | 退出（有未保存修改时会询问） |
 
-文本输入时 W / E / R / Space / Delete 不会作用于场景。视口支持多选（Ctrl / Shift 点击），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y）。
+文本输入时 W / E / R / Space / Delete 不会作用于场景。Outliner 与视口支持多选（Ctrl / Shift 点击切换成员，Shift 当前不做连续范围选择），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y，也支持 Ctrl+Shift+Z 重做）。Ctrl+D 复制选中 Actor，Ctrl+S 保存场景。多选复制目前逐个记入撤销历史。
 
 Viewport settings 还可调 Key light、Exposure、VSync、Shadow method，并支持 Reset camera（同时复位焦点）。
 
@@ -345,7 +348,9 @@ RestArtEngine.exe --help
 - 光追是**解析求交 + 三角形遍历**，没有 DXR、硬件 RT 核心、通用网格 BVH 或路径追踪。
 - 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
-- 编辑器无 Undo / Redo、多选、父子层级、组件系统。
+- 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称、可见性及 Mesh / Material 引用修改尚未纳入撤销历史。
+- Docking 悬浮限于主窗口；尚无独立操作系统面板窗口、动态面板插件或命名布局。
+- 主题切换已写入当前工作区（Black / Dark Blue、偏好保存），截至 2026-10-23 文档同步时尚未提交，也未在本轮重新构建验证；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换当前工作区)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
 
 ## 第三方依赖与许可
@@ -364,6 +369,7 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
+- [GUI 设计与进度](docs/GodotGuiStudy.md)：Godot 职责划分参考、已提交功能、工作区实现与验证范围
 - [工程管理](docs/ProjectManagement.md)：引擎身份、工程链接、Project Manager 流程
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节

@@ -5,6 +5,7 @@
 #include <shlobj.h>
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <RestArtEngine/ImGui/ImGuiLayer.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/Editor/LoadingScreen.h>
 #include "EditorSmoke.h"
@@ -605,6 +606,9 @@ int wmain(int argc, wchar_t** argv) {
         if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
             throw std::runtime_error(error);
         rae::imgui::ImGuiLayer ui;
+        // Theme is a per-user preference read before the context is created; the
+        // ImGui layer applies it during initialization.
+        rae::imgui::currentTheme() = rae::imgui::loadThemePreference(rae::imgui::defaultThemePreferencePath());
         if (!ui.initialize(window.handle, renderer.device(), renderer.context()))
             throw std::runtime_error("Dear ImGui initialization failed");
         if (interactive) ui.setIniFilename("RestArtEngine.imgui.ini");

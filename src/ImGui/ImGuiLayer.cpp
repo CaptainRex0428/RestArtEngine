@@ -1,4 +1,5 @@
 #include <RestArtEngine/ImGui/ImGuiLayer.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,67 +23,6 @@ namespace {
 const ATOM contextAtom = GlobalAddAtomW(MAKEINTATOM(0x5241));
 const wchar_t* const contextProperty = MAKEINTATOM(contextAtom);
 
-void applyEditorTheme() {
-    ImGui::StyleColorsDark();
-    auto& style = ImGui::GetStyle();
-    style.WindowPadding = ImVec2(18, 18);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(10, 10);
-    style.ItemInnerSpacing = ImVec2(8, 6);
-    style.IndentSpacing = 20;
-    style.ScrollbarSize = 12;
-    style.GrabMinSize = 10;
-    style.WindowRounding = 9;
-    style.ChildRounding = 7;
-    style.FrameRounding = 5;
-    style.PopupRounding = 7;
-    style.ScrollbarRounding = 8;
-    style.GrabRounding = 4;
-    style.TabRounding = 5;
-    style.WindowBorderSize = 1;
-    style.ChildBorderSize = 1;
-    style.FrameBorderSize = 0;
-    auto* c = style.Colors;
-    c[ImGuiCol_Text] = ImVec4(.89F, .93F, .98F, 1);
-    c[ImGuiCol_TextDisabled] = ImVec4(.46F, .54F, .65F, 1);
-    c[ImGuiCol_WindowBg] = ImVec4(.055F, .075F, .11F, .98F);
-    c[ImGuiCol_ChildBg] = ImVec4(.07F, .095F, .14F, .96F);
-    c[ImGuiCol_PopupBg] = ImVec4(.085F, .11F, .16F, .99F);
-    c[ImGuiCol_Border] = ImVec4(.21F, .28F, .38F, .55F);
-    c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_FrameBg] = ImVec4(.12F, .17F, .24F, 1);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(.18F, .28F, .40F, 1);
-    c[ImGuiCol_FrameBgActive] = ImVec4(.19F, .36F, .50F, 1);
-    c[ImGuiCol_TitleBg] = ImVec4(.065F, .09F, .135F, 1);
-    c[ImGuiCol_TitleBgActive] = ImVec4(.10F, .15F, .22F, 1);
-    c[ImGuiCol_TitleBgCollapsed] = c[ImGuiCol_TitleBg];
-    c[ImGuiCol_MenuBarBg] = ImVec4(.085F, .115F, .17F, 1);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(.05F, .07F, .10F, .70F);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(.22F, .30F, .40F, 1);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(.29F, .41F, .54F, 1);
-    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(.32F, .52F, .67F, 1);
-    c[ImGuiCol_CheckMark] = ImVec4(.29F, .79F, .95F, 1);
-    c[ImGuiCol_SliderGrab] = ImVec4(.24F, .65F, .86F, 1);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(.39F, .83F, 1, 1);
-    c[ImGuiCol_Button] = ImVec4(.15F, .29F, .41F, 1);
-    c[ImGuiCol_ButtonHovered] = ImVec4(.19F, .43F, .59F, 1);
-    c[ImGuiCol_ButtonActive] = ImVec4(.23F, .56F, .71F, 1);
-    c[ImGuiCol_Header] = ImVec4(.13F, .25F, .36F, 1);
-    c[ImGuiCol_HeaderHovered] = ImVec4(.18F, .36F, .49F, 1);
-    c[ImGuiCol_HeaderActive] = ImVec4(.20F, .43F, .59F, 1);
-    c[ImGuiCol_Separator] = ImVec4(.22F, .31F, .42F, .75F);
-    c[ImGuiCol_SeparatorHovered] = c[ImGuiCol_ButtonHovered];
-    c[ImGuiCol_SeparatorActive] = c[ImGuiCol_ButtonActive];
-    c[ImGuiCol_ResizeGrip] = ImVec4(.25F, .65F, .85F, .25F);
-    c[ImGuiCol_ResizeGripHovered] = ImVec4(.25F, .65F, .85F, .65F);
-    c[ImGuiCol_ResizeGripActive] = ImVec4(.25F, .65F, .85F, .95F);
-    c[ImGuiCol_Tab] = ImVec4(.10F, .18F, .27F, 1);
-    c[ImGuiCol_TabHovered] = c[ImGuiCol_HeaderHovered];
-    c[ImGuiCol_TabSelected] = ImVec4(.17F, .34F, .47F, 1);
-    c[ImGuiCol_PlotLines] = ImVec4(.32F, .78F, .94F, 1);
-    c[ImGuiCol_PlotHistogram] = ImVec4(.35F, .77F, .73F, 1);
-    c[ImGuiCol_TextSelectedBg] = ImVec4(.22F, .55F, .72F, .40F);
-}
 } // namespace
 
 ImGuiLayer::~ImGuiLayer() { shutdown(); }
@@ -120,7 +60,7 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
             io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f, &fontConfig, io.Fonts->GetGlyphRangesChineseFull());
         }
     }
-    applyEditorTheme();
+    applyTheme(currentTheme());
     platformInitialized_ = ImGui_ImplWin32_Init(window);
     if (platformInitialized_) rendererInitialized_ = ImGui_ImplDX11_Init(device, deviceContext);
     initialized_ = platformInitialized_ && rendererInitialized_;

@@ -51,8 +51,8 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 | --- | --- |
 | `+ Sphere` / `+ Cube` / `Add Actor from mesh` | 记录新 Actor 的拷贝；撤销时按 id 删除，重做时追加 |
 | `Duplicate` | 同上；多选时为每个 Actor 各记一条 |
-| `Delete`（单选或多选） | 记录每个 Actor 的拷贝与原始下标；撤销时按升序插回原位并恢复选中 |
-| Gizmo 平移 / 旋转 / 缩放（单个或整组） | 拖拽开始前记住整组「稳定态」变换，松手时为每个变化的 Actor 提交同一条记录 |
+| `Delete`（单选或多选） | 记录每个 Actor 的拷贝与原始下标；撤销时按升序插回原位，当前仅选中其中一个恢复的 Actor |
+| Gizmo 平移 / 旋转 / 缩放（单个或整组） | 拖拽开始前记住整组「稳定态」变换，松手时将所有变化的 Actor 合为一条记录 |
 | Details 面板数值拖动 | 控件激活时记下稳定态，`IsItemDeactivatedAfterEdit` 后按 700ms 时间窗合并 |
 
 ## 命令注册表
@@ -63,20 +63,23 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 - Outliner 的 `+ Sphere` / `+ Cube` / `Duplicate` / `Delete` 按钮通过 `commandButton(id)` 渲染并调用同一命令；
 - 键盘快捷键由 `processShortcuts()` 统一匹配，文本输入获得焦点或 Gizmo 使用中时整组不触发。
 
+默认快捷键：Ctrl+Z 撤销，Ctrl+Y / Ctrl+Shift+Z 重做，Ctrl+D 复制，Delete 删除，Ctrl+S 保存场景。文本输入与 Gizmo 的快捷键屏蔽由 `SceneEditor` 调用方负责，注册表自身只匹配键位与可用条件；当前 Delete 命令没有面板焦点限制。F1 / F2 / F3 / F11 等应用级快捷键仍在 `MinimalApp`，命令注册表尚未覆盖全部 UI 动作。
+
 这让菜单、按钮和快捷键不再各自维护一份判断。后续的「命令面板 / 插件」可以直接遍历注册表，而不必改动面板代码。
 
 ## 多选
 
-- Outliner：`Ctrl` / `Shift` 点击切换成员；视口：`Ctrl` / `Shift` 点击同样切换。
+- Outliner：`Ctrl` / `Shift` 点击切换成员；视口：`Ctrl` / `Shift` 点击同样切换。Shift 当前不做连续范围选择。
 - `selectedActor()` 始终是主 Actor（Gizmo 枢轴、Details 目标）；`selection()` 是完整集合。
 - 批量删除一次记录、一次撤销；整组 Gizmo 以主 Actor 为枢轴，对其他成员应用同一世界增量（旋转 / 缩放时同时更新位置）。
 
 ## 边界（未实现）
 
 1. 多选下的批量复制目前是「每个 Actor 一条历史」，尚未合并成一条。
-2. 材质参数草稿与 Shader 草稿未入栈；它们仍走 Apply / Save 两段式提交。
+2. 材质参数草稿与 Shader 草稿未入栈；它们仍走 Apply / Save 两段式提交。Actor 名称、可见性和 Mesh / Material 引用修改也未入栈。
 3. 没有命名快照、跨会话持久化或撤销历史面板。
-4. 上限固定 64 步，暂不暴露到设置界面。
+4. 默认上限 64 步，可由 `setMaxSteps()` 调整，暂不暴露到设置界面。
+5. 批量删除撤销会恢复全部实例与顺序，但不会恢复原来的完整多选集合。
 
 ## 许可证边界
 

@@ -1,6 +1,23 @@
 # Godot 编辑器 GUI 研究与 RestArtEngine 移植约束
 
-本文记录对 Godot 编辑器源码的研究结果，以及 RestArtEngine 已实现的停靠基础层与后续扩展方向。当前实现使用 Dear ImGui 官方 Docking，不包含 Godot GUI 源码的整体移植。
+本文记录对 Godot 编辑器源码的研究结果，以及 RestArtEngine 的停靠、编辑命令、事务和主题进度。当前实现使用 Dear ImGui 官方 Docking，不包含 Godot GUI 源码的整体移植。
+
+## 开发进度快照（2026-10-23）
+
+本次按本地源码及 Git 历史同步，提交基线为 `bed8459`。下表的“已提交”表示实现已进入版本历史，不等同于本次重新运行验证。
+
+| 功能 | 状态与证据 | 当前边界 |
+| --- | --- | --- |
+| 原生 Docking、布局持久化、视口纹理合成 | 已提交，`b64fcdf` | 悬浮限主窗口 |
+| 编辑撤销 / 重做 | 已提交，`d6cdbf5` | 覆盖接入的 Actor 操作与变换，不覆盖全部属性或草稿 |
+| 命令注册表 | 已提交，`2384636` | 菜单、相关按钮与快捷键共用动作；应用级按键仍在入口处理 |
+| Details 连续变换合并 | 已提交，`cb3e0a1` | 按 Actor / 字段在 700ms 窗口内合并 |
+| 多选、整组 Gizmo、批量删除 | 已提交，`b02936e` | 多选复制逐个记历史；删除撤销不恢复完整多选集合 |
+| 双行工具栏 | 已提交，`fdee08c` | 高度从 ImGui 样式计算 |
+| F11 视口全屏 | 已提交，`bed8459` | 无边框主窗口并隐藏面板，不是独立 Dock 窗口 |
+| Black / Dark Blue 主题与偏好保存 | 当前工作区已写入，尚未提交 | 已补测试代码，本次未重新构建或运行验证 |
+
+本机保留的 `artifacts/editor-docking-validation2/`、`artifacts/docking-render-validation2/` 与 `artifacts/editor-interactive-smoke/` 是 Docking 阶段的验证产物，其中渲染比对数据见 `artifacts/docking-render-validation2/validation-results.json`。这些输出不提交，也不能用来证明后续命令、多选、F11 或主题改动已通过回归。本次同步仅核对源码与文档，不新增运行测试结论。
 
 ## 结论
 
@@ -33,13 +50,19 @@ SceneEditor
 │   └── Layout 菜单与恢复默认布局
 ├── World Outliner / Details / Viewport settings
 ├── Content & Editors
+├── EditorCommandRegistry：菜单、按钮与快捷键动作
+├── UndoStack：编辑历史、拖拽聚合与连续变换合并
 └── Scene Viewport / ViewportInteraction
-    └── 场景纹理显示、拾取与 Gizmo
+    └── 场景纹理显示、多选、拾取与整组 Gizmo
 
 Dear ImGui Docking
 ├── 实时分割树与标签组
 ├── 主窗口内悬浮与回嵌
 └── RestArtEngine.imgui.ini 原生布局持久化
+
+EditorTheme（当前工作区，尚未提交）
+├── Black / Dark Blue 配色与共用几何样式
+└── RestArtEngine.theme.ini 偏好读写
 ```
 
 `EditorDockManager` 集中管理五个面板的身份、默认位置和布局恢复；`SceneEditor` 保留场景与资产编辑逻辑。普通面板通过 `drawPanel` 提交内容，视口由 `ViewportInteraction` 提交图像和交互。实时分割、标签合并、悬浮回嵌及布局保存使用 Dear ImGui 的实现，删除了旧版距离判断和手写吸附规则。
@@ -50,10 +73,12 @@ Dear ImGui Docking
 
 布局持久化使用现有 `RestArtEngine.imgui.ini`，由 ImGui 保存 Dock 树与悬浮窗口几何信息，没有自定义 `EditorLayoutState` 或第二份布局文件。根 ID `RestArtEngine.DockSpace.v1` 将旧版自由窗口配置迁移为默认停靠布局；后续启动使用保存的树，只有缺少根节点或显式恢复默认布局时才重建。该版本标记用于默认布局迁移，不表示本项目拥有另一套序列化格式。
 
-## 后续扩展方向（未实现）
+命令注册表和编辑事务已经落地，职责与边界见 [UndoTransactions.md](UndoTransactions.md)。主题代码从 `ImGuiLayer` 抽出到 `src/ImGui/EditorTheme.cpp`，菜单在 `SceneEditor`，启动读取在 `MinimalApp`；主题偏好相对进程工作目录保存。它目前集中配色与共用几何样式，尚未统一字体和所有面板控件尺寸。
 
-1. **主题层**：将颜色、间距、圆角、字体和控件高度集中到 `EditorTheme`，逐步收敛面板样式定义。
-2. **命令与插件**：抽象 `EditorCommandRegistry` 和动态面板注册，统一快捷键与面板生命周期；当前五面板登记是静态的，不是外部插件接口。
+## 后续扩展方向
+
+1. **主题层收尾与扩展**：验证工作区主题切换和偏好读写，再考虑字体、DPI 与面板控件尺寸的统一配置。
+2. **命令覆盖与插件**：在已有 `EditorCommandRegistry` 上扩展动作覆盖，另行设计动态面板注册和生命周期；当前五面板登记仍是静态的，没有外部插件接口，也没有独立 `EditorShell` / `DockPanel` 运行时。
 3. **布局管理增强**：命名布局、导入导出、异常配置恢复和原子保存策略需单独设计；当前沿用 ImGui 原生 ini 读写机制，不声称已具备这些能力。
 4. **独立窗口**：需要同时完成平台消息、DPI、焦点以及渲染后端多窗口资源管理，不能仅打开开关就作为已支持功能。
 

@@ -14,7 +14,7 @@
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
 | `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
-| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器。 |
+| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；当前工作区新增 `EditorTheme` 配色与本机偏好读写，尚未提交验证。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
 | `Projects/Sandbox/Sandbox.raproject` | 默认 Sandbox 工程描述，声明引擎、工程资产、工程 Shader 与默认场景的位置。 |
@@ -131,6 +131,16 @@ DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置�
 
 Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotGuiStudy.md)。本轮使用 ImGui 实现停靠体系，没有将 Godot 的 GUI 运行时引入引擎。
 
+工具栏由 `SceneEditor` 绘制为两行，高度按 `GetFrameHeight()`、窗口内边距与行距计算，并传入 `EditorDockManager::beginFrame`，不再使用固定 90px 高度。F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏面板，退出时恢复；它不改变 Docking 的主窗口边界，也不启用多窗口渲染。
+
+## 编辑命令、事务与主题
+
+`EditorCommandRegistry` 位于 Editor 层，集中登记命令 ID、分组、文案、快捷键、回调与可用条件。已接入撤销 / 重做、Actor 新建 / 复制 / 删除、场景保存和布局恢复命令；菜单和相关按钮通过命令执行。渲染切换、F11 等应用级按键仍由 `MinimalApp` 处理，并非所有 UI 动作都已迁入注册表。`SceneEditor` 在文本输入或 Gizmo 使用期间跳过命令快捷键派发。
+
+`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Details 变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条，多选复制仍逐个记录。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
+
+截至 2026-10-23，工作区的 `EditorTheme` 已集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。主题代码尚未提交，本轮仅核对源码，未验证其构建与运行效果。
+
 ## 文件与持久化
 
 场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
@@ -186,6 +196,8 @@ Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotG
 | DX11 资源、G-buffer、阴影、光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
 | 材质开放函数 | `Shaders/Materials/Standard.hlsli` 的 `EvaluateMaterial()` |
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
+| 编辑命令、快捷键与撤销历史 | `src/Editor/EditorCommands.cpp`、`src/Editor/UndoStack.cpp`；动作接入在 `SceneEditor.cpp` |
+| 编辑器配色与主题偏好（当前工作区） | `src/ImGui/EditorTheme.cpp`、`src/ImGui/ImGuiLayer.cpp` |
 | 面板身份、默认 Dock 树、布局恢复 | `src/Editor/EditorDockManager.cpp` |
 | 视口拾取、变换手柄、相机 | `src/Editor/ViewportInteraction.cpp` |
 | 启动加载界面与背景图 | `src/Editor/LoadingScreen.cpp`、`assets/load/load.png` |

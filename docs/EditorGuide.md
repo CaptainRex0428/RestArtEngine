@@ -24,6 +24,16 @@ Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机�
 
 交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局，之后保留用户的停靠安排。自动化自测不加载个人布局文件。Content & Editors 内部的 Meshes、Material Editor、Shader Editor 标签仍可拖拽重排。
 
+## 工具栏
+
+顶部工具栏使用两行：第一行放菜单、场景保存 / 加载与保存状态，第二行放渲染路径、检查视图、光追、截图和运行状态。高度由当前字体行高、内边距和行距计算，DockSpace 从工具栏下方开始。
+
+## 主题切换（当前工作区）
+
+截至 2026-10-23，工作区已接入 `UI > Theme > Black / Dark Blue`，默认 Black，Dark Blue 保留原蓝色配色。这部分尚未提交；测试代码已补充，本轮文档同步未重新构建或执行测试，实际运行效果仍待验证。
+
+切换通过 `EditorTheme` 更新 ImGui 配色，两种主题共享间距和圆角等几何样式。选择保存到进程工作目录下的 `RestArtEngine.theme.ini`，启动时读取；文件缺失或内容无法识别时回退 Black。这是本机偏好，不属于工程资产，也不是系统用户目录中的全局设置。字体加载仍由 `ImGuiLayer` 负责，尚无字体 / DPI 配置界面。
+
 ## Rider 编译按钮
 
 Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild Selected Projects** 动作，不生成额外的 Shell Run Configuration。右键主工具栏选择 **Customize Toolbar**，在 **Build bar** 下添加对应动作即可；需要图标时，在同一处使用 **Edit Icon** 选择 Rider 内置图标。该按钮只执行编译，不会自动启动 `RestArtEngine.exe`。工具栏和图标属于 Rider 的全局 `customization.xml`，不由 Premake 写入项目 `.idea`。
@@ -47,6 +57,7 @@ Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild 
 | 操作 | 效果 |
 | --- | --- |
 | 左键点击网格 | 选择 Actor |
+| Ctrl / Shift + 点击 Outliner 或视口网格 | 切换选中集合中的成员；Shift 当前不做连续范围选择 |
 | W / E / R | 切换移动 / 旋转 / 缩放工具 |
 | Space | 循环切换变换工具 |
 | 工具栏 World / Local | 切换移动和旋转的世界 / 局部坐标模式；缩放始终沿局部轴 |
@@ -56,11 +67,16 @@ Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild 
 | 中键拖动视口 | 平移相机焦点 |
 | 视口滚轮 | 调整相机距离 |
 | 选中 Actor 后按 F | 相机聚焦到该 Actor |
-| Delete | 删除选中 Actor |
+| Delete | 删除选中 Actor；多选删除为一条撤销记录 |
+| Ctrl+D | 复制选中 Actor；多选复制逐个记入撤销历史 |
+| Ctrl+Z / Ctrl+Y（或 Ctrl+Shift+Z） | 撤销 / 重做已记录的编辑动作 |
+| Ctrl+S | 保存当前场景 |
 
-W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete 快捷键只在视口、Outliner 或 Details 的场景操作上下文生效；编辑文本时不会删除 Actor。编辑材质或 Shader 文本时，W / E / R 和 Space 也保留文本输入用途。删除后场景会标记为未保存，点击 `Save Scene` 才写入当前工程的场景文件。
+W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete 等注册命令由编辑器统一派发；当前 Delete 的可用条件是存在主选中 Actor 且未拖动 Gizmo，没有额外的面板焦点限制。文本输入或 Gizmo 拖动期间不派发注册命令的快捷键；编辑材质或 Shader 文本时，W / E / R 和 Space 也保留文本输入用途。删除后场景会标记为未保存，点击 `Save Scene` 才写入当前工程的场景文件。
 
-当前一次只选择一个 Actor，没有多选、父子组件层级或 Undo / Redo。变换工具修改现有 Actor 的 Transform；Actor 仍持有一个 StaticMeshComponent。重要修改前可保存场景，尚未保存的场景修改可通过 `Load Scene` 恢复到磁盘版本。
+多选时 Details 显示主 Actor，Gizmo 以主 Actor 为枢轴对整组应用变换；一次拖拽记为一条撤销记录。Details 的位置、旋转、缩放编辑在控件结束编辑时记录，同一 Actor 的同一字段在 700ms 内连续提交可合并。新增、复制、删除也支持撤销；撤销批量删除会恢复所有实例和顺序，但当前只选中其中一个恢复的 Actor。
+
+历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿及 Actor 名称、可见性、Mesh / Material 引用修改尚未纳入历史。Actor 仍持有一个 StaticMeshComponent，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
 
 ## Material 参数编辑
 
@@ -121,6 +137,8 @@ Apply 与 Save 的区别：
 Apply 编译当前在内存里的编辑内容，外部编辑器保存的内容需要在引擎内 Reload 才能更新。尚未实现后台文件监视、异步 Shader 编译任务或自动重编译。不要通过重建 C++ 项目来代替 Shader 页面中的 Apply。
 
 ## 预览与验证
+
+F11 进入视口全屏：主窗口无边框覆盖所在显示器，隐藏编辑面板。再次 F11、Esc 或 F1 恢复之前的窗口与 UI 显示状态；如果进入全屏前已隐藏 UI，退出后仍保持隐藏。Esc 在普通窗口模式仍是请求关闭。上述快捷键在文本输入期间不触发。该模式不启用独立 Dock 窗口，也不代表独占显示模式。
 
 F2 切换 Forward / Deferred；F3 开关解析光追效果；F1 隐藏 / 显示面板；右键拖动视口旋转相机，滚轮缩放；F9 截图。Lit 显示完整光照，Unlit 显示不受光照影响的材质本色并保留曝光和色调映射，Albedo 用于检查不经过曝光和色调映射的基础颜色。Viewport 的 Shadow method 可选择 2x2 PCF、硬比较、3x3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追或禁用阴影；PCSS 复用现有深度图并执行 blocker search 与百分比渐进滤波，CSM 使用两个方向光级联切片改善近景和远景的深度分配，GTAO 与接触阴影使用延迟 G-buffer，前向路径回退到普通深度阴影。
 

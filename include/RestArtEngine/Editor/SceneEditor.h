@@ -42,6 +42,7 @@ private:
     void duplicateSelectedActor();
     void registerCommands();
     void drawEditMenu();
+    void drawUiMenu();
     bool commandButton(std::string_view id);
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.

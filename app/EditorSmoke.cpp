@@ -1,5 +1,6 @@
 #include "EditorSmoke.h"
 #include <imgui_internal.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 #include <DirectXMath.h>
 #include <cmath>
 #include <cstring>
@@ -63,6 +64,24 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         "Editor command registry is missing core commands.");
     require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
         "Delete command enablement does not follow the Actor selection.");
+    {
+        // Theme preference round-trips through the per-user file the app reads
+        // before creating the ImGui context (palette itself is covered by the
+        // captured screenshots of both themes).
+        using rae::imgui::EditorTheme;
+        require(rae::imgui::kEditorThemeCount == 2, "Expected exactly two editor themes.");
+        require(std::string(rae::imgui::themeName(EditorTheme::Black)) == "Black" &&
+            std::string(rae::imgui::themeName(EditorTheme::DarkBlue)) == "Dark Blue",
+            "Theme names changed unexpectedly.");
+        const auto path = std::filesystem::temp_directory_path() / "rae-theme-preference-test.ini";
+        rae::imgui::saveThemePreference(path, EditorTheme::DarkBlue);
+        require(rae::imgui::loadThemePreference(path) == EditorTheme::DarkBlue,
+            "Theme preference did not round-trip.");
+        rae::imgui::saveThemePreference(path, EditorTheme::Black);
+        require(rae::imgui::loadThemePreference(path) == EditorTheme::Black,
+            "Theme preference did not round-trip back to Black.");
+        std::filesystem::remove(path);
+    }
     {
         // UndoStack merge (Godot MERGE_ENDS): same-key commits inside the window
         // collapse into one entry that keeps the oldest undo state.
@@ -279,6 +298,24 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         "Editor command registry is missing core commands.");
     require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
         "Delete command enablement does not follow the Actor selection.");
+    {
+        // Theme preference round-trips through the per-user file the app reads
+        // before creating the ImGui context (palette itself is covered by the
+        // captured screenshots of both themes).
+        using rae::imgui::EditorTheme;
+        require(rae::imgui::kEditorThemeCount == 2, "Expected exactly two editor themes.");
+        require(std::string(rae::imgui::themeName(EditorTheme::Black)) == "Black" &&
+            std::string(rae::imgui::themeName(EditorTheme::DarkBlue)) == "Dark Blue",
+            "Theme names changed unexpectedly.");
+        const auto path = std::filesystem::temp_directory_path() / "rae-theme-preference-test.ini";
+        rae::imgui::saveThemePreference(path, EditorTheme::DarkBlue);
+        require(rae::imgui::loadThemePreference(path) == EditorTheme::DarkBlue,
+            "Theme preference did not round-trip.");
+        rae::imgui::saveThemePreference(path, EditorTheme::Black);
+        require(rae::imgui::loadThemePreference(path) == EditorTheme::Black,
+            "Theme preference did not round-trip back to Black.");
+        std::filesystem::remove(path);
+    }
     {
         // UndoStack merge (Godot MERGE_ENDS): same-key commits inside the window
         // collapse into one entry that keeps the oldest undo state.

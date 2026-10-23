@@ -58,6 +58,7 @@ Makefile
 *.VC.opendb
 imgui.ini
 RestArtEngine.imgui.ini
+RestArtEngine.theme.ini
 RestArtEngine.panels.ini
 
 # JetBrains Rider - keep only shared project settings, ignore machine-local state

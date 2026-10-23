@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <commdlg.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -355,6 +356,22 @@ bool SceneEditor::redo() {
     return true;
 }
 
+void SceneEditor::drawUiMenu() {
+    if (!ImGui::BeginMenu("UI")) return;
+    if (ImGui::BeginMenu("Theme")) {
+        for (int index = 0; index < imgui::kEditorThemeCount; ++index) {
+            const auto theme = static_cast<imgui::EditorTheme>(index);
+            if (ImGui::MenuItem(imgui::themeName(theme), nullptr, imgui::currentTheme() == theme)) {
+                imgui::setTheme(theme);
+                imgui::saveThemePreference(imgui::defaultThemePreferencePath(), theme);
+                status_ = std::string("Theme: ") + imgui::themeName(theme);
+            }
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::EndMenu();
+}
+
 void SceneEditor::drawEditMenu() {
     if (!ImGui::BeginMenu("Edit")) return;
     for (const auto& command : commands_.commands()) {
@@ -700,6 +717,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     dockManager_.drawLayoutMenu();
     ImGui::SameLine();
     drawEditMenu();
+    ImGui::SameLine();
+    drawUiMenu();
     ImGui::SameLine();
     commandButton("scene.save");
     ImGui::SameLine();
