@@ -89,6 +89,7 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     const auto scenePath = project_.defaultScene;
     if (std::filesystem::exists(scenePath) && !world_.load(scenePath, assets_, error)) return false;
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
+    selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
     selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
     if (auto* actor = world_.findActor(selectedActor_)) selectedMaterial_ = actor->mesh.materialId;
@@ -120,6 +121,7 @@ void SceneEditor::registerCommands() {
         [this] {
             selectedActor_ = world_.createActor("Sphere", 1, selectedMaterial_);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
+            selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
             sceneDirty_ = true;
         },
@@ -128,6 +130,7 @@ void SceneEditor::registerCommands() {
         [this] {
             selectedActor_ = world_.createActor("Cube", 3, selectedMaterial_);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
+            selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
             sceneDirty_ = true;
         },
@@ -150,12 +153,18 @@ bool SceneEditor::commandButton(std::string_view id) {
 }
 
 void SceneEditor::duplicateSelectedActor() {
-    if (!selectedActor_) return;
-    const auto id = world_.duplicateActor(selectedActor_);
-    if (!id) return;
-    selectedActor_ = id;
-    world_.findActor(id)->transform.position[0] += 2.5f;
-    pushActorCreated(*world_.findActor(id), "Duplicate Actor");
+    if (selection_.empty()) return;
+    std::vector<scene::ActorId> created;
+    for (const auto id : selection_) {
+        const auto copy = world_.duplicateActor(id);
+        if (!copy) continue;
+        world_.findActor(copy)->transform.position[0] += 2.5f;
+        pushActorCreated(*world_.findActor(copy), "Duplicate Actor");
+        created.push_back(copy);
+    }
+    if (created.empty()) return;
+    selection_ = created;
+    selectedActor_ = created.back();
     sceneDirty_ = true;
 }
 
@@ -218,11 +227,39 @@ bool SceneEditor::dirty(const renderer::SceneRenderer& renderer) const {
         shaderDraft_ != renderer.shaderSource() || renderer.shaderSource() != shaderSaved_;
 }
 
+bool SceneEditor::isSelected(scene::ActorId id) const {
+    return std::find(selection_.begin(), selection_.end(), id) != selection_.end();
+}
+
+void SceneEditor::selectActor(scene::ActorId id, bool additive) {
+    if (!id) {
+        selection_.clear();
+        selectedActor_ = 0;
+        return;
+    }
+    if (!additive) {
+        selection_.assign(1, id);
+        selectedActor_ = id;
+        return;
+    }
+    // Ctrl/Shift click toggles membership; the primary falls back to the last
+    // remaining Actor so Details never points at an unselected one.
+    const auto it = std::find(selection_.begin(), selection_.end(), id);
+    if (it != selection_.end()) {
+        selection_.erase(it);
+        if (selectedActor_ == id) selectedActor_ = selection_.empty() ? 0 : selection_.back();
+    } else {
+        selection_.push_back(id);
+        selectedActor_ = id;
+    }
+}
+
 void SceneEditor::eraseActor(scene::ActorId id) {
     auto& actors = world_.actors;
     actors.erase(std::remove_if(actors.begin(), actors.end(),
         [id](const scene::Actor& actor) { return actor.id == id; }), actors.end());
-    if (selectedActor_ == id) selectedActor_ = actors.empty() ? 0 : actors.front().id;
+    selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
+    if (selectedActor_ == id) selectedActor_ = selection_.empty() ? 0 : selection_.back();
 }
 
 void SceneEditor::insertActor(std::size_t index, const scene::Actor& actor) {
@@ -237,15 +274,9 @@ void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label)
     const scene::ActorId id = actor.id;
     undo_.push(label,
         [this, id] { eraseActor(id); sceneDirty_ = true; },
-        [this, actor] { world_.actors.push_back(actor); selectedActor_ = actor.id; sceneDirty_ = true; });
+        [this, actor] { world_.actors.push_back(actor); selectedActor_ = actor.id; selection_.assign(1, actor.id); sceneDirty_ = true; });
 }
 
-void SceneEditor::pushActorDeleted(const scene::Actor& actor, std::size_t index) {
-    const scene::Actor snapshot = actor;
-    undo_.push("Delete " + actor.name,
-        [this, snapshot, index] { insertActor(index, snapshot); selectedActor_ = snapshot.id; sceneDirty_ = true; },
-        [this, id = actor.id] { eraseActor(id); sceneDirty_ = true; });
-}
 
 void SceneEditor::pushDetailsTransform(scene::ActorId id, const scene::Transform& before,
                                        const scene::Transform& after, const char* field) {
@@ -260,31 +291,45 @@ void SceneEditor::trackTransformEdit() {
     if (viewport_.isUsing()) {
         if (!dragging_) {
             dragging_ = true;
-            dragActor_ = selectedActor_;
-            const auto* actor = world_.findActor(dragActor_);
-            // Prefer the transform settled before the drag started; fall back to
-            // the live value when the selection changed since the last frame.
-            dragStartTransform_ = (settledTransformActor_ == dragActor_ && actor)
-                ? settledTransform_ : (actor ? actor->transform : scene::Transform{});
+            dragStartTransforms_ = settledSelection_;
+            // Fall back to live values when the selection changed since the last
+            // settled frame.
+            if (dragStartTransforms_.empty())
+                for (const auto id : selection_)
+                    if (const auto* actor = world_.findActor(id))
+                        dragStartTransforms_.push_back({id, actor->transform});
         }
         return;
     }
     if (dragging_) {
         dragging_ = false;
-        const scene::ActorId id = dragActor_;
-        const auto* actor = world_.findActor(id);
-        dragActor_ = 0;
+        std::vector<ActorSnapshot> before, after;
+        for (const auto& snapshot : dragStartTransforms_) {
+            const auto* actor = world_.findActor(snapshot.id);
+            if (!actor || std::memcmp(&actor->transform, &snapshot.transform, sizeof(scene::Transform)) == 0) continue;
+            before.push_back(snapshot);
+            after.push_back({snapshot.id, actor->transform});
+        }
+        dragStartTransforms_.clear();
+        settledSelection_.clear();
         settledTransformActor_ = 0;
-        if (actor && id && std::memcmp(&actor->transform, &dragStartTransform_, sizeof(scene::Transform)) != 0) {
-            const auto before = dragStartTransform_;
-            const auto after = actor->transform;
-            const std::string name = actor->name;
-            undo_.push("Transform " + name,
-                [this, id, before] { if (auto* target = world_.findActor(id)) { target->transform = before; sceneDirty_ = true; } },
-                [this, id, after] { if (auto* target = world_.findActor(id)) { target->transform = after; sceneDirty_ = true; } });
+        if (!before.empty()) {
+            const std::string label = before.size() > 1
+                ? "Transform " + std::to_string(before.size()) + " Actors"
+                : "Transform " + (world_.findActor(before.front().id) ? world_.findActor(before.front().id)->name
+                                                                     : std::string("Actor"));
+            undo_.push(label,
+                [this, before] { for (const auto& s : before) if (auto* target = world_.findActor(s.id)) target->transform = s.transform; sceneDirty_ = true; },
+                [this, after] { for (const auto& s : after) if (auto* target = world_.findActor(s.id)) target->transform = s.transform; sceneDirty_ = true; });
         }
         return;
     }
+    // Nothing is being dragged: remember the visible transforms of the current
+    // selection as the next drag's "before" snapshot.
+    settledSelection_.clear();
+    for (const auto id : selection_)
+        if (const auto* actor = world_.findActor(id))
+            settledSelection_.push_back({id, actor->transform});
     // Nothing is being dragged: remember the visible transform as the next
     // drag's "before" snapshot.
     const auto* actor = world_.findActor(selectedActor_);
@@ -326,18 +371,37 @@ void SceneEditor::drawEditMenu() {
 }
 
 void SceneEditor::deleteSelectedActor() {
-    if (!selectedActor_ || viewport_.isUsing()) return;
-    const auto* actor = world_.findActor(selectedActor_);
-    const std::string name = actor ? actor->name : "Actor";
-    const scene::Actor snapshot = actor ? *actor : scene::Actor{};
-    std::size_t index = 0;
-    while (index < world_.actors.size() && world_.actors[index].id != selectedActor_) ++index;
-    if (world_.removeActor(selectedActor_)) {
-        if (actor) pushActorDeleted(snapshot, index);
-        selectedActor_ = 0;
-        sceneDirty_ = true;
-        status_ = "Deleted " + name + ". Save Scene to persist.";
+    if (selection_.empty() || viewport_.isUsing()) return;
+    std::vector<std::pair<scene::Actor, std::size_t>> removed;
+    for (const auto id : selection_) {
+        const auto* actor = world_.findActor(id);
+        if (!actor) continue;
+        std::size_t index = 0;
+        while (index < world_.actors.size() && world_.actors[index].id != id) ++index;
+        removed.emplace_back(*actor, index);
     }
+    if (removed.empty()) return;
+    // Remove from the highest index down so the captured positions stay valid.
+    std::sort(removed.begin(), removed.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (const auto& entry : removed) world_.removeActor(entry.first.id);
+    undo_.push(removed.size() > 1 ? "Delete " + std::to_string(removed.size()) + " Actors"
+                                  : "Delete " + removed.front().first.name,
+        [this, removed] {
+            // Re-insert in ascending index order to restore the original order.
+            for (auto it = removed.rbegin(); it != removed.rend(); ++it) insertActor(it->second, it->first);
+            selectedActor_ = removed.front().first.id;
+            selection_.assign(1, selectedActor_);
+            sceneDirty_ = true;
+        },
+        [this, removed] {
+            for (const auto& entry : removed) eraseActor(entry.first.id);
+            sceneDirty_ = true;
+        });
+    selection_.clear();
+    selectedActor_ = 0;
+    sceneDirty_ = true;
+    status_ = "Deleted " + std::to_string(removed.size()) + " Actor(s). Save Scene to persist.";
 }
 
 void SceneEditor::drawOutliner() {
@@ -358,7 +422,8 @@ void SceneEditor::drawOutliner() {
     bool deleteRequested = false;
     for (const auto& actor : world_.actors) {
         const auto label = actor.name + (actor.visible ? "" : " (hidden)") + "##" + std::to_string(actor.id);
-        if (ImGui::Selectable(label.c_str(), selectedActor_ == actor.id)) selectedActor_ = actor.id;
+        if (ImGui::Selectable(label.c_str(), isSelected(actor.id)))
+            selectActor(actor.id, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift);
         if (ImGui::BeginPopupContextItem()) {
             selectedActor_ = actor.id;
             if (ImGui::MenuItem("Delete Actor", "Delete")) deleteRequested = true;
@@ -654,7 +719,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     // own undo, and a gizmo drag owns the keyboard until it ends.
     if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) commands_.processShortcuts();
 
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selectedActor_, renderer);
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer);
     trackTransformEdit();
 
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
@@ -735,6 +800,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
                     // History entries reference Actors from the replaced scene.
                     undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
+    selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
                     materialDraftDirty_ = materialsDirty_ = sceneDirty_ = false;
                     pendingMaterial_ = 0;
                     materialDraft_ = {};

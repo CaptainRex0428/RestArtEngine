@@ -159,8 +159,8 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
 } // namespace
 
 bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
-                               const assets::AssetLibrary& assets, scene::ActorId& selected,
-                               renderer::SceneRenderer& renderer) {
+                               const assets::AssetLibrary& assets, std::vector<scene::ActorId>& selection,
+                               scene::ActorId& selected, renderer::SceneRenderer& renderer) {
     hovered_ = focused_ = false;
     settings.editorViewport = true;
     settings.viewportVisible = false;
@@ -305,14 +305,50 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         const float snap[3] = {step, step, step};
         // Scale is always along the Actor's own axes: world scaling a rotated
         // object would require shear, which a position/rotation/scale cannot store.
+        const XMMATRIX pivotBefore = actorMatrix(actor->transform);
         if (ImGuizmo::Manipulate(&viewData._11, &projectionData._11, operations[operation_],
             local_ || operation_ == 2 ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &matrix._11,
-            nullptr, snap_ ? snap : nullptr)) changed = applyMatrix(matrix, operation_, actor->transform);
+            nullptr, snap_ ? snap : nullptr)) {
+            changed = applyMatrix(matrix, operation_, actor->transform);
+            // Group transform: every other selected Actor is moved by the same
+            // world-space delta the gizmo applied to the pivot.
+            if (changed && selection.size() > 1) {
+                const XMMATRIX delta = XMMatrixMultiply(actorMatrix(actor->transform),
+                    XMMatrixInverse(nullptr, pivotBefore));
+                for (const auto id : selection) {
+                    if (id == selected) continue;
+                    auto* other = world.findActor(id);
+                    if (!other || !other->visible || !validTransform(other->transform)) continue;
+                    XMFLOAT4X4 moved;
+                    XMStoreFloat4x4(&moved, XMMatrixMultiply(actorMatrix(other->transform), delta));
+                    applyMatrix(moved, operation_, other->transform);
+                    // Rotate and scale move the Actor as well; only translate
+                    // already wrote the position inside applyMatrix.
+                    if (operation_ != 0) {
+                        other->transform.position[0] = moved._41;
+                        other->transform.position[1] = moved._42;
+                        other->transform.position[2] = moved._43;
+                    }
+                }
+            }
+        }
         gizmoHovered = ImGuizmo::IsOver();
         usingGizmo_ = ImGuizmo::IsUsing();
     } else usingGizmo_ = false;
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) selected = pick(settings, world, assets, view, projection);
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const auto hit = pick(settings, world, assets, view, projection);
+        if ((io.KeyCtrl || io.KeyShift) && hit) {
+            // Additive picking mirrors the Outliner: toggle membership and keep
+            // the clicked Actor as the primary one.
+            const auto it = std::find(selection.begin(), selection.end(), hit);
+            if (it != selection.end()) selection.erase(it); else selection.push_back(hit);
+            selected = hit;
+        } else {
+            selected = hit;
+            selection.assign(hit ? 1 : 0, hit);
+        }
+    }
     ImGui::SetCursorScreenPos({imageMin.x + 8, std::max(imageMin.y + 8, imageMax.y - 23)});
     const char* hint = snap_ ? "Snap: Move 0.5 | Rotate 15 deg | Scale 0.1" :
         "LMB select | RMB/Alt+LMB orbit | MMB pan | Wheel zoom | F focus";

@@ -23,6 +23,9 @@ public:
     scene::World& world() { return world_; }
     assets::AssetLibrary& assets() { return assets_; }
     scene::ActorId selectedActor() const { return selectedActor_; }
+    // Full selection; the primary Actor (gizmo pivot / Details target) is selectedActor().
+    [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
+    [[nodiscard]] bool isSelected(scene::ActorId id) const;
     // Editor transactions (Ctrl+Z / Ctrl+Y). Exposed so the self-test and any
     // future command palette drive exactly the same path as the Edit menu.
     bool undo();
@@ -34,6 +37,7 @@ public:
 private:
     void drawOutliner();
     void drawDetails();
+    void selectActor(scene::ActorId id, bool additive);
     void deleteSelectedActor();
     void duplicateSelectedActor();
     void registerCommands();
@@ -42,7 +46,6 @@ private:
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.
     void pushActorCreated(scene::Actor actor, const std::string& label);
-    void pushActorDeleted(const scene::Actor& actor, std::size_t index);
     // Details-panel transform edit: one merged entry per finished drag.
     void pushDetailsTransform(scene::ActorId id, const scene::Transform& before,
                              const scene::Transform& after, const char* field);
@@ -76,11 +79,12 @@ private:
     EditorDockManager dockManager_;
     EditorCommandRegistry commands_;
     UndoStack undo_;
+    std::vector<scene::ActorId> selection_;
+    struct ActorSnapshot { scene::ActorId id = 0; scene::Transform transform; };
+    std::vector<ActorSnapshot> settledSelection_, dragStartTransforms_;
     scene::Transform settledTransform_{};
     scene::ActorId settledTransformActor_ = 0;
     scene::Transform detailsBefore_{};
-    scene::Transform dragStartTransform_{};
-    scene::ActorId dragActor_ = 0;
     bool dragging_ = false;
 };
 

@@ -793,6 +793,31 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     pressChord(ImGuiMod_Ctrl, ImGuiKey_Z);
     require(world.findActor(1) && world.actors.size() == actorCount,
         "Second Ctrl+Z did not restore the Actor.");
+    {
+        // Multi-select: Ctrl+click extends the selection, Delete removes every
+        // selected Actor, and one undo restores the whole batch.
+        const auto ctrlClick = [&](ImVec2 position) {
+            input.mouse = position;
+            input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, true); };
+            capture("ui_interaction", true);
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+            capture("ui_interaction", true);
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+            capture("ui_interaction", true);
+            input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, false); };
+            capture("ui_interaction", true);
+        };
+        click(projectPoint(-.35f, 1.35f, 0));
+        require(editor.selection().size() == 1, "A plain click should select exactly one Actor.");
+        ctrlClick(projectPoint(-2.4f, 0.0f, 1.2f));
+        require(editor.selection().size() == 2, "Ctrl+click did not extend the Actor selection.");
+        require(editor.commands().enabled("actor.delete"), "Delete command disabled with a live selection.");
+        pressKey(ImGuiKey_Delete);
+        require(world.actors.empty(), "Delete did not remove every selected Actor.");
+        pressChord(ImGuiMod_Ctrl, ImGuiKey_Z);
+        require(world.actors.size() == actorCount && world.findActor(1) && world.findActor(2),
+            "Undo did not restore the whole multi-selection delete.");
+    }
     world.createDefaultScene();
     capture("ui_interaction", true);
     click(projectPoint(-.35f, 1.35f, 0));
