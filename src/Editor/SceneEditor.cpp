@@ -497,6 +497,7 @@ void SceneEditor::drawOutlineSettings() {
     ImGui::SetNextItemWidth(180);
     changed |= ImGui::SliderFloat("Thickness", &preferences.outlineThickness, 1.0f, 6.0f, "%.1f px");
     changed |= ImGui::Checkbox("Use theme accent", &preferences.outlineThemeColor);
+    changed |= ImGui::Checkbox("Outline occluders in front", &preferences.outlineOccluders);
 
     ImGui::SeparatorText("Colour");
     ImGui::BeginDisabled(preferences.outlineThemeColor);
@@ -1126,6 +1127,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     settings.outlineColor[2] = accent.z;
     settings.outlineColor[3] = 1.0f;
     settings.outlineThickness = preferences.outlineThickness;
+    settings.outlineOccluders = preferences.outlineOccluders;
     const auto* mainViewport = ImGui::GetMainViewport();
     // BeginMenu needs a native horizontal menu bar. SameLine in a normal
     // window leaves menus in vertical mode, consuming the remaining width.
