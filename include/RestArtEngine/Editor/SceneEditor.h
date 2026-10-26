@@ -17,6 +17,9 @@ class SceneEditor {
 public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
+    // May also be submitted while the main window is minimized or its UI is hidden.
+    // Closing the independent tool preserves the material and Shader session drafts.
+    void drawMaterialWindow(renderer::SceneRenderer&);
     void resetLayout() { dockManager_.resetLayout(); }
     void requestClose() { closeRequested_ = true; }
     bool drawCloseDialog(renderer::SceneRenderer&); // true only after explicit exit or a clean close
@@ -26,7 +29,7 @@ public:
     // existing commit/persistence boundaries. Valid until the next editor edit.
     [[nodiscard]] const assets::MaterialAsset* materialPreview() const;
     scene::ActorId selectedActor() const { return selectedActor_; }
-    // Full selection; the primary Actor (gizmo pivot / Details target) is selectedActor().
+    // Full selection; the primary Actor (gizmo pivot / Scene inspector target) is selectedActor().
     [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
     [[nodiscard]] bool isSelected(scene::ActorId id) const;
     // Editor transactions (Ctrl+Z / Ctrl+Y). Exposed so the self-test and any
@@ -39,7 +42,8 @@ public:
     [[nodiscard]] const EditorCommandRegistry& commands() const noexcept { return commands_; }
 private:
     void drawOutliner();
-    void drawDetails();
+    void drawScene();
+    void drawMeshDetails();
     void selectActor(scene::ActorId id, bool additive);
     void deleteSelectedActor();
     void duplicateSelectedActor();
@@ -50,7 +54,7 @@ private:
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.
     void pushActorCreated(scene::Actor actor, const std::string& label);
-    // Details-panel transform edit: one merged entry per finished drag.
+    // Scene-panel transform edit: one merged entry per finished drag.
     void pushDetailsTransform(scene::ActorId id, const scene::Transform& before,
                              const scene::Transform& after, const char* field);
     // Tracks gizmo drags: remembers the last settled transform, then commits one
@@ -75,12 +79,15 @@ private:
     bool actorPanelFocused_ = false;
     assets::AssetLibrary assets_;
     scene::ActorId selectedActor_ = 0;
+    scene::ActorId sceneInspectorActor_ = 0;
     assets::AssetId selectedMesh_ = 1, selectedMaterial_ = 1, pendingMaterial_ = 0;
     assets::MaterialAsset materialDraft_;
     std::string shaderDraft_, shaderSaved_, diagnostics_, status_;
     bool sceneDirty_ = false, materialsDirty_ = false, materialDraftDirty_ = false;
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
+    bool materialWindowOpen_ = false, materialWindowFocusRequested_ = false;
+    bool materialWindowFocused_ = false;
     EditorDockManager dockManager_;
     EditorCommandRegistry commands_;
     UndoStack undo_;

@@ -13,7 +13,7 @@
 | `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、`StaticMeshComponent` 与场景序列化；不依赖 ImGui 或 DX11。 |
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
-| `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
+| `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Scene / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
 | `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
@@ -125,7 +125,7 @@ SceneEditor
 
 当前每个 Actor 有一个 `StaticMeshComponent`，没有通用组件注册、反射或 ECS 调度系统。`Transform` 保存位置、以度为单位的 XYZ 欧拉旋转和缩放。场景采用 Y 轴向上；这与 UE 常见的 Z 轴向上约定不同，不能直接套用 UE 坐标。
 
-`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Details，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
+`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Scene，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
 
 Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜单与场景上下文中的 Delete 快捷键都只移除 Actor 实例，保留共享资产。文本输入会屏蔽场景快捷键，避免编辑名称、材质或 Shader 时误操作。多选通过 Outliner 的 Ctrl/Shift 点击与视口 Ctrl/Shift 点击扩展，批量删除与批量变换各记一条撤销；仍无组件父子层级（见 [UndoTransactions.md](UndoTransactions.md)）。
 
@@ -133,21 +133,25 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 ## 编辑器布局与视口合成
 
-编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护五个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用仅用于创建和恢复默认布局。
+编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护六个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用仅用于创建和恢复默认布局。
 
-DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。当前只启用主窗口内 Docking，没有启用 ImGui 的操作系统多视口窗口功能。
+DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。普通工作区面板留在主 viewport，材质编辑器单独启用系统 viewport；旧五面板布局在原 Details 所在组补入 Scene，保留其他节点与浮动几何，已有 Scene 设置不重绑。
 
 场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的屏幕矩形；投影宽高比、鼠标拾取及 Gizmo 使用同一矩形。这样停靠、分割和浮动无需保留旧位置的渲染区域，图像也按窗口的层级参与遮挡。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
 
 Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotGuiStudy.md)。本轮使用 ImGui 实现停靠体系，没有将 Godot 的 GUI 运行时引入引擎。
 
-工具栏由 `SceneEditor` 绘制为两行，高度按 `GetFrameHeight()`、窗口内边距与行距计算，并传入 `EditorDockManager::beginFrame`，不再使用固定 90px 高度。F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏面板，退出时恢复；它不改变 Docking 的主窗口边界，也不启用多窗口渲染。
+工具栏由 `SceneEditor` 绘制为两行，高度按 `GetFrameHeight()`、窗口内边距与行距计算，并传入 `EditorDockManager::beginFrame`，不再使用固定 90px 高度。F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏面板，退出时恢复；它不改变 Docking 的主窗口边界，F11 本身不切换多 viewport 配置。
+
+材质／Shader 会话由 `SceneEditor::drawMaterialWindow` 在按需打开的系统窗口绘制，关闭隐藏但不清除草稿，应用退出统一确认。主窗最小化或隐藏主 UI 时工具窗继续提交，`EditorDockManager::keepAlive` 保持原 Dock 树。`ImGuiLayer` 的多 viewport 选项默认关闭；编辑器显式启用，其他入口仍为单窗口。后端负责平台 swapchain／RTV 与呈现，适配层绑定正确 ImGui context、处理原生输入与延迟关闭，并在释放后端前销毁平台窗。主纹理局部矩形与桌面 UI 坐标由同帧原点转换，主窗口移动后仍正确拾取与绘制 Gizmo。
+
+Scene / Details 默认在左下同组；Scene 为 Actor 属性编辑，Details 为 Content 选中 Mesh 的信息与真实场景材质引用，底部仅保留资源列表。选择触发一次性切页，用户手动切页不会每帧被抢回。
 
 ## 编辑命令、事务与主题
 
 `EditorCommandRegistry` 位于 Editor 层，集中登记命令 ID、分组、文案、快捷键、回调与可用条件。已接入撤销 / 重做、Actor 新建 / 复制 / 删除、场景保存和布局恢复命令；菜单和相关按钮通过命令执行。渲染切换、F11 等应用级按键仍由 `MinimalApp` 处理，并非所有 UI 动作都已迁入注册表。`SceneEditor` 在文本输入或 Gizmo 使用期间跳过命令快捷键派发。
 
-`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Details 变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条，多选复制仍逐个记录。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
+`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Scene 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条，多选复制仍逐个记录。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
 
 `EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换（提交 `d62960b`）；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。两套配色已分别截图验证。
 

@@ -60,7 +60,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 **编辑器**
 
-- Dear ImGui Docking 工作区：Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 可分割停靠、合并标签及悬浮。
+- Dear ImGui Docking 工作区：Outliner、Scene、Details、Viewport settings、Content & Editors 和 Scene Viewport 六个面板可分割停靠、合并标签及悬浮；Scene / Details 默认在左侧同组。
+- 独立系统材质窗口：点击 Scene 或 Mesh Details 的材质入口打开，可移出主窗口；包含材质参数与共享 HLSL 编辑，关闭保留会话草稿。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
 - 材质参数拖动时实时预览，Apply 确认、Save 保存，Discard draft 恢复；`Grid` 程序化网格材质。
 - 所有材质统一提供 `Two-sided` 独立开关，控制背面可见性与背面法线，沿用实时预览和保存流程。
@@ -68,7 +69,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。
 - 编辑事务：Actor 增删 / 复制与 Gizmo 拖拽可撤销重做（Ctrl+Z / Ctrl+Y）；连续数值拖动合并为一条。
-- 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Details 编辑主 Actor。
+- 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Scene 编辑主 Actor。
 - 编辑命令：菜单、按钮与快捷键通过命令注册表执行已接入的动作；双行工具栏按样式计算高度。
 - F11 视口全屏：窗口无边框覆盖当前显示器并隐藏面板，再按 F11 或 Esc 恢复。
 - 启动加载界面：全屏背景 + 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
@@ -149,13 +150,13 @@ CMake 目标：
 
 进入编辑器后：
 
-- Outliner 选 Actor，Details 改变换与 Mesh / Material；
-- Content 页签导入 OBJ、编辑材质、编辑 HLSL；
+- Outliner 或视口选 Actor，Scene 改变换与 Mesh / Material；
+- 底部 Content 的 Meshes 导入和选择 Mesh，左侧 Details 查看几何与场景材质引用；点击材质入口在独立系统窗口编辑参数与 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
-编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理五个面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。当前未启用独立操作系统窗口或跨显示器多视口。
+编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理六个面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。材质编辑器使用独立系统窗口，其他面板保持主窗口内停靠。
 
-顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左侧 Outliner / Details、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；Content 内的编辑器标签仍可拖拽重排。首次使用 Docking 时会建立新的默认布局，替换旧版自由窗口的位置安排。
+顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左上 Outliner、左下 Scene / Details 页签、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；Content 仅保留 Meshes 资源列表，材质参数与 Shader 页位于独立窗口；旧五面板布局在原 Details 位置增量加入 Scene。首次使用 Docking 时会建立新的默认布局，替换旧版自由窗口的位置安排。
 
 ## 场景操作
 
@@ -165,7 +166,7 @@ CMake 目标：
 | W / E / R / Space | 切换移动 / 旋转 / 缩放工具（Space 循环） |
 | 拖动变换手柄 | 修改选中 Actor 的 Transform |
 | 工具栏 World / Local、Snap | 切换坐标模式、开关步进吸附 |
-| Delete（视口 / Outliner / Details） | 删除选中 Actor，保留共享 Mesh / Material 资产 |
+| Delete（视口 / Outliner / Scene） | 删除选中 Actor，保留共享 Mesh / Material 资产 |
 | 右键拖动视口 | 环绕旋转相机 |
 | Alt + 左键拖动 | 环绕旋转相机（与右键一致） |
 | 中键拖动视口 | 平移相机焦点 |
@@ -293,7 +294,7 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 | `src/Assets/AssetLibrary.cpp` | 内置 Mesh、OBJ 导入、材质参数与持久化 |
 | `src/Project/Project.cpp` | `.raproject` / `Engine.raeengine`、兼容性检查、引擎注册表 |
 | `src/Renderer/SceneRenderer.cpp` | DX11 设备、交换链、G-buffer、阴影、渲染、截图 |
-| `src/Editor/SceneEditor.cpp` | Outliner / Details / Content、材质与 Shader 草稿 |
+| `src/Editor/SceneEditor.cpp` | Outliner / Scene / Details / Content、材质与 Shader 草稿 |
 | `src/Editor/ViewportInteraction.cpp` | 视口拾取、变换手柄、相机（环绕 / 平移 / 聚焦） |
 | `src/Editor/LoadingScreen.cpp` | 启动加载界面：背景图解码 + 底部相对定位的进度层 |
 | `src/ImGui/ImGuiLayer.cpp` | ImGui 上下文与 Win32 / DX11 适配 |
@@ -351,7 +352,7 @@ RestArtEngine.exe --help
 - 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
 - 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称、可见性及 Mesh / Material 引用修改尚未纳入撤销历史。
-- Docking 悬浮限于主窗口；尚无独立操作系统面板窗口、动态面板插件或命名布局。
+- 六个工作区面板在主窗口内停靠，材质编辑器为独立系统窗口；尚无动态面板插件、图钉自动隐藏或命名布局。
 - 主题切换已提交（Black / Dark Blue、偏好保存）：`UI → Theme` 切换，两套配色均已截图验证；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
 
@@ -376,3 +377,5 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节
 - [阴影方案](docs/ShadowMethods.md)：各方案资源路径、取舍与验证矩阵
+
+GUI 专项入口见 [GUI 设计规范](docs/GuiDevelopment.md) 与 [GUI 协作约定](docs/AgentDevelopment.md)。

@@ -20,6 +20,18 @@
 
 Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理，不管理 Dock 节点。GUI 专项负责编辑器布局、控件与交互；Shader、Pass、GPU 资源和后端能力由渲染专项负责。跨界任务先约定数据与预览契约，再分派文件。
 
+## 系统材质窗口与 Scene / Details（2026-10-26）
+
+材质参数与工程共享 Shader 两页在按需打开的系统 MaterialWorkspace 中编辑，关闭只隐藏并保留本次会话草稿，整个引擎退出仍统一确认。重复打开复用并聚焦，主窗口最小化时可继续使用工具窗。参数 Apply、Save 与切换材质的 Apply／Discard／Cancel 继续沿用原契约。
+
+工作区为六面板；左下 Scene / Details 默认同组。Scene 编辑选中 Actor 的实例属性；Details 显示 Content 当前选中 Mesh 的几何信息、来源和真实场景材质引用。Mesh 资产仍为几何数据，材质引用按使用它的 Actor 去重。选 Actor 一次性显示 Scene，点资源一次性显示 Details，不逐帧抢回手动页签。
+
+保留 RestArtEngine.DockSpace.v1；旧布局只在原 Details 节点补入 Scene，浮动 Details 按原几何组成双页签；已有 Scene 设置尊重用户安排，恢复默认才重建树。普通工作区面板留在主窗口内，材质窗口具有独立系统边框与任务栏入口。GUI 桌面坐标与主客户区纹理坐标显式转换，拾取和 Gizmo 使用本帧同一图像区域。
+
+## Visual Studio 工具窗口交互方向（设计提案）
+
+参照 [Visual Studio 官方窗口布局说明](https://learn.microsoft.com/en-us/visualstudio/ide/customizing-window-layouts-in-visual-studio?view=vs-2022)，延续已有拖拽停靠、拆分、标签合并与比例调整。后续拟统一加入单窗显隐、关闭后恢复、图钉自动隐藏及命名布局。隐藏保留选择、草稿和编辑上下文，选择对象尊重用户手动隐藏的面板；场景视口系统外浮需单独适配渲染与坐标。上述新增窗口管理能力仍为提案，未在本次实现。
+
 ## 默认设计方向与视觉规则
 
 面向技术美术的桌面工具：以场景视口和高频编辑为中心，使用稳定的停靠面板、清晰分组、紧凑但可读的属性控件。借鉴 Godot 的职责和交互，不引入其 GUI 运行时，也不把其他引擎的品牌图标当本项目资源。Project Manager 和加载页可使用不同的信息密度，仍应保持主题、术语和反馈一致。

@@ -609,7 +609,7 @@ int wmain(int argc, wchar_t** argv) {
         // Theme is a per-user preference read before the context is created; the
         // ImGui layer applies it during initialization.
         rae::imgui::currentTheme() = rae::imgui::loadThemePreference(rae::imgui::defaultThemePreferencePath());
-        if (!ui.initialize(window.handle, renderer.device(), renderer.context()))
+        if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest))
             throw std::runtime_error("Dear ImGui initialization failed");
         if (interactive) ui.setIniFilename("RestArtEngine.imgui.ini");
         rae::editor::LoadingScreen loading;
@@ -649,7 +649,26 @@ int wmain(int argc, wchar_t** argv) {
                 TranslateMessage(&msg); DispatchMessageW(&msg);
             }
             if (!running) break;
-            if (windowState.minimized) { Sleep(16); continue; }
+            // A taskbar close request must still expose the main editor's dirty
+            // confirmation even while every editor surface is minimized.
+            if (windowState.minimized && windowState.closeRequested)
+                ShowWindow(window.handle, SW_RESTORE);
+            if (windowState.minimized) {
+                if (ui.hasVisiblePlatformWindows() || ui.hasPendingPlatformWindowRequests()) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const float dt = std::chrono::duration<float>(now - previous).count();
+                    previous = now;
+                    ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
+                    editor.drawMaterialWindow(renderer);
+                    if (windowState.closeRequested) {
+                        editor.requestClose();
+                        windowState.closeRequested = false;
+                    }
+                    if (editor.drawCloseDialog(renderer)) running = false;
+                    ui.endFrame(false);
+                }
+                Sleep(16); continue;
+            }
             if (windowState.resized) {
                 if (!renderer.resize(windowState.width, windowState.height, error)) throw std::runtime_error(error);
                 windowState.resized = false;
@@ -681,7 +700,8 @@ int wmain(int argc, wchar_t** argv) {
             }
             ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
             auto& io = ImGui::GetIO();
-            if (!io.WantTextInput) {
+            const bool mainWindowFocused = GetForegroundWindow() == window.handle;
+            if (mainWindowFocused && !io.WantTextInput) {
                 // F11 is "viewport fullscreen", not "UI fullscreen": the window
                 // goes borderless over the monitor and the editor panels are
                 // hidden so the scene covers the whole screen. Escape and F1
@@ -715,7 +735,7 @@ int wmain(int argc, wchar_t** argv) {
                     }
                 }
             }
-            if (!showUI && !io.WantCaptureMouse && !selfTest) {
+            if (!showUI && mainWindowFocused && !io.WantCaptureMouse && !selfTest) {
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
                     settings.cameraYaw -= io.MouseDelta.x * .006f;
                     settings.cameraPitch = std::clamp(settings.cameraPitch + io.MouseDelta.y * .006f,
@@ -736,11 +756,12 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 settings.cameraDistance = std::clamp(settings.cameraDistance - io.MouseWheel * .4f, 2.5f, 14.0f);
             }
-            bool capture = ImGui::IsKeyPressed(ImGuiKey_F9);
+            bool capture = mainWindowFocused && ImGui::IsKeyPressed(ImGuiKey_F9);
             settings.viewportX = settings.viewportY = settings.viewportWidth = settings.viewportHeight = 0;
             settings.editorViewport = false;
             settings.viewportVisible = true;
             if (showUI && (!selfTest || frame == 9)) editor.draw(settings, renderer, vsync, capture);
+            else if (!selfTest) editor.drawMaterialWindow(renderer);
             if (windowState.closeRequested) { editor.requestClose(); windowState.closeRequested = false; }
             if (editor.drawCloseDialog(renderer)) running = false;
             const bool rendered = selfTest ? renderer.render(settings, error)

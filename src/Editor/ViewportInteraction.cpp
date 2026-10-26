@@ -125,7 +125,9 @@ bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
 scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World& world,
                    const assets::AssetLibrary& assets, FXMMATRIX view, CXMMATRIX projection,
                    const assets::MaterialAsset* materialOverride) {
-    const ImVec2 mouse = ImGui::GetMousePos();
+    const auto screenMouse = ImGui::GetMousePos();
+    const auto mainOrigin = ImGui::GetMainViewport()->Pos;
+    const ImVec2 mouse{screenMouse.x - mainOrigin.x, screenMouse.y - mainOrigin.y};
     const auto unproject = [&](float depth) {
         return XMVector3Unproject(XMVectorSet(mouse.x, mouse.y, depth, 1),
             static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
@@ -168,10 +170,12 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                scene::ActorId& selected, renderer::SceneRenderer& renderer,
                                const assets::MaterialAsset* materialOverride) {
     hovered_ = focused_ = false;
+    pickedThisFrame_ = false;
     settings.editorViewport = true;
     settings.viewportVisible = false;
     settings.viewportWidth = settings.viewportHeight = 0;
     ImGuizmo::BeginFrame();
+    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::SetNextWindowSize({640, 480}, ImGuiCond_FirstUseEver);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     const bool visible = ImGui::Begin(EditorDockManager::panelName(EditorPanel::Viewport), nullptr,
@@ -182,16 +186,18 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         ImGui::End();
         return false;
     }
-    // This frame's dock content rectangle is the common coordinate system for
-    // rendering, picking and Gizmo. The tab bar and window title are excluded.
+    // Rendering uses main-client/texture pixels. ImGui, mouse input and Gizmo
+    // use desktop coordinates when platform viewports are enabled.
     const ImVec2 contentMin = ImGui::GetCursorScreenPos();
     const ImVec2 available = ImGui::GetContentRegionAvail();
+    const ImVec2 mainOrigin = ImGui::GetMainViewport()->Pos;
+    const ImVec2 localMin{contentMin.x - mainOrigin.x, contentMin.y - mainOrigin.y};
     const float targetWidth = static_cast<float>(renderer.sceneTextureWidth());
     const float targetHeight = static_cast<float>(renderer.sceneTextureHeight());
-    const int left = static_cast<int>(std::clamp(contentMin.x, 0.0f, targetWidth));
-    const int top = static_cast<int>(std::clamp(contentMin.y, 0.0f, targetHeight));
-    const int imageRight = static_cast<int>(std::clamp(contentMin.x + available.x, 0.0f, targetWidth));
-    const int bottom = static_cast<int>(std::clamp(contentMin.y + available.y, 0.0f, targetHeight));
+    const int left = static_cast<int>(std::clamp(localMin.x, 0.0f, targetWidth));
+    const int top = static_cast<int>(std::clamp(localMin.y, 0.0f, targetHeight));
+    const int imageRight = static_cast<int>(std::clamp(localMin.x + available.x, 0.0f, targetWidth));
+    const int bottom = static_cast<int>(std::clamp(localMin.y + available.y, 0.0f, targetHeight));
     settings.viewportX = left;
     settings.viewportY = top;
     settings.viewportWidth = std::max(0, imageRight - left);
@@ -202,11 +208,11 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         return false;
     }
     settings.viewportVisible = true;
-    const ImVec2 imageMin{static_cast<float>(left), static_cast<float>(top)};
-    const ImVec2 imageMax{static_cast<float>(imageRight), static_cast<float>(bottom)};
+    const ImVec2 imageMin{mainOrigin.x + left, mainOrigin.y + top};
+    const ImVec2 imageMax{mainOrigin.x + imageRight, mainOrigin.y + bottom};
     ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(renderer.sceneTexture())),
-        imageMin, imageMax, {imageMin.x / targetWidth, imageMin.y / targetHeight},
-        {imageMax.x / targetWidth, imageMax.y / targetHeight});
+        imageMin, imageMax, {left / targetWidth, top / targetHeight},
+        {imageRight / targetWidth, bottom / targetHeight});
     ImGui::SetCursorScreenPos({imageMin.x + 8, imageMin.y + 8});
     hovered_ = ImGui::IsWindowHovered();
     focused_ = ImGui::IsWindowFocused();
@@ -298,7 +304,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     XMStoreFloat4x4(&viewData, view); XMStoreFloat4x4(&projectionData, projection);
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
-    ImGuizmo::SetRect(static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
+    ImGuizmo::SetRect(imageMin.x, imageMin.y,
         static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight));
     ImGuizmo::SetGizmoSizeClipSpace(.18f);
     ImGuizmo::Enable(!blocked && (hovered_ || usingGizmo_) && !orbiting_ && !panning_ && (!overToolbar || usingGizmo_));
@@ -343,6 +349,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     } else usingGizmo_ = false;
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        pickedThisFrame_ = true;
         const auto hit = pick(settings, world, assets, view, projection, materialOverride);
         if ((io.KeyCtrl || io.KeyShift) && hit) {
             // Additive picking mirrors the Outliner: toggle membership and keep

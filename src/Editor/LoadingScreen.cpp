@@ -121,15 +121,17 @@ void LoadingScreen::release() noexcept {
 
 void LoadingScreen::draw(float displayWidth, float displayHeight, float progress, const char* text) const {
     if (displayWidth < 1.0f || displayHeight < 1.0f) return;
-    ImDrawList* list = ImGui::GetBackgroundDrawList();
-    const ImVec2 topLeft(0.0f, 0.0f);
-    const ImVec2 bottomRight(displayWidth, displayHeight);
+    ImGuiViewport* const viewport = ImGui::GetMainViewport();
+    ImDrawList* list = ImGui::GetBackgroundDrawList(viewport);
+    const ImVec2 topLeft = viewport->Pos;
+    const ImVec2 bottomRight(topLeft.x + displayWidth, topLeft.y + displayHeight);
+    const auto position = [topLeft](float x, float y) { return ImVec2(topLeft.x + x, topLeft.y + y); };
     if (texture_)
         list->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture_)), topLeft, bottomRight);
     else
         list->AddRectFilled(topLeft, bottomRight, IM_COL32(10, 12, 18, 255));
     // A soft scrim keeps the overlay readable on bright artwork.
-    list->AddRectFilledMultiColor(ImVec2(0.0f, displayHeight * 0.72f), bottomRight,
+    list->AddRectFilledMultiColor(position(0.0f, displayHeight * 0.72f), bottomRight,
         IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 152), IM_COL32(0, 0, 0, 152));
 
     // Every overlay coordinate is a fraction of the artwork size, so replacing
@@ -140,22 +142,22 @@ void LoadingScreen::draw(float displayWidth, float displayHeight, float progress
     const float textTop = displayHeight * 0.872f;
     ImFont* font = ImGui::GetFont();
     const char* label = (text && *text) ? text : "Loading";
-    list->AddText(font, fontSize, ImVec2(inset, textTop), IM_COL32(228, 238, 248, 255), label);
+    list->AddText(font, fontSize, position(inset, textTop), IM_COL32(228, 238, 248, 255), label);
 
     const float clamped = std::clamp(progress, 0.0f, 1.0f);
     char percent[16];
     std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(clamped * 100.0f + 0.5f));
     const ImVec2 percentSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, percent);
-    list->AddText(font, fontSize, ImVec2(right - percentSize.x, textTop), IM_COL32(150, 205, 255, 255), percent);
+    list->AddText(font, fontSize, position(right - percentSize.x, textTop), IM_COL32(150, 205, 255, 255), percent);
 
     // Thin, minimal two-tone bar: light blue for the loaded portion, grey track.
     const float barTop = displayHeight * 0.921f;
     const float barHeight = std::max(3.0f, displayHeight * 0.0042f);
     const float rounding = barHeight * 0.5f;
-    list->AddRectFilled(ImVec2(inset, barTop), ImVec2(right, barTop + barHeight), IM_COL32(126, 132, 142, 120), rounding);
+    list->AddRectFilled(position(inset, barTop), position(right, barTop + barHeight), IM_COL32(126, 132, 142, 120), rounding);
     if (clamped > 0.0f) {
-        list->AddRectFilled(ImVec2(inset, barTop),
-            ImVec2(inset + (right - inset) * clamped, barTop + barHeight), IM_COL32(126, 200, 255, 255), rounding);
+        list->AddRectFilled(position(inset, barTop),
+            position(inset + (right - inset) * clamped, barTop + barHeight), IM_COL32(126, 200, 255, 255), rounding);
     }
 }
 

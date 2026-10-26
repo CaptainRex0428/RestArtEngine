@@ -29,7 +29,7 @@ UE 仓库需要 Epic 账号授权；本次通过公开镜像阅读了 `ScopedTra
 | 游标 + 提交时截断重做尾巴 | 采纳 | `entries_.resize(cursor_)` 后追加，`cursor_` 指向已应用前缀 |
 | 历史上限 | 采纳 | `setMaxSteps()`，默认 64，超出丢弃最旧记录 |
 | 作用域聚合成一条 | 采纳 | Gizmo 拖拽期间只记录「拖拽前」快照，松手时才 `push` |
-| 合并模式（MERGE_*） | 采纳（时间窗） | `UndoStack::Merge{key, windowMs}`：同键窗口内保留最早 undo、刷新最新 redo；Details 面板三个变换控件按 700ms 合并 |
+| 合并模式（MERGE_*） | 采纳（时间窗） | `UndoStack::Merge{key, windowMs}`：同键窗口内保留最早 undo、刷新最新 redo；Scene 面板三个变换控件按 700ms 合并 |
 | `action_level` 嵌套 | 未采纳 | 当前没有宏动作或复合命令 |
 | 对象引用保活 | 未采纳 | 记录保存 `scene::Actor` 的值拷贝，不持有指针 |
 | 对象序列化自动捕获 | 未采纳 | 引擎无反射；改为调用方显式提供两个方向 |
@@ -53,7 +53,7 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 | `Duplicate` | 同上；多选时为每个 Actor 各记一条 |
 | `Delete`（单选或多选） | 记录每个 Actor 的拷贝与原始下标；撤销时按升序插回原位，当前仅选中其中一个恢复的 Actor |
 | Gizmo 平移 / 旋转 / 缩放（单个或整组） | 拖拽开始前记住整组「稳定态」变换，松手时将所有变化的 Actor 合为一条记录 |
-| Details 面板数值拖动 | 控件激活时记下稳定态，`IsItemDeactivatedAfterEdit` 后按 700ms 时间窗合并 |
+| Scene 面板数值拖动 | 控件激活时记下稳定态，`IsItemDeactivatedAfterEdit` 后按 700ms 时间窗合并 |
 
 ## 命令注册表
 
@@ -70,7 +70,7 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 ## 多选
 
 - Outliner：`Ctrl` / `Shift` 点击切换成员；视口：`Ctrl` / `Shift` 点击同样切换。Shift 当前不做连续范围选择。
-- `selectedActor()` 始终是主 Actor（Gizmo 枢轴、Details 目标）；`selection()` 是完整集合。
+- `selectedActor()` 始终是主 Actor（Gizmo 枢轴、Scene 面板目标）；`selection()` 是完整集合。
 - 批量删除一次记录、一次撤销；整组 Gizmo 以主 Actor 为枢轴，对其他成员应用同一世界增量（旋转 / 缩放时同时更新位置）。
 
 ## 边界（未实现）

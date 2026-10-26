@@ -7,6 +7,7 @@
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -95,6 +96,7 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     const auto scenePath = project_.defaultScene;
     if (std::filesystem::exists(scenePath) && !world_.load(scenePath, assets_, error)) return false;
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
+    sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
     selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
@@ -175,6 +177,9 @@ void SceneEditor::duplicateSelectedActor() {
 }
 
 void SceneEditor::selectMaterial(assets::AssetId id) {
+    if (!assets_.findMaterial(id)) return;
+    materialWindowOpen_ = true;
+    materialWindowFocusRequested_ = true;
     if (id == selectedMaterial_) { openMaterialTab_ = true; return; }
     if (materialDraftDirty_) { pendingMaterial_ = id; openMaterialTab_ = true; return; }
     if (const auto* material = assets_.findMaterial(id)) {
@@ -245,6 +250,7 @@ bool SceneEditor::isSelected(scene::ActorId id) const {
 }
 
 void SceneEditor::selectActor(scene::ActorId id, bool additive) {
+    dockManager_.requestFocus(EditorPanel::Scene);
     if (!id) {
         selection_.clear();
         selectedActor_ = 0;
@@ -256,7 +262,7 @@ void SceneEditor::selectActor(scene::ActorId id, bool additive) {
         return;
     }
     // Ctrl/Shift click toggles membership; the primary falls back to the last
-    // remaining Actor so Details never points at an unselected one.
+    // remaining Actor so Scene never points at an unselected one.
     const auto it = std::find(selection_.begin(), selection_.end(), id);
     if (it != selection_.end()) {
         selection_.erase(it);
@@ -282,6 +288,7 @@ void SceneEditor::insertActor(std::size_t index, const scene::Actor& actor) {
 }
 
 void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
+    dockManager_.requestFocus(EditorPanel::Scene);
     // Undo removes the new Actor, redo puts the same copy back. Both directions
     // capture the identity by value so a later selection change cannot leak in.
     const scene::ActorId id = actor.id;
@@ -381,6 +388,9 @@ void SceneEditor::drawUiMenu() {
         }
         ImGui::EndMenu();
     }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Material editor...", nullptr, materialWindowOpen_, !assets_.materials.empty()))
+        selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
     ImGui::EndMenu();
 }
 
@@ -464,7 +474,7 @@ void SceneEditor::drawOutliner() {
     actorPanelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 }
 
-void SceneEditor::drawDetails() {
+void SceneEditor::drawScene() {
     auto* actor = world_.findActor(selectedActor_);
     if (!actor) { ImGui::TextDisabled("Select an Actor in the Outliner."); return; }
     ImGui::TextDisabled("Actor #%llu", static_cast<unsigned long long>(actor->id));
@@ -513,7 +523,9 @@ void SceneEditor::drawDetails() {
         }
         ImGui::EndCombo();
     }
+    ImGui::BeginDisabled(!material);
     if (ImGui::Button("Edit assigned material")) selectMaterial(actor->mesh.materialId);
+    ImGui::EndDisabled();
 }
 
 void SceneEditor::importMesh() {
@@ -555,31 +567,67 @@ void SceneEditor::drawAssets() {
     if (ImGui::Button("Add Actor from mesh")) {
         if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
             selectedActor_ = world_.createActor(mesh->name, mesh->id, selectedMaterial_);
+            selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Add " + mesh->name);
             sceneDirty_ = true;
         }
     }
     ImGui::EndDisabled();
-    const bool stacked = ImGui::GetContentRegionAvail().x < 480.0f;
-    const ImVec2 listSize = stacked
-        ? ImVec2{0, std::clamp(ImGui::GetContentRegionAvail().y * .45f, 90.0f, 180.0f)}
-        : ImVec2{220, 0};
-    ImGui::BeginChild("Mesh library", listSize, ImGuiChildFlags_Borders);
+    continueButtonRow("Open material editor");
+    ImGui::BeginDisabled(assets_.materials.empty());
+    if (ImGui::Button("Open material editor"))
+        selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
+    ImGui::EndDisabled();
+    ImGui::BeginChild("Mesh library", {0, 0}, ImGuiChildFlags_Borders);
     for (const auto& mesh : assets_.meshes) {
         const auto label = mesh.name + "##" + std::to_string(mesh.id);
-        if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) selectedMesh_ = mesh.id;
+        if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) {
+            selectedMesh_ = mesh.id;
+            dockManager_.requestFocus(EditorPanel::Details);
+        }
     }
     ImGui::EndChild();
-    if (!stacked) ImGui::SameLine();
-    ImGui::BeginGroup();
+}
+
+void SceneEditor::drawMeshDetails() {
     if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
-        ImGui::TextUnformatted(mesh->name.c_str());
-        ImGui::Text("Type: %s", meshType(mesh->primitive));
+        ImGui::TextWrapped("%s", mesh->name.c_str());
+        ImGui::TextWrapped("Type: %s", meshType(mesh->primitive));
         ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
         message(mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
-        ImGui::TextWrapped("OBJ imports static geometry. Materials are assigned separately in Details.");
+        ImGui::TextWrapped("OBJ imports static geometry. Materials are assigned separately in Scene.");
+        ImGui::SeparatorText("Materials in scene");
+        std::vector<assets::AssetId> referencedMaterials;
+        for (const auto& actor : world_.actors) {
+            if (actor.mesh.meshId != mesh->id ||
+                std::find(referencedMaterials.begin(), referencedMaterials.end(), actor.mesh.materialId) != referencedMaterials.end())
+                continue;
+            referencedMaterials.push_back(actor.mesh.materialId);
+        }
+        for (const auto id : referencedMaterials) {
+            const auto* material = assets_.findMaterial(id);
+            const auto count = std::count_if(world_.actors.begin(), world_.actors.end(),
+                [mesh, id](const auto& actor) { return actor.mesh.meshId == mesh->id && actor.mesh.materialId == id; });
+            if (material) {
+                const auto label = material->name + "###MeshMaterial." + std::to_string(id);
+                const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+                const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
+                if (ImGui::Button(label.c_str(), {buttonWidth, 0})) selectMaterial(id);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", material->name.c_str());
+                const auto usage = std::to_string(count) + " Actor(s)";
+                continueButtonRow(usage.c_str());
+                ImGui::TextUnformatted(usage.c_str());
+            } else {
+                ImGui::TextWrapped("Missing material #%llu (%zu Actor(s))",
+                    static_cast<unsigned long long>(id), static_cast<std::size_t>(count));
+            }
+        }
+        if (referencedMaterials.empty())
+            ImGui::TextWrapped("No Actor currently uses this mesh. Assign a material in Scene after adding it to the scene.");
+        ImGui::TextWrapped("Click a material to open its independent editor window.");
+    } else {
+        ImGui::TextDisabled("Select a Mesh in the Content browser.");
     }
-    ImGui::EndGroup();
 }
 
 void SceneEditor::drawMaterial() {
@@ -721,6 +769,74 @@ void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
     ImGui::EndChild();
 }
 
+void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
+    dockManager_.keepAlive();
+    materialWindowFocused_ = false;
+    if (!materialWindowOpen_) return;
+
+    const auto* mainViewport = ImGui::GetMainViewport();
+    const bool nativeWindow = (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0;
+    if (nativeWindow) {
+        ImGuiWindowClass windowClass;
+        windowClass.ParentViewportId = 0; // A separate taskbar window survives minimizing the scene window.
+        windowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+        windowClass.ViewportFlagsOverrideClear = ImGuiViewportFlags_NoDecoration | ImGuiViewportFlags_NoTaskBarIcon;
+        ImGui::SetNextWindowClass(&windowClass);
+    }
+
+    ImVec2 workPos = mainViewport->WorkPos, workSize = mainViewport->WorkSize;
+    const auto center = mainViewport->GetCenter();
+    for (const auto& monitor : ImGui::GetPlatformIO().Monitors) {
+        if (center.x >= monitor.MainPos.x && center.x < monitor.MainPos.x + monitor.MainSize.x &&
+            center.y >= monitor.MainPos.y && center.y < monitor.MainPos.y + monitor.MainSize.y) {
+            workPos = monitor.WorkPos;
+            workSize = monitor.WorkSize;
+            break;
+        }
+    }
+    const ImVec2 initialSize{std::min(880.0f, std::max(280.0f, workSize.x * .85f)),
+                             std::min(650.0f, std::max(220.0f, workSize.y * .85f))};
+    ImGui::SetNextWindowSize(initialSize, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos({workPos.x + (workSize.x - initialSize.x) * .5f,
+                             workPos.y + (workSize.y - initialSize.y) * .5f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints({280, 220}, {FLT_MAX, FLT_MAX});
+    if (materialWindowFocusRequested_) ImGui::SetNextWindowFocus();
+    const auto title = std::string("Material Editor - ") + materialDraft_.name + "###MaterialWorkspace";
+    const auto flags = ImGuiWindowFlags_NoDocking | (nativeWindow ? ImGuiWindowFlags_NoTitleBar : 0);
+    const bool visible = ImGui::Begin(title.c_str(), &materialWindowOpen_, flags);
+    materialWindowFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    const auto* toolViewport = ImGui::GetWindowViewport();
+    auto* nativeHandle = static_cast<HWND>(toolViewport->PlatformHandleRaw ? toolViewport->PlatformHandleRaw : toolViewport->PlatformHandle);
+    if (nativeWindow && toolViewport->ID != mainViewport->ID && nativeHandle)
+        materialWindowFocused_ |= GetForegroundWindow() == nativeHandle;
+    if (materialWindowFocusRequested_) {
+        if (nativeWindow && toolViewport->ID != mainViewport->ID && nativeHandle && IsWindow(nativeHandle)) {
+            if (IsIconic(nativeHandle)) ShowWindow(nativeHandle, SW_RESTORE);
+            SetForegroundWindow(nativeHandle);
+        }
+        materialWindowFocusRequested_ = false;
+    }
+    if (visible && materialWindowOpen_) {
+        ImGui::TextWrapped("Closing this window keeps your drafts and live preview. Reopen it to continue; use Save to persist changes.");
+        if (materialsDirty_) ImGui::TextDisabled("Material assets have unsaved changes.");
+        message(status_);
+        if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
+            if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+                openMaterialTab_ = false;
+                drawMaterial();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Shader Editor", nullptr, openShaderTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
+                openShaderTab_ = false;
+                drawShader(renderer);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+}
+
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
     actorPanelFocused_ = false;
     const auto* mainViewport = ImGui::GetMainViewport();
@@ -731,6 +847,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     const float rowHeight = ImGui::GetFrameHeight();
     const float toolbarHeight = style.WindowPadding.y * 2.0f + rowHeight * 2.0f + style.ItemSpacing.y + 1.0f;
     dockManager_.beginFrame(toolbarHeight);
+    ImGui::SetNextWindowViewport(mainViewport->ID);
     ImGui::SetNextWindowPos(mainViewport->Pos);
     ImGui::SetNextWindowSize({mainViewport->Size.x, toolbarHeight});
     ImGui::Begin("RestArtEngine Editor", nullptr,
@@ -766,19 +883,18 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::End();
 
 
-    // Shortcuts resolve through the command registry, so the Edit menu, the
-    // panel buttons and the keyboard cannot drift apart. Text fields keep their
-    // own undo, and a gizmo drag owns the keyboard until it ends.
-    if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) commands_.processShortcuts();
-
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer, materialPreview());
+    if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
+        dockManager_.requestFocus(EditorPanel::Scene);
+    sceneInspectorActor_ = selectedActor_;
     trackTransformEdit();
 
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
-    dockManager_.drawPanel(EditorPanel::Details, [&] {
-        drawDetails();
+    dockManager_.drawPanel(EditorPanel::Scene, [&] {
+        drawScene();
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
+    dockManager_.drawPanel(EditorPanel::Details, [&] { drawMeshDetails(); });
     dockManager_.drawPanel(EditorPanel::Settings, [&] {
         ImGui::TextDisabled("Scene");
         ImGui::Text("Actors: %zu", world_.actors.size());
@@ -824,21 +940,19 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         message(status_);
     });
 
-    if (openMaterialTab_ || openShaderTab_)
-        ImGui::SetWindowFocus(EditorDockManager::panelName(EditorPanel::Content));
     dockManager_.drawPanel(EditorPanel::Content, [&] {
         if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
             if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
-                openMaterialTab_ = false; drawMaterial(); ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Shader Editor", nullptr, openShaderTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
-                openShaderTab_ = false; drawShader(renderer); ImGui::EndTabItem();
-            }
             ImGui::EndTabBar();
         }
     });
-    if (!ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    drawMaterialWindow(renderer);
+    // Evaluate after the tool window has submitted this frame's focus state.
+    // Its text edits and shortcuts must never mutate the selected scene Actor.
+    if (!materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+        commands_.processShortcuts();
+    if (!materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -852,13 +966,16 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
                     // History entries reference Actors from the replaced scene.
                     undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
+                    sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
                     materialDraftDirty_ = materialsDirty_ = sceneDirty_ = false;
                     pendingMaterial_ = 0;
                     materialDraft_ = {};
                     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
-                    selectedMaterial_ = 0;
-                    selectMaterial(assets_.materials.empty() ? 0 : assets_.materials.front().id);
+                    // Refresh session data without a user-open/focus request.
+                    // Loading a scene preserves the tool's visibility and tab.
+                    selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
+                    if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
                     status_ = "Scene loaded.";
                 } else status_ = error;
                 sceneReloadRequested_ = false; ImGui::CloseCurrentPopup();
@@ -868,6 +985,11 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             ImGui::EndPopup();
         }
     }
+    // Outliner/commands can change the selection after the viewport was drawn.
+    // Queue their activation once, then retain the final selection as baseline.
+    if (selectedActor_ != sceneInspectorActor_)
+        dockManager_.requestFocus(EditorPanel::Scene);
+    sceneInspectorActor_ = selectedActor_;
 }
 
 bool SceneEditor::drawCloseDialog(renderer::SceneRenderer& renderer) {

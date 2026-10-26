@@ -18,9 +18,12 @@ public:
     bool isUsing() const { return usingGizmo_; }
     bool isHovered() const { return hovered_; }
     bool isFocused() const { return focused_; }
+    // Only the actual pick path reports an event, including reselecting an Actor.
+    bool pickedThisFrame() const { return pickedThisFrame_; }
 private:
     int operation_ = 0; // translate, rotate, scale
     bool local_ = false, snap_ = false;
+    bool pickedThisFrame_ = false;
     bool usingGizmo_ = false, hovered_ = false, focused_ = false, orbiting_ = false, panning_ = false;
 };
 
