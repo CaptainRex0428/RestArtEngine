@@ -143,7 +143,7 @@ DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置�
 
 场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的主客户区／纹理局部矩形；图像和 Gizmo 使用对应的桌面矩形，拾取鼠标减去主 viewport 原点。两者通过同帧原点转换，移动主窗口后仍使用相同图像区域和投影宽高比。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
 
-材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Scene 的 Actor 材质入口和 Details 中的 Mesh 实际场景材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
+材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Scene 的 Actor 材质入口和 Details 中主选中 Actor 实例的当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
 
 `ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
 
@@ -175,7 +175,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
 
-独立材质存储为工程 `Content/Materials/{id}.ramat`，同样为 JSON，`format` 为 `RAEngine.Material`，`version` 为 `1`。材质文件包含 ID、名称、Base Color、Roughness 与 Metallic。加载场景使用场景内的材质快照；使用 `Reload material assets` 可显式读入工程独立材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
+独立材质存储为工程 `Content/Materials/{id}.ramat`，同样为 JSON，`format` 为 `RAEngine.Material`，`version` 为 `1`。材质文件包含 ID、名称、Base Color、Roughness、Metallic、Grid 与 Two-sided。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载场景使用场景内的材质快照；使用 `Reload material assets` 可显式读入工程独立材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
 
 加载先构造并验证候选 World 和 AssetLibrary，全部成功后再替换当前场景。JSON 损坏或引用的 OBJ 无法加载时，返回诊断并保留当前 World 和 AssetLibrary。场景文件与独立材质文件各自持久化；需要版本管理的成果包括工程描述、场景、材质参数、OBJ 与工程 Shader 源文件。
 

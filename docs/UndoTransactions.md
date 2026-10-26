@@ -62,9 +62,9 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 
 - 顶部 `Edit` 菜单按分组渲染，可用状态与实际选择一致；
 - Outliner 的 `+ Sphere` / `+ Cube` / `Duplicate` / `Delete` 按钮通过 `commandButton(id)` 渲染并调用同一命令；
-- 键盘快捷键由 `processShortcuts()` 统一匹配，文本输入获得焦点或 Gizmo 使用中时整组不触发。
+- 键盘快捷键由 `processShortcuts()` 统一匹配；文本输入、Gizmo 使用、材质窗口或 GC 设置窗口获得焦点、任意 popup 打开时，SceneEditor 不派发这组快捷键。
 
-默认快捷键：Ctrl+Z 撤销，Ctrl+Y / Ctrl+Shift+Z 重做，Ctrl+D 复制，Delete 删除，Ctrl+S 保存场景。文本输入与 Gizmo 的快捷键屏蔽由 `SceneEditor` 调用方负责，注册表自身只匹配键位与可用条件；当前 Delete 命令没有面板焦点限制。F1 / F2 / F3 / F11 等应用级快捷键仍在 `MinimalApp`，命令注册表尚未覆盖全部 UI 动作。
+默认快捷键：Ctrl+Z 撤销，Ctrl+Y / Ctrl+Shift+Z 重做，Ctrl+D 复制，Delete 删除，Ctrl+S 保存场景。上述输入作用域屏蔽由 `SceneEditor` 调用方负责，注册表自身只匹配键位与可用条件；在这些屏蔽条件之外，当前 Delete 命令不额外要求 Actor 面板／视口焦点。F1 / F2 / F3 / F11 等应用级快捷键仍在 `MinimalApp`，命令注册表尚未覆盖全部 UI 动作。
 
 这让菜单、按钮和快捷键不再各自维护一份判断。后续的「命令面板 / 插件」可以直接遍历注册表，而不必改动面板代码。
 

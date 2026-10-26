@@ -91,7 +91,7 @@ Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild 
 | Ctrl+Z / Ctrl+Y（或 Ctrl+Shift+Z） | 撤销 / 重做已记录的编辑动作 |
 | Ctrl+S | 保存当前场景 |
 
-W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete 等注册命令由编辑器统一派发；当前 Delete 的可用条件是存在主选中 Actor 且未拖动 Gizmo，没有额外的面板焦点限制。文本输入或 Gizmo 拖动期间不派发注册命令的快捷键；编辑材质或 Shader 文本时，W / E / R 和 Space 也保留文本输入用途。删除后场景会标记为未保存，点击 `Save Scene` 才写入当前工程的场景文件。
+W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete 等注册命令由编辑器统一派发；当前 Delete 的可用条件是存在主选中 Actor 且未拖动 Gizmo。在文本输入、Gizmo 拖动、材质窗口或 GC 设置窗口获得焦点、任意 popup 打开期间，不派发这组快捷键；除此之外，Delete 不额外要求 Actor 面板／视口焦点。编辑材质或 Shader 文本时，W / E / R 和 Space 也保留文本输入用途。删除后场景会标记为未保存，点击 `Save Scene` 才写入当前工程的场景文件。
 
 多选时 Scene 显示主 Actor，Gizmo 以主 Actor 为枢轴对整组应用变换；一次拖拽记为一条撤销记录。Scene 的位置、旋转、缩放编辑在控件结束编辑时记录，同一 Actor 的同一字段在 700ms 内连续提交可合并。新增、复制、删除也支持撤销；撤销批量删除会恢复所有实例和顺序，但当前只选中其中一个恢复的 Actor。
 
