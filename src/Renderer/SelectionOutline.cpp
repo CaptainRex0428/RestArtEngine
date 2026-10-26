@@ -1,6 +1,7 @@
 #include <RestArtEngine/Renderer/SelectionOutline.h>
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -10,8 +11,8 @@ namespace rae::renderer {
 namespace {
 
 // Mirrors `OutlineConstants : register(b4)` in Scene.hlsl. Colour is authored by
-// the editor (theme accent); params carry the ring radius and the mask texel
-// size so the composite pass stays resolution independent.
+// the editor (theme accent or a custom pick); params carry the ring radius and
+// the mask texel size so the composite pass stays resolution independent.
 struct alignas(16) OutlineConstants {
     float color[4];
     float params[4];
@@ -20,11 +21,9 @@ static_assert(sizeof(OutlineConstants) == 32, "OutlineConstants must stay 32 byt
 
 bool failed(HRESULT result, const char* operation, std::string& error) {
     if (SUCCEEDED(result)) return false;
-    error = std::string(operation) + " failed (HRESULT 0x" + [] (HRESULT value) {
-        char buffer[16]{};
-        std::snprintf(buffer, sizeof(buffer), "%08lX", static_cast<unsigned long>(value));
-        return std::string(buffer);
-    }(result) + ").";
+    char code[16]{};
+    std::snprintf(code, sizeof(code), "%08lX", static_cast<unsigned long>(result));
+    error = std::string(operation) + " failed (HRESULT 0x" + code + ").";
     return true;
 }
 
@@ -36,11 +35,17 @@ struct SelectionOutlinePass::Impl {
     ComPtr<ID3D11RenderTargetView> maskTarget;
     ComPtr<ID3D11ShaderResourceView> maskView;
     ComPtr<ID3D11Buffer> constants;
-    // Read-only depth test: selected fragments pass only where the scene already
-    // stored the same depth, so hidden geometry does not produce outline pixels.
-    ComPtr<ID3D11DepthStencilState> maskDepth;
+    // Two depth states split the selected geometry into visible (R) and occluded
+    // (G) fragments; the blend states only write the channel each pass owns.
+    ComPtr<ID3D11DepthStencilState> visibleDepth;
+    ComPtr<ID3D11DepthStencilState> hiddenDepth;
     ComPtr<ID3D11DepthStencilState> noDepth;
-    ComPtr<ID3D11BlendState> blend;
+    ComPtr<ID3D11BlendState> writeVisible;
+    ComPtr<ID3D11BlendState> writeHidden;
+    // The composite paints the ring over the scene, so transparent pixels must
+    // not overwrite it: alpha blending is required for both the solid and the
+    // dashed parts.
+    ComPtr<ID3D11BlendState> compositeBlend;
     ComPtr<ID3D11RasterizerState> raster;
     ComPtr<ID3D11SamplerState> sampler;
     std::uint32_t width = 0, height = 0;
@@ -67,20 +72,30 @@ bool SelectionOutlinePass::initialize(ID3D11Device* device, std::string& error) 
     depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     depth.StencilEnable = FALSE;
-    if (failed(device->CreateDepthStencilState(&depth, &state.maskDepth), "Create outline depth state", error)) return false;
+    if (failed(device->CreateDepthStencilState(&depth, &state.visibleDepth), "Create outline visible depth state", error)) return false;
+    depth.DepthFunc = D3D11_COMPARISON_GREATER;
+    if (failed(device->CreateDepthStencilState(&depth, &state.hiddenDepth), "Create outline hidden depth state", error)) return false;
     depth.DepthEnable = FALSE;
     if (failed(device->CreateDepthStencilState(&depth, &state.noDepth), "Create outline composite depth state", error)) return false;
 
-    D3D11_BLEND_DESC blend{};
-    blend.RenderTarget[0].BlendEnable = TRUE;
-    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (failed(device->CreateBlendState(&blend, &state.blend), "Create outline blend state", error)) return false;
+    const auto createWriteMask = [&](UINT mask, ComPtr<ID3D11BlendState>& result) {
+        D3D11_BLEND_DESC description{};
+        description.RenderTarget[0].BlendEnable = FALSE;
+        description.RenderTarget[0].RenderTargetWriteMask = static_cast<UINT8>(mask);
+        return !failed(device->CreateBlendState(&description, &result), "Create outline mask write state", error);
+    };
+    if (!createWriteMask(D3D11_COLOR_WRITE_ENABLE_RED, state.writeVisible)) return false;
+    if (!createWriteMask(D3D11_COLOR_WRITE_ENABLE_GREEN, state.writeHidden)) return false;
+    D3D11_BLEND_DESC compositeDescription{};
+    compositeDescription.RenderTarget[0].BlendEnable = TRUE;
+    compositeDescription.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    compositeDescription.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    compositeDescription.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    compositeDescription.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    compositeDescription.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    compositeDescription.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    compositeDescription.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (failed(device->CreateBlendState(&compositeDescription, &state.compositeBlend), "Create outline composite blend state", error)) return false;
 
     D3D11_RASTERIZER_DESC raster{};
     raster.FillMode = D3D11_FILL_SOLID;
@@ -132,28 +147,31 @@ void SelectionOutlinePass::shutdown() {
     state.maskTarget.Reset();
     state.maskView.Reset();
     state.constants.Reset();
-    state.maskDepth.Reset();
+    state.visibleDepth.Reset();
+    state.hiddenDepth.Reset();
     state.noDepth.Reset();
-    state.blend.Reset();
+    state.writeVisible.Reset();
+    state.writeHidden.Reset();
+    state.compositeBlend.Reset();
     state.raster.Reset();
     state.sampler.Reset();
     state.device.Reset();
     state.width = state.height = 0;
 }
 
-bool SelectionOutlinePass::drawMask(ID3D11DeviceContext* context, ID3D11DepthStencilView* sceneDepth,
-                                    const D3D11_VIEWPORT& viewport,
-                                    ID3D11VertexShader* geometryShader, ID3D11InputLayout* inputLayout,
-                                    ID3D11PixelShader* maskShader,
-                                    ID3D11Buffer* sceneConstants, ID3D11Buffer* objectConstants,
-                                    const std::function<bool()>& drawSelected, std::string& error) {
+bool SelectionOutlinePass::drawMasks(ID3D11DeviceContext* context, ID3D11DepthStencilView* sceneDepth,
+                                     const D3D11_VIEWPORT& viewport,
+                                     ID3D11VertexShader* geometryShader, ID3D11InputLayout* inputLayout,
+                                     ID3D11PixelShader* maskShader,
+                                     ID3D11Buffer* sceneConstants, ID3D11Buffer* objectConstants,
+                                     const std::function<bool()>& drawSelected, std::string& error) {
     error.clear();
     auto& state = *impl_;
     if (!context || !state.maskTarget || !sceneDepth) { error = "Selection outline mask is not ready."; return false; }
-    // The composite pass binds the mask as an SRV; release that slot before it
-    // becomes a render target again.
-    ID3D11ShaderResourceView* unused = nullptr;
-    context->PSSetShaderResources(5, 1, &unused);
+    // The composite pass binds the mask and depth as SRVs; release both slots
+    // before either resource becomes a render target / depth target again.
+    ID3D11ShaderResourceView* unusedSlots[2] = {nullptr, nullptr};
+    context->PSSetShaderResources(5, 2, unusedSlots);
     context->OMSetRenderTargets(1, state.maskTarget.GetAddressOf(), sceneDepth);
     const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     context->ClearRenderTargetView(state.maskTarget.Get(), zero);
@@ -163,22 +181,28 @@ bool SelectionOutlinePass::drawMask(ID3D11DeviceContext* context, ID3D11DepthSte
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(geometryShader, nullptr, 0);
     context->PSSetShader(maskShader, nullptr, 0);
-    context->OMSetDepthStencilState(state.maskDepth.Get(), 0);
-    context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     ID3D11Buffer* buffers[] = {sceneConstants, objectConstants};
     context->VSSetConstantBuffers(0, 2, buffers);
     context->PSSetConstantBuffers(0, 2, buffers);
+    // Visible fragments: same depth as the scene -> R channel.
+    context->OMSetDepthStencilState(state.visibleDepth.Get(), 0);
+    context->OMSetBlendState(state.writeVisible.Get(), nullptr, 0xffffffff);
     if (!drawSelected()) return false;
+    // Occluded fragments: behind the scene -> G channel, drawn as a dashed hint.
+    context->OMSetDepthStencilState(state.hiddenDepth.Get(), 0);
+    context->OMSetBlendState(state.writeHidden.Get(), nullptr, 0xffffffff);
+    if (!drawSelected()) return false;
+    context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     context->OMSetRenderTargets(0, nullptr, nullptr);
     return true;
 }
 
 void SelectionOutlinePass::composite(ID3D11DeviceContext* context, ID3D11RenderTargetView* sceneColor,
-                                     const D3D11_VIEWPORT& viewport,
+                                     ID3D11ShaderResourceView* sceneDepth, const D3D11_VIEWPORT& viewport,
                                      ID3D11VertexShader* fullscreenShader, ID3D11PixelShader* compositeShader,
                                      const float color[4], float thickness) {
     auto& state = *impl_;
-    if (!context || !sceneColor || !state.maskView) return;
+    if (!context || !sceneColor || !state.maskView || !sceneDepth) return;
     OutlineConstants data{};
     std::memcpy(data.color, color, sizeof(data.color));
     data.params[0] = thickness;
@@ -193,16 +217,16 @@ void SelectionOutlinePass::composite(ID3D11DeviceContext* context, ID3D11RenderT
     context->VSSetShader(fullscreenShader, nullptr, 0);
     context->PSSetShader(compositeShader, nullptr, 0);
     context->OMSetDepthStencilState(state.noDepth.Get(), 0);
-    context->OMSetBlendState(state.blend.Get(), nullptr, 0xffffffff);
+    context->OMSetBlendState(state.compositeBlend.Get(), nullptr, 0xffffffff);
     ID3D11Buffer* constants[] = {state.constants.Get()};
     context->PSSetConstantBuffers(4, 1, constants);
-    ID3D11ShaderResourceView* view = state.maskView.Get();
-    context->PSSetShaderResources(5, 1, &view);
+    ID3D11ShaderResourceView* views[] = {state.maskView.Get(), sceneDepth};
+    context->PSSetShaderResources(5, 2, views);
     ID3D11SamplerState* sampler = state.sampler.Get();
     context->PSSetSamplers(0, 1, &sampler);
     context->Draw(3, 0);
-    ID3D11ShaderResourceView* unused = nullptr;
-    context->PSSetShaderResources(5, 1, &unused);
+    ID3D11ShaderResourceView* unused[2] = {nullptr, nullptr};
+    context->PSSetShaderResources(5, 2, unused);
     context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
 }
 

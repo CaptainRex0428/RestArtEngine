@@ -2208,6 +2208,9 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     require(!finalMaterialHwnd || !IsWindow(finalMaterialHwnd),
         "UI shutdown left the material platform window alive after releasing its DX11 backend.");
     require(renderer.validationErrorCount() == 0, "D3D11 validation reported an editor error.");
+    require(editor.commands().contains("view.toggleOutline") &&
+        editor.commands().contains("actor.toggleVisibility"),
+        "Editor is missing the outline (G) or visibility (H) shortcut.");
     std::cout << "PASS: Actor transforms, mesh/material assignment, shader Apply, failed compile rollback, "
         "binding validation, shader Save/Reload, scene roundtrip, Shader Editor mouse/text Apply, "
         "viewport picking, translation/rotation/local-scale gizmo drags, camera orbit/pan/focus, "

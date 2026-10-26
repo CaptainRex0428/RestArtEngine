@@ -162,7 +162,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"albedoBuffer", D3D_SIT_TEXTURE, 0, 0}, {"normalBuffer", D3D_SIT_TEXTURE, 1, 0}, {"positionBuffer", D3D_SIT_TEXTURE, 2, 0},
         {"shadowMap", D3D_SIT_TEXTURE, 3, 0}, {"gbufferSampler", D3D_SIT_SAMPLER, 0, 0},
         {"shadowSampler", D3D_SIT_SAMPLER, 1, 0},
-        {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0}
+        {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0},
+        {"depthBuffer", D3D_SIT_TEXTURE, 6, 0}
     };
     for (UINT i = 0; i < desc.BoundResources; ++i) {
         D3D11_SHADER_INPUT_BIND_DESC binding{}; reflection->GetResourceBindingDesc(i, &binding);
@@ -310,6 +311,7 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11RenderTargetView> sceneTarget;
     ComPtr<ID3D11ShaderResourceView> sceneView;
     ComPtr<ID3D11DepthStencilView> depth;
+    ComPtr<ID3D11ShaderResourceView> depthView;
     ComPtr<ID3D11Texture2D> shadowTexture;
     ComPtr<ID3D11DepthStencilView> shadowDepth;
     std::array<ComPtr<ID3D11DepthStencilView>, 2> shadowDepthSlices;
@@ -369,13 +371,25 @@ struct SceneRenderer::Impl {
         description.Height = height;
         description.MipLevels = 1;
         description.ArraySize = 1;
-        description.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        // Typeless depth so the editor outline can read it as a float SRV while
+        // raster passes still use it as a D32 depth target.
+        description.Format = DXGI_FORMAT_R32_TYPELESS;
         description.SampleDesc.Count = 1;
         description.Usage = D3D11_USAGE_DEFAULT;
-        description.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        description.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         texture.Reset();
         if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create depth", error)) return false;
-        if (failed(device->CreateDepthStencilView(texture.Get(), nullptr, &depth), "Create depth view", error)) return false;
+        D3D11_DEPTH_STENCIL_VIEW_DESC depthViewDescription{};
+        depthViewDescription.Format = DXGI_FORMAT_D32_FLOAT;
+        depthViewDescription.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        if (failed(device->CreateDepthStencilView(texture.Get(), &depthViewDescription, &depth),
+                   "Create depth view", error)) return false;
+        D3D11_SHADER_RESOURCE_VIEW_DESC depthResourceDescription{};
+        depthResourceDescription.Format = DXGI_FORMAT_R32_FLOAT;
+        depthResourceDescription.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        depthResourceDescription.Texture2D.MipLevels = 1;
+        if (failed(device->CreateShaderResourceView(texture.Get(), &depthResourceDescription, &depthView),
+                   "Create depth resource view", error)) return false;
 
         // Keep scene color separate from the swap chain so docked and floating
         // editor windows composite it with normal UI clipping and z ordering.
@@ -1043,7 +1057,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->RSSetViewports(1, &sceneViewport);
     ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
     state.context->PSSetShaderResources(0, 5, shadowResources);
-    state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
     ID3D11RenderTargetView* backbuffer = settings.editorViewport ? state.sceneTarget.Get() : state.backbuffer.Get();
     const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
@@ -1077,10 +1091,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         const auto drawSelected = [&] {
             return state.drawSelectedGeometry(settings.outlineActors, settings.outlineActorCount, world, assets, error);
         };
-        if (!state.outline->drawMask(state.context.Get(), state.depth.Get(), sceneViewport,
+        if (!state.outline->drawMasks(state.context.Get(), state.depth.Get(), sceneViewport,
                 state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
                 state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
-        state.outline->composite(state.context.Get(), backbuffer, sceneViewport,
+        state.outline->composite(state.context.Get(), backbuffer, state.depthView.Get(), sceneViewport,
             state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
             settings.outlineColor, settings.outlineThickness);
     }

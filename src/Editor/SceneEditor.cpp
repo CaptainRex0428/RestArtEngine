@@ -145,6 +145,16 @@ void SceneEditor::registerCommands() {
         [this] { return assets_.findMesh(3) != nullptr && assets_.findMaterial(selectedMaterial_) != nullptr; });
     commands_.add("scene.save", "scene", "Save Scene", "Ctrl+S", ImGuiMod_Ctrl | ImGuiKey_S,
         [this] { saveScene(); });
+    commands_.add("view.toggleOutline", "edit", "Toggle Selection Outline", "G", ImGuiKey_G,
+        [this] {
+            auto& preferences = imgui::uiPreferences();
+            preferences.selectionOutline = !preferences.selectionOutline;
+            imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
+            status_ = preferences.selectionOutline ? "Selection outline shown." : "Selection outline hidden.";
+        });
+    commands_.add("actor.toggleVisibility", "edit", "Toggle Visibility", "H", ImGuiKey_H,
+        [this] { toggleSelectedVisibility(); },
+        [this] { return !selection_.empty() && !viewport_.isUsing(); });
     commands_.add("layout.restore", "layout", "Restore Default Layout", "", 0,
         [this] { dockManager_.resetLayout(); });
 }
@@ -644,6 +654,38 @@ void SceneEditor::drawEditMenu() {
             commands_.invoke(command.info.id);
     }
     ImGui::EndMenu();
+}
+
+void SceneEditor::toggleSelectedVisibility() {
+    if (selection_.empty() || viewport_.isUsing()) return;
+    std::vector<std::pair<scene::ActorId, bool>> before;
+    bool anyVisible = false;
+    for (const auto id : selection_) {
+        if (const auto* actor = world_.findActor(id)) {
+            before.emplace_back(id, actor->visible);
+            anyVisible = anyVisible || actor->visible;
+        }
+    }
+    if (before.empty()) return;
+    // Match Gizmo/multi-select semantics: one gesture, one undo entry, and the
+    // whole selection converges on the same visibility so it stays coherent.
+    const bool target = !anyVisible;
+    const auto apply = [this, before, target] {
+        for (const auto& [id, wasVisible] : before) {
+            if (auto* actor = world_.findActor(id)) actor->visible = target;
+        }
+        sceneDirty_ = true;
+    };
+    apply();
+    undo_.push(target ? "Hide Actors" : "Show Actors",
+        [this, before] {
+            for (const auto& [id, wasVisible] : before) {
+                if (auto* actor = world_.findActor(id)) actor->visible = wasVisible;
+            }
+            sceneDirty_ = true;
+        },
+        apply);
+    status_ = target ? "Actors visible." : "Actors hidden.";
 }
 
 void SceneEditor::deleteSelectedActor() {

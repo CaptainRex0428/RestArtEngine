@@ -33,9 +33,10 @@ namespace rae::renderer {
 //
 // Frame order:
 //   1. scene geometry writes colour + depth (forward or deferred path),
-//   2. drawMask() re-draws the selected silhouettes into an R8G8B8A8 mask with a
-//      read-only depth test, so occluded parts do not leak through,
-//   3. composite() dilates that mask over the scene colour with alpha blending.
+//   2. drawMasks() renders the selected silhouettes twice into one RGBA mask:
+//      R = fragments that pass the scene depth, G = fragments hidden behind it,
+//   3. composite() turns R into a solid ring and G into a dashed hint, using the
+//      depth buffer to ignore interior details that share one surface.
 class SelectionOutlinePass {
 public:
     SelectionOutlinePass();
@@ -51,19 +52,19 @@ public:
     void shutdown();
 
     // Binds the mask target together with the scene depth and issues the
-    // selected draws through `drawSelected`. Returns false with `error` filled
-    // when a mesh upload fails.
-    bool drawMask(ID3D11DeviceContext* context, ID3D11DepthStencilView* sceneDepth,
-                  const D3D11_VIEWPORT& viewport,
-                  ID3D11VertexShader* geometryShader, ID3D11InputLayout* inputLayout,
-                  ID3D11PixelShader* maskShader,
-                  ID3D11Buffer* sceneConstants, ID3D11Buffer* objectConstants,
-                  const std::function<bool()>& drawSelected, std::string& error);
-
-    // Dilates the mask into `sceneColor`. `thickness` is the ring radius in
-    // pixels of the scene texture.
-    void composite(ID3D11DeviceContext* context, ID3D11RenderTargetView* sceneColor,
+    // selected draws twice (visible and occluded). Returns false with `error`
+    // filled when a mesh upload fails.
+    bool drawMasks(ID3D11DeviceContext* context, ID3D11DepthStencilView* sceneDepth,
                    const D3D11_VIEWPORT& viewport,
+                   ID3D11VertexShader* geometryShader, ID3D11InputLayout* inputLayout,
+                   ID3D11PixelShader* maskShader,
+                   ID3D11Buffer* sceneConstants, ID3D11Buffer* objectConstants,
+                   const std::function<bool()>& drawSelected, std::string& error);
+
+    // Turns the mask into the outline. `thickness` is the ring radius in pixels
+    // of the scene texture.
+    void composite(ID3D11DeviceContext* context, ID3D11RenderTargetView* sceneColor,
+                   ID3D11ShaderResourceView* sceneDepth, const D3D11_VIEWPORT& viewport,
                    ID3D11VertexShader* fullscreenShader, ID3D11PixelShader* compositeShader,
                    const float color[4], float thickness);
 

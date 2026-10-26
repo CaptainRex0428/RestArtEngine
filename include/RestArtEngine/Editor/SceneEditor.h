@@ -53,6 +53,8 @@ private:
     void duplicateForDrag();
     void registerCommands();
     void drawEditMenu();
+    // Flips visibility for every selected Actor as one undoable edit (H).
+    void toggleSelectedVisibility();
     void drawUiMenu();
     void drawGarbageCollection();
     void drawOutlineSettings();

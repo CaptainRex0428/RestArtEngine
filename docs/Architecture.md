@@ -208,8 +208,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 选中描边是**编辑器可视化**，不属于运行时场景渲染。它由一个独立通道 `SelectionOutlinePass`（`include/RestArtEngine/Renderer/SelectionOutline.h`、`src/Renderer/SelectionOutline.cpp`）承担，位置在场景着色全部完成之后、编辑器合成场景纹理之前：
 
 1. 场景几何照常写入颜色与深度（前向或延迟路径）。
-2. 遮罩通道只重绘选中 Actor 的轮廓到一张场景尺寸的遮罩纹理；深度只读比较（`LESS_EQUAL`、不写深度），因此被其他物体遮挡的部分不会外溢描边。
-3. 合成通道用屏幕空间膨胀把遮罩扩成描边，用 `SV_Position` 换算的纹理坐标采样并与场景颜色 alpha 混合；不按视口局部 UV 采样，保证停靠面板任意尺寸时描边仍贴合轮廓。
+2. 遮罩通道把选中 Actor 画进一张场景尺寸的 RGBA 纹理两次：R 通道写「与场景深度相等」的可见片元（`LESS_EQUAL`），G 通道写「被其他几何挡住」的片元（`GREATER`），两次都不写深度。
+3. 合成通道用像素坐标读取遮罩与场景深度：只有相邻遮罩像素存在**真实深度差**时才画实线，因此同一表面内部的细节（地面网格、共面接缝）不会产生内边框；G 通道的遮挡段按屏幕空间虚线绘制，被挡住的部分仍可辨认。
 
 渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色或自定义颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，因此独立运行不承担该通道的开销。描边颜色不写入场景资产，也不参与撤销或保存。
 

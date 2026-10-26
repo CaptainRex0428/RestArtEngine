@@ -601,7 +601,8 @@ cbuffer OutlineConstants : register(b4)
     float4 outlineColor;  // rgb + alpha, authored by the editor theme
     float4 outlineParams; // ring radius in pixels, 1/width, 1/height, reserved
 };
-Texture2D<float4> outlineMask : register(t5);
+Texture2D<float4> outlineMask : register(t5); // r = visible silhouette, g = occluded
+Texture2D<float4> depthBuffer : register(t6);
 
 static const float2 kOutlineDirections[8] =
 {
@@ -616,20 +617,30 @@ float4 PSOutlineMask(GeometryOutput input) : SV_TARGET
 
 float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
 {
-    // input.uv spans the *viewport* rect, while the mask covers the whole scene
-    // texture. Map the pixel position into texture space so the ring lines up
-    // with the selected silhouette in docked panels of any size.
-    float2 texel = outlineParams.yz;
-    float2 uv = input.position.xy * texel;
-    if (outlineMask.SampleLevel(gbufferSampler, uv, 0).r > 0.5)
-        return float4(0.0, 0.0, 0.0, 0.0);
-    float radius = max(outlineParams.x, 0.5);
-    float ring = 0.0;
+    // Pixel-space pass: the mask and the scene depth share the scene texture's
+    // resolution, so integer loads keep the ring exactly aligned regardless of
+    // the docked viewport size.
+    const int2 pixel = int2(input.position.xy);
+    const float4 center = outlineMask.Load(int3(pixel, 0));
+    if (center.r > 0.5) return float4(0.0, 0.0, 0.0, 0.0);
+    const float centerDepth = depthBuffer.Load(int3(pixel, 0)).r;
+    const int radius = (int)max(1.0, round(outlineParams.x));
+    float solid = 0.0;
+    float hidden = 0.0;
     [unroll] for (int index = 0; index < 8; ++index)
     {
-        float2 offset = kOutlineDirections[index] * texel * radius;
-        ring = max(ring, outlineMask.SampleLevel(gbufferSampler, uv + offset, 0).r);
-        ring = max(ring, outlineMask.SampleLevel(gbufferSampler, uv + offset * 0.5, 0).r);
+        const int2 offset = int2(round(kOutlineDirections[index] * (float)radius));
+        const int2 samplePosition = max(pixel + offset, int2(0, 0));
+        const float4 neighbour = outlineMask.Load(int3(samplePosition, 0));
+        // Only a real depth break counts as a silhouette. Interior details that
+        // live inside one surface (the ground grid, coplanar seams) keep the same
+        // depth and therefore never generate an inner border.
+        if (neighbour.r > 0.5 && abs(depthBuffer.Load(int3(samplePosition, 0)).r - centerDepth) > 1e-5)
+            solid = 1.0;
+        if (neighbour.g > 0.5) hidden = 1.0;
     }
-    return ring > 0.5 ? float4(outlineColor.rgb, outlineColor.a) : float4(0.0, 0.0, 0.0, 0.0);
+    // Occluded runs stay readable as a dashed hint instead of disappearing.
+    const bool dashOn = ((pixel.x + pixel.y) & 7) < 4;
+    const float alpha = solid > 0.5 ? outlineColor.a : (hidden > 0.5 && dashOn ? outlineColor.a * 0.9 : 0.0);
+    return alpha > 0.0 ? float4(outlineColor.rgb, alpha) : float4(0.0, 0.0, 0.0, 0.0);
 }
