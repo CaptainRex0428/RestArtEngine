@@ -1102,9 +1102,6 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                         // entry is reachable, the window opens, and it closes again.
                         auto* popup = context->OpenPopupStack[0].Window;
                         require(popup && popup->Size.y > 0, "UI menu popup has no size.");
-                        const float padding = context->Style.WindowPadding.y;
-                        const float separator = context->Style.ItemSpacing.y + 1.0f;
-                        const float rowHeight = (popup->Size.y - padding * 2.0f - separator) / 4.0f;
                         // "Selection outline..." is the last entry; click its actual
                         // centre so disabled neighbours or extra separators cannot
                         // shift the hit target.
