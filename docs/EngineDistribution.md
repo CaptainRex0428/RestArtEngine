@@ -91,6 +91,8 @@ cmake --build --preset windows-debug --target RestArtEngine
 
 ## 发布检查
 
+公开源码范围与本机资料边界遵守 [仓库内容与提交约定](RepositoryPolicy.md)。源码从已检查的提交导出；运行时按本页清单组装，不能直接压缩整个开发工作目录。`.gitignore` 不会替压缩工具过滤 AI 配置、开发记录、个人偏好或文章素材，发布前必须核对包内文件清单。
+
 发布一个可独立使用的引擎时，至少检查：
 
 1. `RestArtEngine.exe` 能在目标机器启动 Project Manager。
