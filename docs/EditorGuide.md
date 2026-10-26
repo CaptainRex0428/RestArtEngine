@@ -36,7 +36,7 @@ Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机�
 
 ## 主题切换
 
-已接入 `UI > Theme > Black / Dark Blue`（提交 `d62960b`），默认 Black，Dark Blue 保留原蓝色配色；两套配色均已截图验证。
+已接入 `UI > Theme > Black / Dark Blue`，默认 Black，Dark Blue 保留原蓝色配色。
 
 切换通过 `EditorTheme` 更新 ImGui 配色，两种主题共享间距和圆角等几何样式。选择保存到进程工作目录下的 `RestArtEngine.theme.ini`，启动时读取；文件缺失或内容无法识别时回退 Black。这是本机偏好，不属于工程资产，也不是系统用户目录中的全局设置。字体加载仍由 `ImGuiLayer` 负责，尚无字体 / DPI 配置界面。
 
@@ -182,4 +182,3 @@ F2 切换 Forward / Deferred；F3 开关解析光追效果；F1 隐藏 / 显示�
 渲染自测和编辑器自测需要 Windows / DX11 设备，分别验证图像与 Shader Apply / 场景编辑效果。
 
 完整目录职责、UE 概念对照及当前能力边界见 [Architecture.md](Architecture.md)。
-

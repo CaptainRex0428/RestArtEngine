@@ -88,11 +88,11 @@ Two-sided 的验收应覆盖平面正反面、镜像缩放、背面法线、Forw
 | Linux | 不列为原生后端目标。 | 不列为原生后端目标。 | 目标后端。 | 目标后端。 |
 | macOS | 不列为原生后端目标。 | 不列为原生后端目标。 | 纳入设计；候选为 Vulkan Portability／MoltenVK，路线待定。 | 纳入兼容性评估；范围与最低版本待定。 |
 
-macOS 的 Vulkan 设计需要考虑可移植实现的能力差异。[Khronos Portability Initiative](https://docs.vulkan.org/guide/latest/portability_initiative.html)说明了该范围；[MoltenVK](https://github.com/KhronosGroup/MoltenVK)在 Metal 上提供 Vulkan 的子集。macOS OpenGL 已自 10.14 起弃用，不能据此承诺与其他平台同等的长期能力。[Apple OpenGL 文档](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/OpenGL-MacProgGuide/opengl_intro/opengl_intro.html)。是否另建原生 Metal 后端需要单独讨论，不自动加入本轮实现任务。
+macOS 的 Vulkan 设计需要考虑可移植实现的能力差异。[Khronos Portability Initiative](https://docs.vulkan.org/guide/latest/portability_initiative.html)说明了该范围；[MoltenVK](https://github.com/KhronosGroup/MoltenVK)在 Metal 上提供 Vulkan 的子集。macOS OpenGL 已自 10.14 起弃用，不能据此承诺与其他平台同等的长期能力。[Apple OpenGL 文档](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/OpenGL-MacProgGuide/opengl_intro/opengl_intro.html)。是否另建原生 Metal 后端需要单独讨论，当前未实现。
 
 ## 拟议职责与目录（待讨论）
 
-下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，不要求本轮创建这些目录。
+下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，尚未全部按此拆分目录。
 
 | 职责 | 拟议位置 | 边界 |
 | --- | --- | --- |

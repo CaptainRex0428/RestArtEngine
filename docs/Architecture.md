@@ -6,8 +6,6 @@
 
 ## 目录约定
 
-文件是否可以提交、共享配置与本机配置的位置、文档同步及分发边界统一见 [仓库内容与提交约定](RepositoryPolicy.md)。本页定义引擎模块职责；本地协作与写作资料不属于引擎运行依赖。
-
 资源回收入口见 [GarbageCollection.md](GarbageCollection.md)：Core 负责可配置调度和受管临时截图，Renderer／ImGui 各自回收闲置缓存；实际调用位于 Project Manager／编辑器的帧末。场景、CPU 资产、草稿和撤销历史继续按其原有生命周期管理。用户 Capture／F9 由应用层打开原生保存对话框，Renderer 只接收选定路径；取消不导出，用户图片不登记到 GC。批量／测试截图通过显式输出参数单独路由，不恢复默认项目截图目录。
 
 | 目录 | 职责与放置规则 |
@@ -171,7 +169,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 `UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Scene 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条。Ctrl+D 多选复制仍逐个记录；Alt＋拖动由 `ViewportInteraction` 判定手势并回调 `SceneEditor` 复制选中集合，结束时将创建副本与最终变换记成一条事务，同时保存原选择和副本选择。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
 
-`EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换（提交 `d62960b`）；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。两套配色已分别截图验证。
+`EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。
 
 ## 文件与持久化
 

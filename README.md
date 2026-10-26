@@ -360,7 +360,7 @@ RestArtEngine.exe --help
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
 - 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称、可见性及 Mesh / Material 引用修改尚未纳入撤销历史。
 - 六个工作区面板的 Docking 悬浮限于主窗口；材质编辑器可使用独立系统窗口。尚无动态面板插件、命名布局或完整逐显示器字体 DPI 适配。
-- 主题切换已提交（Black / Dark Blue、偏好保存）：`UI → Theme` 切换，两套配色均已截图验证；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
+- 主题切换（Black / Dark Blue、偏好保存）：`UI → Theme` 切换；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
 
 ## 第三方依赖与许可
@@ -377,7 +377,6 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 
 ## 文档
 
-- [仓库内容与提交约定](docs/RepositoryPolicy.md)：公开内容范围、文档白名单及本地资料边界
 - [资源 GC](docs/GarbageCollection.md)：回收范围、配置、临时截图保护及验证入口
 - [渲染开发要求](docs/RenderingDevelopment.md)：热编译、实时参数、跨平台目标与现状缺口
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照

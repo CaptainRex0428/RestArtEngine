@@ -85,7 +85,6 @@ RestArtEngine.panels.ini
 # ---------------------------------------------------------------------------
 # Public documentation allowlist. New public docs must be explicitly listed;
 # research notes, progress ledgers and writing material stay local by default.
-# See docs/RepositoryPolicy.md. Do not force-add excluded process files.
 # ---------------------------------------------------------------------------
 /docs/*
 !/docs/Architecture.md
@@ -95,7 +94,6 @@ RestArtEngine.panels.ini
 !/docs/GuiDevelopment.md
 !/docs/ProjectManagement.md
 !/docs/RenderingDevelopment.md
-!/docs/RepositoryPolicy.md
 !/docs/ShadowMethods.md
 !/docs/UndoTransactions.md
 !/docs/vendor/
@@ -103,7 +101,7 @@ RestArtEngine.panels.ini
 !/docs/vendor/ImGuizmo.md
 !/docs/vendor/imgui.md
 
-# Local AI tools, skills, roles, prompts and conversation state (at any depth)
+# Local tool configuration (at any depth)
 .agents/
 .codex/
 .claude/
@@ -128,8 +126,7 @@ SKILL.md
 *.local.*
 CMakeUserPresets.json
 
-# Articles, devlogs, drafts and their media, regardless of extension/casing.
-# Final publication files live outside the engine repository.
+# Local documents and generated media (all extensions and letter cases).
 *[dD][eE][vV][lL][oO][gG]*
 *[zZ][hH][iI][hH][uU]*
 *开发日志*
