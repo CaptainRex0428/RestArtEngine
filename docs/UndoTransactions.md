@@ -51,6 +51,7 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 | --- | --- |
 | `+ Sphere` / `+ Cube` / `Add Actor from mesh` | 记录新 Actor 的拷贝；撤销时按 id 删除，重做时追加 |
 | `Duplicate` | 同上；多选时为每个 Actor 各记一条 |
+| Alt＋拖动 Gizmo（单个或整组） | 首次有效拖动时复制，松手后将全部副本的最终 Actor 快照作为一条记录；撤销删除副本并恢复原选择，重做恢复副本及其选择 |
 | `Delete`（单选或多选） | 记录每个 Actor 的拷贝与原始下标；撤销时按升序插回原位，当前仅选中其中一个恢复的 Actor |
 | Gizmo 平移 / 旋转 / 缩放（单个或整组） | 拖拽开始前记住整组「稳定态」变换，松手时将所有变化的 Actor 合为一条记录 |
 | Scene 面板数值拖动 | 控件激活时记下稳定态，`IsItemDeactivatedAfterEdit` 后按 700ms 时间窗合并 |
@@ -75,11 +76,17 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 
 ## 边界（未实现）
 
-1. 多选下的批量复制目前是「每个 Actor 一条历史」，尚未合并成一条。
+1. Ctrl+D / Duplicate 按钮的多选复制仍是「每个 Actor 一条历史」；Alt＋拖动复制已经是整组一条。
 2. 材质参数草稿与 Shader 草稿未入栈；它们仍走 Apply / Save 两段式提交。Actor 名称、可见性和 Mesh / Material 引用修改也未入栈。
 3. 没有命名快照、跨会话持久化或撤销历史面板。
 4. 默认上限 64 步，可由 `setMaxSteps()` 调整，暂不暴露到设置界面。
 5. 批量删除撤销会恢复全部实例与顺序，但不会恢复原来的完整多选集合。
+
+## Alt 拖动复制的输入与验证
+
+`ViewportInteraction` 在 Gizmo 接管鼠标时锁定 Alt 状态，超过拖动阈值且变换确实变化后才调用 `SceneEditor::duplicateForDrag`。复制在应用第一份变换增量之前进行；追加 Actor 后重新按 ID 查找指针，避免容器扩容造成悬空引用。`SceneEditor::trackTransformEdit` 在结束时记录副本最终快照，不再另记一条变换历史。相机的 Alt＋左键手势在本帧 Gizmo 命中判断之后才取得输入，因此拖动手柄不会同时环绕相机。
+
+2026-10-23，CMake Debug 构建及编辑器自测通过，输出位于本机 `artifacts/alt-drag-validation/`。真实鼠标 / 键盘注入覆盖单选与多选平移复制、单击不复制、多帧只复制一次、中途释放 Alt、原件不变、无固定位置偏移以及整次撤销 / 重做和选中集合恢复；既有相机环绕、平移、Gizmo、停靠与 Shader 测试同时通过，D3D11 debug layer 错误数为 0。复制回归使用平移手柄，未单独覆盖 Alt＋旋转 / 缩放组合。
 
 ## 许可证边界
 

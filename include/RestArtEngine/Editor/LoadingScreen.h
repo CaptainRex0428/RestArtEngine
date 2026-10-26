@@ -9,8 +9,8 @@ struct ID3D11ShaderResourceView;
 
 namespace rae::editor {
 
-// Full-screen loading presentation shown while the engine boots. The artwork is
-// decoded once into a GPU texture and stretched to the window; the overlay is
+// Loading presentation shown while the engine boots. The artwork is decoded
+// once into a GPU texture and stretched to the main viewport's work area; the overlay is
 // laid out in relative coordinates of that image (fractions of width/height) so
 // replacing the artwork keeps the same composition.
 class LoadingScreen {
@@ -25,8 +25,9 @@ public:
     void release() noexcept;
     [[nodiscard]] bool ready() const noexcept { return texture_ != nullptr; }
 
-    // Must be called inside an ImGui frame; draws into the background draw list.
-    void draw(float displayWidth, float displayHeight, float progress, const char* text) const;
+    // Call after window chrome has reserved this frame's work area. Coordinates
+    // follow the main viewport, including desktop offsets with multi-viewports.
+    void draw(float progress, const char* text) const;
 
 private:
     ID3D11ShaderResourceView* texture_ = nullptr;

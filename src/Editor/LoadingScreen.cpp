@@ -119,13 +119,15 @@ void LoadingScreen::release() noexcept {
     }
 }
 
-void LoadingScreen::draw(float displayWidth, float displayHeight, float progress, const char* text) const {
+void LoadingScreen::draw(float progress, const char* text) const {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float displayWidth = viewport->WorkSize.x, displayHeight = viewport->WorkSize.y;
     if (displayWidth < 1.0f || displayHeight < 1.0f) return;
-    ImGuiViewport* const viewport = ImGui::GetMainViewport();
     ImDrawList* list = ImGui::GetBackgroundDrawList(viewport);
-    const ImVec2 topLeft = viewport->Pos;
+    const ImVec2 topLeft = viewport->WorkPos;
     const ImVec2 bottomRight(topLeft.x + displayWidth, topLeft.y + displayHeight);
     const auto position = [topLeft](float x, float y) { return ImVec2(topLeft.x + x, topLeft.y + y); };
+    list->PushClipRect(topLeft, bottomRight, true);
     if (texture_)
         list->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture_)), topLeft, bottomRight);
     else
@@ -159,6 +161,7 @@ void LoadingScreen::draw(float displayWidth, float displayHeight, float progress
         list->AddRectFilled(position(inset, barTop),
             position(inset + (right - inset) * clamped, barTop + barHeight), IM_COL32(126, 200, 255, 255), rounding);
     }
+    list->PopClipRect();
 }
 
 } // namespace rae::editor

@@ -11,26 +11,28 @@
 | 范围 | 源码入口 | 已有实现与边界 |
 | --- | --- | --- |
 | GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11；未接通跨平台 GUI 后端。 |
-| 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；加载页使用品牌背景与相对布局。 |
+| 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
 | 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 五个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮及布局恢复；没有独立 OS 多视口窗口。 |
 | 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Details、Viewport settings、Content & Editors、工具栏、草稿和关闭提示。Meshes / Material Editor / Shader Editor 是内部标签；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
-| 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp) | 场景图像、拾取、相机、ImGuizmo与多选。 |
+| 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp) | 场景图像、拾取、相机、ImGuizmo、多选与 Alt 拖动复制。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
 | 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
 
 Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理，不管理 Dock 节点。GUI 专项负责编辑器布局、控件与交互；Shader、Pass、GPU 资源和后端能力由渲染专项负责。跨界任务先约定数据与预览契约，再分派文件。
 
-## 系统材质窗口与 Scene / Details（2026-10-26）
+## 系统材质窗口（2026-10-26）
 
-材质参数与工程共享 Shader 两页在按需打开的系统 MaterialWorkspace 中编辑，关闭只隐藏并保留本次会话草稿，整个引擎退出仍统一确认。重复打开复用并聚焦，主窗口最小化时可继续使用工具窗。参数 Apply、Save 与切换材质的 Apply／Discard／Cancel 继续沿用原契约。
+材质参数与工程共享 Shader 两页位于按需打开的系统独立 `MaterialWorkspace`，Scene 与 Details 中当前 Actor 实例的材质引用复用同一入口；旧底部 Content 只保留 Meshes。Mesh 资产仍是几何数据，不新增虚构的 Mesh 材质绑定；Details 的材质入口严格取自当前实例，不汇总同 Mesh 的其他实例。
 
-工作区为六面板；左下 Scene / Details 默认同组。Scene 编辑选中 Actor 的实例属性；Details 显示 Content 当前选中 Mesh 的几何信息、来源和真实场景材质引用。Mesh 资产仍为几何数据，材质引用按使用它的 Actor 去重。选 Actor 一次性显示 Scene，点资源一次性显示 Details，不逐帧抢回手动页签。
+编辑器通过锁定版 Win32/DX11 后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。主窗口最小化时可见工具窗继续交互；桌面 UI 坐标与主纹理局部坐标显式转换。其他工作区面板仍在主窗口内停靠，完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)；运行验证结果由 DevelopmentStatus 记录。
 
-保留 RestArtEngine.DockSpace.v1；旧布局只在原 Details 节点补入 Scene，浮动 Details 按原几何组成双页签；已有 Scene 设置尊重用户安排，恢复默认才重建树。普通工作区面板留在主窗口内，材质窗口具有独立系统边框与任务栏入口。GUI 桌面坐标与主客户区纹理坐标显式转换，拾取和 Gizmo 使用本帧同一图像区域。
+## Scene / Details 信息分工（2026-10-26）
 
-## Visual Studio 工具窗口交互方向（设计提案）
+按用户最新纠正，Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部仅保留 Meshes 资源列表及导入／创建入口，中央视口和右侧设置延续原布局。Scene 保留实例属性与材质分配编辑；Details 展示主实例名称、ID、可见性、它当前的 Mesh 几何与来源，以及当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
 
-参照 [Visual Studio 官方窗口布局说明](https://learn.microsoft.com/en-us/visualstudio/ide/customizing-window-layouts-in-visual-studio?view=vs-2022)，延续已有拖拽停靠、拆分、标签合并与比例调整。后续拟统一加入单窗显隐、关闭后恢复、图钉自动隐藏及命名布局。隐藏保留选择、草稿和编辑上下文，选择对象尊重用户手动隐藏的面板；场景视口系统外浮需单独适配渲染与坐标。上述新增窗口管理能力仍为提案，未在本次实现。
+选场景／Outliner 的 Actor 显示 Details，浏览／导入 Mesh 资源不改变 Details 目标或强制切页；切页是一次性事件，不按已有选中状态每帧抢焦点。多选标识主实例；无选中、删除后失效选择、缺失 Mesh／Material 均给出明确状态，撤销恢复后重新按 Actor ID 解析。窄 Details 使用纵向信息和换行入口，长来源路径可换行；底部不重复放属性区。
+
+工作区增加为六面板，保留 `Details`、`Content & Editors`、`Meshes` 和 `RestArtEngine.DockSpace.v1` 身份；新 `Scene` 加入旧 Details 所在组，不全局重置用户布局。恢复默认才重建六面板树。验证应覆盖实际 Mesh／Actor 点击联动、手动切页、旧 dock／浮窗迁移及新 context 读回、双主题截图和既有材质／视口／事务回归；实际结果见 [DevelopmentStatus](DevelopmentStatus.md)。2026-10-23 表格保留为历史快照。
 
 ## 默认设计方向与视觉规则
 
@@ -81,16 +83,16 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 
 ## 实现中必须守住的契约
 
-1. **面板身份与布局。** 面板及 Dock 根 ID `RestArtEngine.DockSpace.v1` 影响持久化与测试。实时停靠交给 ImGui，内部 DockBuilder 隔离在 DockManager 的默认布局创建／恢复与兼容迁移中。已有布局不得每帧重置；更名先处理稳定 ID 与迁移。布局 ini 和主题偏好是本机设置，不写进场景或材质；沿用原生 ini，不另起一套布局序列化。
-2. **顶部区域与视口。** 工具栏、DockSpace 和场景图像使用同帧布局。菜单在 BeginMenuBar / EndMenuBar 中绘制，不能在普通内容区用 BeginMenu + SameLine 模拟。图像、投影、拾取、相机与 Gizmo 使用本帧实际图像屏幕矩形，遮挡/隐藏区域不能继续消费视口输入。
-3. **输入与控件身份。** 平台输入始终传给 ImGui 后端，再仲裁编辑器/场景是否消费；不因捕获标志而停止给 ImGui 送事件。依文本输入、弹窗、活动控件、面板焦点与拖动所有者仲裁输入；不能仅凭鼠标在视口内就接管全部快捷键。拖动由起始命中的所有者保持或明确取消，不能在中途抢占。稳定业务 ID 与显示名分离，列表重排/重命名不改变编辑对象。自绘控件要接入实际命中、键盘焦点和状态反馈，不能仅画图。ImGui 的输入捕获标志与本帧命中状态一起核对，避免错误屏蔽或双重消费。
-4. **命令、编辑与保存。** 已接入动作复用 EditorCommandRegistry，菜单/按钮/快捷键共用 enable 条件；输入作用域由调用方正确处理。新操作明确撤销范围和一次手势的历史粒度，保存值快照与稳定 ID，不持有可能因容器扩容失效的 Actor 指针。属性面板连续变换、批量操作和 Gizmo 聚合遵循事务文档，不擅自把全部操作标为可撤销。
+1. **面板身份与布局。** 六面板及 Dock 根 ID `RestArtEngine.DockSpace.v1` 影响持久化与测试。实时停靠交给 ImGui，内部 DockBuilder 隔离在 DockManager 的默认布局创建／恢复与兼容迁移中。已有布局不得每帧重置；更名先处理稳定 ID 与迁移。布局 ini 和主题偏好是本机设置，不写进场景或材质；沿用原生 ini，不另起一套布局序列化。
+2. **顶部区域与视口。** 标题栏的 WorkPos / WorkSize、两行工具栏、DockSpace 和场景图像使用同帧布局。菜单在 BeginMenuBar / EndMenuBar 中绘制，不能在普通内容区用 BeginMenu + SameLine 模拟。图像、投影、拾取、相机与 Gizmo 使用本帧实际图像屏幕矩形，遮挡/隐藏区域不能继续消费视口输入。
+3. **输入与控件身份。** 平台输入始终传给 ImGui 后端，再仲裁编辑器/场景是否消费；不因捕获标志而停止给 ImGui 送事件。依文本输入、弹窗、活动控件、面板焦点与拖动所有者仲裁输入；不能仅凭鼠标在视口内就接管全部快捷键。拖动由起始命中的所有者保持或明确取消，不能在中途抢占。稳定业务 ID 与显示名分离，列表重排/重命名不改变编辑对象。自绘控件要接入实际命中、键盘焦点和状态反馈，不能仅画图。ImGui 的输入捕获标志与本帧命中状态一起核对，避免错误屏蔽或双重消费。Alt 从 Gizmo 开始表示复制，从手柄外开始表示环绕。
+4. **命令、编辑与保存。** 已接入动作复用 EditorCommandRegistry，菜单/按钮/快捷键共用 enable 条件；输入作用域由调用方正确处理。新操作明确撤销范围和一次手势的历史粒度，保存值快照与稳定 ID，不持有可能因容器扩容失效的 Actor 指针。Scene 连续变换、批量操作和 Gizmo 聚合遵循事务文档，不擅自把全部操作标为可撤销。
 5. **预览与草稿。** 材质实时预览、Apply 内存提交、Save 磁盘保存、Discard 恢复已提交状态各有含义；切换资产和关闭处理未提交/未保存状态。Shader 草稿与最后可用管线分开，编译失败保留可用版本。GUI 的文案、禁用条件和状态反馈必须与真实行为一致。GPU 实时反馈改动与 rendering 专项共同验收。
 6. **平台窗口与资源。** 窗口绘制和原生命中区域同步修改，关闭沿用 WM_CLOSE 和未保存提示；保留拖动、缩放、系统菜单和最大化语义。F11 是主窗口全屏，不是独立视口。纹理/字体资源按所属层管理创建和释放。Windows / Linux / macOS 的架构目标不等于已经有各平台 GUI 实现。
 
 ## 验收选择与覆盖边界
 
-按变化选择检查，沿用本页与 [GUI 协作约定](AgentDevelopment.md)。配置/文档改动只做配置解析、引用与流程演练；不因新增 agent 而运行 GPU。低风险文案修改不写复述实现的测试。影响画面时检查真实截图，影响行为时执行定向用户路径，必要时补充能发现回归的测试。
+按变化选择检查，沿用 [delivery skill](../.agents/skills/restarengine-delivery/SKILL.md)。配置/文档改动只做配置解析、引用与流程演练；不因新增 agent 而运行 GPU。低风险文案修改不写复述实现的测试。影响画面时检查真实截图，影响行为时执行定向用户路径，必要时补充能发现回归的测试。
 
 | 变化 | 相关验收 |
 | --- | --- |
@@ -100,9 +102,9 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 | 原生窗口 | 原生命中、缩放、最小化恢复、最大化、关闭确认、F11；改动涉及吸附/跨屏时单独做 OS 交互，不能用命中值代替。 |
 | 材质/Shader 反馈 | 渲染专项的实际 GPU 图像、连续预览、提交一致性、失败恢复与资源生命周期；仅 CPU 值改变不通过。 |
 
-已有自动化入口是 [EditorSmoke.cpp](../app/EditorSmoke.cpp)、[Test-Window.ps1](../scripts/Test-Window.ps1) 和 [Validate-Render.ps1](../scripts/Validate-Render.ps1)。执行前核对脚本参数并显式传入本次可执行文件；桌面输入和 GPU 测试串行，使用隔离的工程、布局与输出目录，保留用户正在编辑的工程及进程。
+已有自动化入口是 [EditorSmoke.cpp](../app/EditorSmoke.cpp)、[Test-Window.ps1](../scripts/Test-Window.ps1)、[Test-WindowChrome.ps1](../scripts/Test-WindowChrome.ps1) 和 [Validate-Render.ps1](../scripts/Validate-Render.ps1)。执行前核对脚本参数并显式传入本次可执行文件；桌面输入和 GPU 测试串行，使用隔离的工程、布局与输出目录，保留用户正在编辑的工程及进程。
 
-新环境使用 `cmake --preset windows-vs2022` 与 `cmake --build --preset windows-debug-engine`。已有配置优先使用对应本工作区的目录。编辑器自测示例为 `build/cmake-vs2022/Debug/RestArtEngine.exe --editor-self-test --capture-dir artifacts/gui-validation`；窗口脚本须通过 `-Executable` 指向同一产物。
+新环境使用 `cmake --preset windows-vs2022` 与 `cmake --build --preset windows-debug-engine`。已有配置优先使用对应本工作区的目录。编辑器自测示例为 `build/cmake-vs2022/Debug/RestArtEngine.exe --editor-self-test --capture-dir artifacts/gui-validation`；窗口脚本须通过 `-Executable` 指向同一产物，`Test-WindowChrome.ps1` 还可指定独立 `-CaptureDirectory`。
 
 截图注明构建、主题、窗口尺寸、字体/样式缩放和场景，前后比较保持条件一致。当前测试中的 150% 字体/样式缩放不能证明操作系统跨显示器 DPI 支持。系统吸附弹窗、跨屏、完整键盘路径、中文输入法以及屏幕阅读器等，只有实际检查过才报告通过；不因本页列出目标而视为已覆盖。
 

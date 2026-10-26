@@ -6,9 +6,12 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <RestArtEngine/ImGui/ImGuiLayer.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
+#include <RestArtEngine/ImGui/WindowChrome.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/Editor/LoadingScreen.h>
+#include <RestArtEngine/Core/GarbageCollector.h>
 #include "EditorSmoke.h"
+#include "GarbageCollectionSmoke.h"
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -28,6 +31,7 @@
 namespace {
 using namespace rae::renderer;
 struct WindowState {
+    rae::imgui::WindowChrome chrome;
     unsigned width = 1440, height = 900;
     bool resized = false, minimized = false, closeRequested = false;
     // Only the window that owns the main loop may post WM_QUIT when destroyed.
@@ -60,20 +64,21 @@ void presentLoading(SceneRenderer& renderer, rae::imgui::ImGuiLayer& ui,
     const float clear[4] = {0.02f, 0.025f, 0.035f, 1.0f};
     if (!renderer.clear(clear, ignored)) return;
     ui.beginFrame(1.0f / 60.0f);
-    const ImVec2 size = ImGui::GetIO().DisplaySize;
-    screen.draw(size.x, size.y, progress, text);
+    screen.draw(progress, text);
     ui.endFrame();
     renderer.present(false, ignored);
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
-    const bool uiHandled = rae::imgui::ImGuiLayer::handleMessage(window, message, wp, lp);
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         auto* create = reinterpret_cast<CREATESTRUCTW*>(lp);
         state = static_cast<WindowState*>(create->lpCreateParams);
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
+    std::intptr_t chromeResult = 0;
+    if (state && state->chrome.handleMessage(window, message, wp, lp, chromeResult)) return chromeResult;
+    const bool uiHandled = rae::imgui::ImGuiLayer::handleMessage(window, message, wp, lp);
     switch (message) {
     case WM_SIZE:
         if (state) {
@@ -86,7 +91,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO:
         reinterpret_cast<MINMAXINFO*>(lp)->ptMinTrackSize = {900, 600}; return 0;
     case WM_SYSCOMMAND:
-        if ((wp & 0xfff0) == SC_KEYMENU) return 0;
+        if ((wp & 0xfff0) == SC_KEYMENU && lp != VK_SPACE) return 0;
         break;
     case WM_CLOSE:
         if (state) state->closeRequested = true;
@@ -112,18 +117,20 @@ void toggleFullscreen(HWND window, WindowState& state) {
         MONITORINFO monitor{};
         monitor.cbSize = sizeof(MONITORINFO);
         if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+        state.fullscreen = true;
+        state.chrome.setFullscreen(true);
         SetWindowLongPtrW(window, GWL_STYLE, (state.windowedStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
         SetWindowPos(window, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
             monitor.rcMonitor.right - monitor.rcMonitor.left,
             monitor.rcMonitor.bottom - monitor.rcMonitor.top,
             SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        state.fullscreen = true;
     } else {
+        state.fullscreen = false;
+        state.chrome.setFullscreen(false);
         SetWindowLongPtrW(window, GWL_STYLE, state.windowedStyle);
         SetWindowPlacement(window, &state.windowedPlacement);
         SetWindowPos(window, nullptr, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        state.fullscreen = false;
     }
 }
 
@@ -135,6 +142,13 @@ struct WindowOwner {
 std::string utf8Path(const std::filesystem::path& path) {
     const auto value = path.generic_u8string();
     return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
+
+std::wstring windowTitle(const std::string& projectName) {
+    const int count = MultiByteToWideChar(CP_UTF8, 0, projectName.data(), static_cast<int>(projectName.size()), nullptr, 0);
+    std::wstring name(static_cast<std::size_t>(count), L'\0');
+    if (count) MultiByteToWideChar(CP_UTF8, 0, projectName.data(), static_cast<int>(projectName.size()), name.data(), count);
+    return L"RestArtEngine | " + name;
 }
 
 std::filesystem::path findEngineRoot() {
@@ -182,6 +196,46 @@ bool browseForProject(std::filesystem::path& result, HWND owner) {
     if (!GetOpenFileNameW(&info)) return false;
     result = std::filesystem::path(fileName);
     return true;
+}
+
+void saveUserCapture(SceneRenderer& renderer, HWND owner, std::filesystem::path& lastFolder) {
+    wchar_t fileName[32768]{};
+    const auto suggested = L"capture_" + std::to_wstring(GetTickCount64()) + L".bmp";
+    std::copy(suggested.begin(), suggested.end(), fileName);
+    wchar_t pictures[MAX_PATH]{};
+    if (lastFolder.empty() && SUCCEEDED(SHGetFolderPathW(owner, CSIDL_MYPICTURES, nullptr, 0, pictures)))
+        lastFolder = pictures;
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner = owner;
+    dialog.lpstrTitle = L"Save capture";
+    dialog.lpstrFilter = L"Bitmap image (*.bmp)\0*.bmp\0\0";
+    dialog.lpstrDefExt = L"bmp";
+    dialog.lpstrFile = fileName;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(fileName));
+    dialog.lpstrInitialDir = lastFolder.empty() ? nullptr : lastFolder.c_str();
+    dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&dialog)) {
+        const DWORD code = CommDlgExtendedError();
+        if (code) {
+            const auto message = L"Could not open the save dialog (error " + std::to_wstring(code) + L").";
+            MessageBoxW(owner, message.c_str(), L"Capture", MB_OK | MB_ICONERROR);
+        }
+        return; // Cancel never falls back to an automatic output path.
+    }
+    const std::filesystem::path file(fileName);
+    if (_wcsicmp(file.extension().c_str(), L".bmp") != 0) {
+        MessageBoxW(owner, L"Capture supports BMP images. Please choose a filename ending in .bmp.",
+            L"Capture", MB_OK | MB_ICONERROR);
+        return;
+    }
+    lastFolder = file.parent_path();
+    std::string error;
+    if (!renderer.saveScreenshot(file.c_str(), error)) {
+        // A failed user export must not close the editor or discard scene edits.
+        MessageBoxA(owner, error.c_str(), "Could not save capture", MB_OK | MB_ICONERROR);
+        return;
+    }
+    std::wcout << L"Captured " << file.native() << L'\n';
 }
 
 bool createProjectFromTemplate(const std::filesystem::path& engineRoot,
@@ -255,8 +309,32 @@ std::vector<ProjectExample> findExamples(const std::filesystem::path& engineRoot
     return examples;
 }
 
+rae::GarbageCollectionMemoryStats collectMemory(SceneRenderer& renderer,
+    rae::imgui::ImGuiLayer& ui, double idleSeconds) {
+    auto result = renderer.collectGarbage(idleSeconds);
+    const auto uiResult = ui.collectGarbage(idleSeconds);
+    result.cpuBytesReleased += uiResult.cpuBytesReleased;
+    result.gpuBytesReleasedEstimate += uiResult.gpuBytesReleasedEstimate;
+    result.objectsReleased += uiResult.objectsReleased;
+    return result;
+}
+
+void updateGarbageCollection(rae::GarbageCollector& gc, SceneRenderer& renderer,
+    rae::imgui::ImGuiLayer& ui, std::chrono::steady_clock::time_point& previous) {
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - previous).count();
+    previous = now;
+    if (gc.update(elapsed, [&](double idle) { return collectMemory(renderer, ui, idle); })) {
+        const auto& stats = gc.stats();
+        std::cout << "GC: CPU bytes " << stats.memory.cpuBytesReleased
+            << ", GPU bytes (estimate) " << stats.memory.gpuBytesReleasedEstimate
+            << ", temporary captures " << stats.temporaryFilesRemoved << '\n';
+        if (!stats.lastError.empty()) std::cerr << "GC: " << stats.lastError << '\n';
+    }
+}
+
 bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::ProjectPaths& selected,
-    std::string& error) {
+    rae::GarbageCollector& gc, std::string& error) {
     if (engineRoot.empty()) { error = "Cannot locate the RestArtEngine root. Start the project manager inside an engine checkout."; return false; }
     WindowState windowState;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -267,7 +345,6 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) { error = "RegisterClassEx failed for project manager."; return false; }
     RECT bounds{0, 0, 1080, 720};
-    AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
     WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Project Manager", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
         nullptr, nullptr, instance, &windowState)};
@@ -278,6 +355,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     if (!renderer.initialize(window.handle, windowState.width, windowState.height, error)) return false;
     rae::imgui::ImGuiLayer ui;
     if (!ui.initialize(window.handle, renderer.device(), renderer.context())) { error = "Dear ImGui initialization failed for project manager."; return false; }
+    ui.setWindowChrome(&windowState.chrome);
     ShowWindow(window.handle, SW_SHOW);
     char projectName[256] = "MyProject";
     char parentText[1024]{};
@@ -302,6 +380,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     rae::project::EngineCompatibilityReport mismatchReport;
     bool running = true, accepted = false;
     auto previous = std::chrono::steady_clock::now();
+    auto previousGc = previous;
     while (running) {
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -319,8 +398,8 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::chrono::duration<float>(now - previous).count(); previous = now;
         ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2(static_cast<float>(windowState.width), static_cast<float>(windowState.height)));
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->WorkPos);
+        ImGui::SetNextWindowSize(ImGui::GetMainViewport()->WorkSize);
         ImGui::Begin("RestArtEngine Project Manager", nullptr,
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
         ImGui::SetWindowFontScale(1.15f);
@@ -511,6 +590,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
         if (!renderer.clear(projectManagerClear, error)) { ui.shutdown(); return false; }
         ui.endFrame();
         if (!renderer.present(true, error)) { ui.shutdown(); return false; }
+        updateGarbageCollection(gc, renderer, ui, previousGc);
     }
     ui.shutdown();
     // The project manager owns a separate Win32 window. Destroy it before the
@@ -528,9 +608,12 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
 }
 
 int wmain(int argc, wchar_t** argv) {
-    bool selfTest = false, editorSelfTest = false, showUI = true, vsync = true;
+    bool selfTest = false, editorSelfTest = false, gcSelfTest = false, showUI = true, vsync = true;
+    bool temporaryCaptures = false, explicitCaptureDir = false, disableGc = false;
+    std::optional<double> gcInterval, gcIdle, gcCaptureAge;
+    std::filesystem::path gcSettingsPath = "RestArtEngine.gc.json";
     int frameLimit = 0;
-    std::filesystem::path captureDir = "screenshots";
+    std::filesystem::path captureDir;
     std::filesystem::path projectPath;
     std::filesystem::path enginePath;
     SceneSettings settings;
@@ -540,6 +623,19 @@ int wmain(int argc, wchar_t** argv) {
             const std::string arg(reinterpret_cast<const char*>(argument.data()), argument.size());
             if (arg == "--self-test") selfTest = true;
             else if (arg == "--editor-self-test") editorSelfTest = true;
+            else if (arg == "--gc-self-test") gcSelfTest = true;
+            else if (arg == "--capture-temp") temporaryCaptures = true;
+            else if (arg == "--no-gc") disableGc = true;
+            else if (arg == "--gc-settings" && i + 1 < argc) gcSettingsPath = argv[++i];
+            else if ((arg == "--gc-interval" || arg == "--gc-idle" || arg == "--gc-capture-age") && i + 1 < argc) {
+                const std::wstring value = argv[++i];
+                std::size_t consumed = 0;
+                const double seconds = std::stod(value, &consumed);
+                if (consumed != value.size()) throw std::runtime_error(arg + " requires seconds.");
+                if (arg == "--gc-interval") gcInterval = seconds;
+                else if (arg == "--gc-idle") gcIdle = seconds;
+                else gcCaptureAge = seconds;
+            }
             else if (arg == "--project" && i + 1 < argc) projectPath = argv[++i];
             else if (arg == "--engine" && i + 1 < argc) enginePath = argv[++i];
             else if (arg == "--no-ui") showUI = false;
@@ -550,12 +646,16 @@ int wmain(int argc, wchar_t** argv) {
                 frameLimit = std::stoi(argv[++i]);
                 if (frameLimit <= 0) throw std::runtime_error("--frames must be positive");
             }
-            else if (arg == "--capture-dir" && i + 1 < argc) captureDir = argv[++i];
+            else if (arg == "--capture-dir" && i + 1 < argc) { captureDir = argv[++i]; explicitCaptureDir = true; }
             else if (arg == "auto" || arg == "dx11") {}
             else if (arg == "--help") {
                 std::cout << "RestArtEngine: DX11 scene and asset editor\n"
                     "--forward | --deferred   --rt   --no-ui   --frames N\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
+                    "F9/Capture: Save As dialog; --frames alone does not save an image.\n"
+                    "--gc-settings PATH --gc-interval SECONDS --gc-idle SECONDS --gc-capture-age SECONDS --no-gc\n"
+                    "--capture-temp (managed temporary final-frame capture; requires --frames, excludes --capture-dir)\n"
+                    "--gc-self-test (isolated resource GC and GUI validation)\n"
                     "--engine PATH (engine root used by the project manager)\n"
                     "--project PATH (project directory or .raproject file)\n"
                     "PATH                shorthand for --project PATH (e.g. Projects/Sandbox/Sandbox.raproject)\n";
@@ -566,13 +666,37 @@ int wmain(int argc, wchar_t** argv) {
             else if (projectPath.empty() && !arg.starts_with("--")) projectPath = argv[i];
             else throw std::runtime_error("Unsupported argument: " + arg + ". This scene currently runs on DX11. Use --help.");
         }
+        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest))
+            throw std::runtime_error("--capture-temp requires --frames and cannot be combined with --capture-dir or self-tests.");
+        if ((selfTest || editorSelfTest || gcSelfTest) && !explicitCaptureDir)
+            captureDir = std::filesystem::temp_directory_path() / "RestArtEngine/Validation";
+        rae::GarbageCollector gc;
+        std::string gcError;
+        if (!gc.loadSettings(gcSettingsPath, gcError)) std::cerr << "GC settings: " << gcError << '\n';
+        auto gcSettings = gc.settings();
+        if (gcInterval) gcSettings.intervalSeconds = *gcInterval;
+        if (gcIdle) gcSettings.memoryIdleSeconds = *gcIdle;
+        if (gcCaptureAge) gcSettings.temporaryCaptureMaxAgeSeconds = *gcCaptureAge;
+        if (disableGc) gcSettings.enabled = false;
+        if (!gc.setSettings(gcSettings, gcError)) throw std::runtime_error(gcError);
+        // Validation outputs are durable evidence; self-tests use isolated GC services.
+        if (!selfTest && !editorSelfTest && !gcSelfTest) {
+            std::error_code tempError;
+            const auto root = std::filesystem::temp_directory_path(tempError) / "RestArtEngine/Captures";
+            if (tempError || !gc.initializeTemporaryCaptures(root, gcError)) {
+                if (tempError) gcError = tempError.message();
+                if (temporaryCaptures) throw std::runtime_error(gcError);
+                std::cerr << "Temporary capture GC unavailable: " << gcError << '\n';
+            }
+        }
         SetProcessDPIAware();
+        rae::imgui::currentTheme() = rae::imgui::loadThemePreference(rae::imgui::defaultThemePreferencePath());
         if (selfTest) { vsync = false; frameLimit = 14; }
         rae::project::ProjectPaths project;
         std::string error;
-        if (projectPath.empty() && !selfTest && !editorSelfTest) {
+        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
-            if (!runProjectManager(engineRoot, project, error)) {
+            if (!runProjectManager(engineRoot, project, gc, error)) {
                 if (!error.empty()) throw std::runtime_error(error);
                 return 0; // User closed the project manager without opening a project.
             }
@@ -590,27 +714,27 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
         WindowState windowState;
+        windowState.chrome.setEnabled(!selfTest);
         // The editor owns the main loop, so it is the only window allowed to
         // turn its destruction into a thread-wide quit.
         windowState.quitOnDestroy = true;
         RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
-        AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
-        WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Scene & Material Editor | DirectX 11",
+        if (selfTest) AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
+        const auto title = windowTitle(project.name);
+        WindowOwner window{CreateWindowW(wc.lpszClassName, title.c_str(),
             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right-bounds.left,
             bounds.bottom-bounds.top, nullptr, nullptr, instance, &windowState)};
         if (!window.handle) throw std::runtime_error("CreateWindow failed");
-        const bool interactive = !selfTest && !editorSelfTest;
+        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest;
         SceneRenderer renderer;
         renderer.setShaderRoot(project.engineRoot / "Shaders");
         renderer.setMaterialShaderPath(project.shaderRoot / "Materials/Standard.hlsli");
         if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
             throw std::runtime_error(error);
         rae::imgui::ImGuiLayer ui;
-        // Theme is a per-user preference read before the context is created; the
-        // ImGui layer applies it during initialization.
-        rae::imgui::currentTheme() = rae::imgui::loadThemePreference(rae::imgui::defaultThemePreferencePath());
-        if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest))
+        if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest && !gcSelfTest))
             throw std::runtime_error("Dear ImGui initialization failed");
+        ui.setWindowChrome(&windowState.chrome);
         if (interactive) ui.setIniFilename("RestArtEngine.imgui.ini");
         rae::editor::LoadingScreen loading;
         if (interactive) {
@@ -624,15 +748,22 @@ int wmain(int argc, wchar_t** argv) {
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
+        if (interactive) editor.setGarbageCollector(&gc, gcSettingsPath);
+        if (gcSelfTest) {
+            runGarbageCollectionSmoke(renderer, ui, editor, captureDir);
+            return 0;
+        }
         if (editorSelfTest) {
             runEditorSmoke(renderer, ui, editor, project, captureDir);
             return 0;
         }
         if (interactive) presentLoading(renderer, ui, loading, 1.0f, "Ready");
+        loading.release(); // The last loading draw has been submitted; no longer a live UI resource.
         std::cout << "RestArtEngine / D3D11 / " << renderer.adapterName() << '\n';
         std::cout << "Forward + deferred rasterization; directional shadow maps, selectable analytic shadows, and GPU ray reflections.\n";
         bool running = true;
         int frame = 0;
+        std::filesystem::path lastUserCaptureFolder;
         // Defensive: a WM_QUIT posted by a window destroyed during startup would
         // end the loop before its first frame. Only windows with quitOnDestroy
         // set can post it now, so draining here is a cheap safety net.
@@ -642,6 +773,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::cerr << "Drained a stale WM_QUIT left over from startup.\n";
         }
         auto previous = std::chrono::steady_clock::now();
+        auto previousGc = previous;
         while (running) {
             MSG msg{};
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -667,6 +799,7 @@ int wmain(int argc, wchar_t** argv) {
                     if (editor.drawCloseDialog(renderer)) running = false;
                     ui.endFrame(false);
                 }
+                updateGarbageCollection(gc, renderer, ui, previousGc);
                 Sleep(16); continue;
             }
             if (windowState.resized) {
@@ -756,7 +889,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 settings.cameraDistance = std::clamp(settings.cameraDistance - io.MouseWheel * .4f, 2.5f, 14.0f);
             }
-            bool capture = mainWindowFocused && ImGui::IsKeyPressed(ImGuiKey_F9);
+            bool capture = mainWindowFocused && ImGui::IsKeyPressed(ImGuiKey_F9, false);
             settings.viewportX = settings.viewportY = settings.viewportWidth = settings.viewportHeight = 0;
             settings.editorViewport = false;
             settings.viewportVisible = true;
@@ -768,8 +901,13 @@ int wmain(int argc, wchar_t** argv) {
                 : renderer.render(settings, editor.world(), editor.assets(), error, editor.materialPreview());
             if (!rendered) throw std::runtime_error(error);
             ui.endFrame();
-            if (selfTest || capture || (frameLimit > 0 && frame == frameLimit - 1)) {
-                std::filesystem::create_directories(captureDir);
+            if (capture && !selfTest) {
+                saveUserCapture(renderer, window.handle, lastUserCaptureFolder);
+                previous = std::chrono::steady_clock::now();
+            } else if (selfTest || (frameLimit > 0 && frame == frameLimit - 1 &&
+                (explicitCaptureDir || temporaryCaptures))) {
+                const bool temporary = temporaryCaptures;
+                if (!temporary) std::filesystem::create_directories(captureDir);
                 std::string name;
                 if (selfTest) {
                     const char* labels[] = {"forward_off", "forward_on", "deferred_off", "deferred_on",
@@ -777,11 +915,16 @@ int wmain(int argc, wchar_t** argv) {
                         "unlit_forward", "unlit_forward_changed", "unlit_deferred", "unlit_deferred_changed"};
                     name = labels[frame];
                 } else name = "capture_" + std::to_string(GetTickCount64());
-                const auto file = captureDir / (name + ".bmp");
-                if (!renderer.saveScreenshot(file.c_str(), error)) throw std::runtime_error(error);
-                std::cout << "Captured " << file.string() << '\n';
+                auto file = captureDir / (name + ".bmp");
+                if (temporary) {
+                    if (!gc.captureTemporary([&](std::FILE* stream, std::string& captureError) {
+                        return renderer.saveScreenshot(stream, captureError);
+                    }, file, error)) throw std::runtime_error(error);
+                } else if (!renderer.saveScreenshot(file.c_str(), error)) throw std::runtime_error(error);
+                std::cout << (temporary ? "Temporary capture " : "Captured ") << file.string() << '\n';
             }
             if (!renderer.present(vsync, error)) throw std::runtime_error(error);
+            if (!selfTest) updateGarbageCollection(gc, renderer, ui, previousGc);
             ++frame;
             if (frameLimit && frame >= frameLimit) running = false;
         }
@@ -794,7 +937,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        if (!selfTest && !editorSelfTest && !gcSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

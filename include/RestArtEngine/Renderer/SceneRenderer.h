@@ -1,5 +1,7 @@
 #pragma once
 
+#include <RestArtEngine/Core/GarbageCollector.h>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -13,6 +15,14 @@ namespace rae::scene { class World; }
 namespace rae::assets { class AssetLibrary; struct MaterialAsset; }
 
 namespace rae::renderer {
+
+// Logical cache allocations, not driver residency or process working set.
+struct RendererCacheStats {
+    std::uint64_t meshCount = 0;
+    std::uint64_t meshGpuBytesEstimate = 0;
+    std::uint64_t rayTriangleCount = 0;
+    std::uint64_t rayGpuBytesEstimate = 0;
+};
 
 enum class RenderPath { Forward, Deferred };
 
@@ -101,6 +111,10 @@ public:
     bool rayTracingSupported(const scene::World& world, const assets::AssetLibrary& assets) const;
     std::string rayTracingStatus(const scene::World& world, const assets::AssetLibrary& assets) const;
     bool present(bool vsync, std::string& error);
+    // Main/render thread only, after UI submission/capture/Present (or between
+    // frames while minimized). Retains caches used by the latest scene frame.
+    rae::GarbageCollectionMemoryStats collectGarbage(double maxIdleSeconds);
+    [[nodiscard]] RendererCacheStats cacheStats() const;
     void shutdown();
     ID3D11Device* device() const;
     ID3D11DeviceContext* context() const;
@@ -114,6 +128,9 @@ public:
     std::uint32_t validationErrorCount() const;
     // Captures the current backbuffer before Present, including any UI drawn.
     bool saveScreenshot(const wchar_t* path, std::string& error);
+    // Writes BMP at the current position of a borrowed binary output stream.
+    // Caller owns flushing/closing it and checking the final close result.
+    bool saveScreenshot(std::FILE* file, std::string& error);
 
 private:
     struct Impl;

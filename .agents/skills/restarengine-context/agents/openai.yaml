@@ -1,0 +1,4 @@
+interface:
+  display_name: "RestArtEngine Context"
+  short_description: "Recover engine requirements, progress, and source evidence"
+  default_prompt: "使用 $restarengine-context 核对当前引擎需求、实现与验证进度，准备本轮任务上下文。"

@@ -176,6 +176,20 @@ void SceneEditor::duplicateSelectedActor() {
     sceneDirty_ = true;
 }
 
+void SceneEditor::duplicateForDrag() {
+    dragSourceSelection_ = selection_;
+    dragSourcePrimary_ = selectedActor_;
+    dragCopies_.clear();
+    for (const auto id : dragSourceSelection_) {
+        const auto copy = world_.duplicateActor(id);
+        if (!copy) continue;
+        dragCopies_.push_back(copy);
+        if (id == dragSourcePrimary_) selectedActor_ = copy;
+    }
+    selection_ = dragCopies_;
+    sceneDirty_ = true;
+}
+
 void SceneEditor::selectMaterial(assets::AssetId id) {
     if (!assets_.findMaterial(id)) return;
     materialWindowOpen_ = true;
@@ -250,7 +264,7 @@ bool SceneEditor::isSelected(scene::ActorId id) const {
 }
 
 void SceneEditor::selectActor(scene::ActorId id, bool additive) {
-    dockManager_.requestFocus(EditorPanel::Scene);
+    dockManager_.requestFocus(EditorPanel::Details);
     if (!id) {
         selection_.clear();
         selectedActor_ = 0;
@@ -262,7 +276,7 @@ void SceneEditor::selectActor(scene::ActorId id, bool additive) {
         return;
     }
     // Ctrl/Shift click toggles membership; the primary falls back to the last
-    // remaining Actor so Scene never points at an unselected one.
+    // remaining Actor so both inspectors refer to the same selected instance.
     const auto it = std::find(selection_.begin(), selection_.end(), id);
     if (it != selection_.end()) {
         selection_.erase(it);
@@ -288,7 +302,7 @@ void SceneEditor::insertActor(std::size_t index, const scene::Actor& actor) {
 }
 
 void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
-    dockManager_.requestFocus(EditorPanel::Scene);
+    dockManager_.requestFocus(EditorPanel::Details);
     // Undo removes the new Actor, redo puts the same copy back. Both directions
     // capture the identity by value so a later selection change cannot leak in.
     const scene::ActorId id = actor.id;
@@ -323,6 +337,37 @@ void SceneEditor::trackTransformEdit() {
     }
     if (dragging_) {
         dragging_ = false;
+        if (!dragCopies_.empty()) {
+            // Creation and the final placement form one transaction. Capture
+            // full Actor values so redo retains IDs, references and transforms.
+            std::vector<scene::Actor> copies;
+            for (const auto id : dragCopies_)
+                if (const auto* actor = world_.findActor(id)) copies.push_back(*actor);
+            const auto sourceSelection = dragSourceSelection_;
+            const auto sourcePrimary = dragSourcePrimary_;
+            const auto copySelection = dragCopies_;
+            const auto copyPrimary = selectedActor_;
+            undo_.push("Duplicate and transform Actors",
+                [this, copySelection, sourceSelection, sourcePrimary] {
+                    for (const auto id : copySelection) eraseActor(id);
+                    selection_ = sourceSelection;
+                    selectedActor_ = sourcePrimary;
+                    sceneDirty_ = true;
+                },
+                [this, copies, copySelection, copyPrimary] {
+                    for (const auto& actor : copies) world_.actors.push_back(actor);
+                    selection_ = copySelection;
+                    selectedActor_ = copyPrimary;
+                    sceneDirty_ = true;
+                });
+            dragCopies_.clear();
+            dragSourceSelection_.clear();
+            dragSourcePrimary_ = 0;
+            dragStartTransforms_.clear();
+            settledSelection_.clear();
+            settledTransformActor_ = 0;
+            return;
+        }
         std::vector<ActorSnapshot> before, after;
         for (const auto& snapshot : dragStartTransforms_) {
             const auto* actor = world_.findActor(snapshot.id);
@@ -375,6 +420,16 @@ bool SceneEditor::redo() {
     return true;
 }
 
+void SceneEditor::setGarbageCollector(rae::GarbageCollector* gc, const std::filesystem::path& settingsPath) {
+    garbageCollector_ = gc;
+    garbageCollectionSettingsPath_ = settingsPath;
+    garbageCollectionDraft_ = gc ? gc->settings() : rae::GarbageCollectionSettings{};
+    garbageCollectionDraftDirty_ = false;
+    garbageCollectionRequested_ = false;
+    garbageCollectionMessage_.clear();
+    if (!gc) garbageCollectionOpen_ = false;
+}
+
 void SceneEditor::drawUiMenu() {
     if (!ImGui::BeginMenu("UI")) return;
     if (ImGui::BeginMenu("Theme")) {
@@ -389,9 +444,107 @@ void SceneEditor::drawUiMenu() {
         ImGui::EndMenu();
     }
     ImGui::Separator();
-    if (ImGui::MenuItem("Material editor...", nullptr, materialWindowOpen_, !assets_.materials.empty()))
+    if (ImGui::MenuItem("Material editor...", nullptr, materialWindowOpen_, !assets_.materials.empty())) {
         selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
+    }
+    if (ImGui::MenuItem("Garbage collection...", nullptr, garbageCollectionOpen_, garbageCollector_ != nullptr)) {
+        if (!garbageCollectionDraftDirty_) garbageCollectionDraft_ = garbageCollector_->settings();
+        garbageCollectionOpen_ = true;
+        ImGui::SetWindowFocus("Garbage collection");
+    }
     ImGui::EndMenu();
+}
+
+void SceneEditor::drawGarbageCollection() {
+    garbageCollectionFocused_ = false;
+    if (!garbageCollectionOpen_ || !garbageCollector_) return;
+    const auto& stats = garbageCollector_->stats();
+    if (garbageCollectionRequested_ && stats.collections != garbageCollectionRequestCount_) {
+        garbageCollectionRequested_ = false;
+        garbageCollectionMessage_ = "Collection finished. See the latest result below.";
+    }
+    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+    ImGui::SetNextWindowSize({480, 620}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints({280, 220}, {FLT_MAX, FLT_MAX});
+    const bool visible = ImGui::Begin("Garbage collection", &garbageCollectionOpen_, ImGuiWindowFlags_NoDocking);
+    garbageCollectionFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (!visible) {
+        ImGui::End();
+        return;
+    }
+    ImGui::TextWrapped("Reclaim unused memory and expired temporary captures. Permanent screenshots are never deleted.");
+    ImGui::SeparatorText("Settings");
+    ImGui::TextWrapped("Changes take effect only with Apply & save. Closing this window keeps the draft until you exit the editor.");
+    garbageCollectionDraftDirty_ |= ImGui::Checkbox("Automatic collection", &garbageCollectionDraft_.enabled);
+    const auto secondsInput = [this](const char* label, const char* id, double& value) {
+        ImGui::TextWrapped("%s", label);
+        ImGui::SetNextItemWidth(-1);
+        garbageCollectionDraftDirty_ |= ImGui::InputDouble(id, &value, 0, 0, "%.3f");
+    };
+    secondsInput("Check interval (seconds, 1 - 86400)", "##gcInterval", garbageCollectionDraft_.intervalSeconds);
+    secondsInput("Memory idle time (seconds, 0 - 604800)", "##gcIdle", garbageCollectionDraft_.memoryIdleSeconds);
+    secondsInput("Temporary capture retention (seconds, 1 - 31536000)", "##gcCaptureAge",
+        garbageCollectionDraft_.temporaryCaptureMaxAgeSeconds);
+    ImGui::TextWrapped("Memory must be unused for the idle time before it is eligible. Collection uses the currently applied settings.");
+    if (garbageCollectionDraftDirty_) ImGui::TextWrapped("Draft changes are not applied or saved.");
+    ImGui::BeginDisabled(garbageCollectionSettingsPath_.empty());
+    if (ImGui::Button("Apply & save")) {
+        const auto previous = garbageCollector_->settings();
+        std::string error;
+        // Core validates finite values and ranges. No collection runs inside
+        // this UI transaction: the application services requests at frame end.
+        if (!garbageCollector_->setSettings(garbageCollectionDraft_, error)) {
+            garbageCollectionMessage_ = "Settings not applied: " + error;
+        } else if (!garbageCollector_->saveSettings(garbageCollectionSettingsPath_, error)) {
+            std::string rollbackError;
+            if (garbageCollector_->setSettings(previous, rollbackError))
+                garbageCollectionMessage_ = "Save failed; previous running settings restored. Draft kept. " + error;
+            else
+                garbageCollectionMessage_ = "Save failed; draft settings remain active but are not saved. " + error +
+                    " Restore failed: " + rollbackError;
+        } else {
+            garbageCollectionDraftDirty_ = false;
+            garbageCollectionMessage_ = "Settings applied and saved.";
+        }
+    }
+    ImGui::EndDisabled();
+    continueButtonRow("Discard draft");
+    ImGui::BeginDisabled(!garbageCollectionDraftDirty_);
+    if (ImGui::Button("Discard draft")) {
+        garbageCollectionDraft_ = garbageCollector_->settings();
+        garbageCollectionDraftDirty_ = false;
+        garbageCollectionMessage_ = "Draft discarded. Showing currently applied settings.";
+    }
+    ImGui::EndDisabled();
+    if (garbageCollectionSettingsPath_.empty()) ImGui::TextWrapped("Saving is unavailable: no settings path was supplied.");
+    ImGui::SeparatorText("Collection");
+    ImGui::TextWrapped("Automatic collection is currently %s. Manual collection is available even when it is off.",
+        garbageCollector_->settings().enabled ? "on" : "off");
+    ImGui::BeginDisabled(garbageCollectionRequested_);
+    if (ImGui::Button("Collect now")) {
+        garbageCollectionRequestCount_ = stats.collections;
+        garbageCollectionRequested_ = true;
+        garbageCollector_->requestCollection();
+        garbageCollectionMessage_ = "Collection queued for the end of this frame using applied settings.";
+    }
+    ImGui::EndDisabled();
+    message(garbageCollectionMessage_);
+    ImGui::SeparatorText("Latest result");
+    if (!stats.collections) {
+        ImGui::TextWrapped("No collection has run in this session.");
+    } else {
+        ImGui::TextWrapped("Collections this session: %llu", static_cast<unsigned long long>(stats.collections));
+        ImGui::TextWrapped("Last duration: %.3f ms", stats.lastDurationMs);
+        ImGui::TextWrapped("CPU memory released: %llu bytes", static_cast<unsigned long long>(stats.memory.cpuBytesReleased));
+        ImGui::TextWrapped("GPU memory released (estimate): %llu bytes",
+            static_cast<unsigned long long>(stats.memory.gpuBytesReleasedEstimate));
+        ImGui::TextWrapped("Objects released: %llu", static_cast<unsigned long long>(stats.memory.objectsReleased));
+        ImGui::TextWrapped("Temporary captures removed: %llu (%llu bytes)",
+            static_cast<unsigned long long>(stats.temporaryFilesRemoved),
+            static_cast<unsigned long long>(stats.temporaryBytesRemoved));
+    }
+    if (!stats.lastError.empty()) ImGui::TextWrapped("Last collection error: %s", stats.lastError.c_str());
+    ImGui::End();
 }
 
 void SceneEditor::drawEditMenu() {
@@ -556,7 +709,7 @@ void SceneEditor::importMesh() {
         const auto utf8Path = destination.generic_u8string();
         proposed.findMesh(id)->sourcePath.assign(reinterpret_cast<const char*>(utf8Path.data()), utf8Path.size());
         assets_ = std::move(proposed); selectedMesh_ = id; sceneDirty_ = true;
-        status_ = "OBJ imported. Select it below and add an Actor, then save the scene.";
+        status_ = "OBJ imported. Add an Actor from this mesh to inspect the instance, then save the scene.";
     } catch (const std::exception& error) { status_ = error.what(); }
 }
 
@@ -583,50 +736,42 @@ void SceneEditor::drawAssets() {
         const auto label = mesh.name + "##" + std::to_string(mesh.id);
         if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) {
             selectedMesh_ = mesh.id;
-            dockManager_.requestFocus(EditorPanel::Details);
         }
     }
     ImGui::EndChild();
 }
 
-void SceneEditor::drawMeshDetails() {
-    if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
-        ImGui::TextWrapped("%s", mesh->name.c_str());
+void SceneEditor::drawInstanceDetails() {
+    // Content browsing chooses a resource for insertion, never the inspection
+    // target. Resolve every field through the current scene instance each frame.
+    const auto* actor = world_.findActor(selectedActor_);
+    if (!actor) {
+        ImGui::TextWrapped("Select an Actor in the viewport or Outliner.");
+        return;
+    }
+    ImGui::TextWrapped("%s", actor->name.c_str());
+    ImGui::TextDisabled("Actor #%llu", static_cast<unsigned long long>(actor->id));
+    if (selection_.size() > 1)
+        ImGui::TextWrapped("%zu Actors selected; showing primary instance.", selection_.size());
+    ImGui::Text("Visible: %s", actor->visible ? "Yes" : "No");
+    ImGui::SeparatorText("Assigned material");
+    if (const auto* material = assets_.findMaterial(actor->mesh.materialId)) {
+        const auto label = material->name + "###InstanceMaterial";
+        const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+        const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
+        if (ImGui::Button(label.c_str(), {buttonWidth, 0})) selectMaterial(actor->mesh.materialId);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", material->name.c_str());
+    } else {
+        ImGui::TextWrapped("Missing material #%llu", static_cast<unsigned long long>(actor->mesh.materialId));
+    }
+    ImGui::SeparatorText("Mesh");
+    if (const auto* mesh = assets_.findMesh(actor->mesh.meshId)) {
+        ImGui::TextWrapped("Mesh: %s", mesh->name.c_str());
         ImGui::TextWrapped("Type: %s", meshType(mesh->primitive));
         ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
         message(mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
-        ImGui::TextWrapped("OBJ imports static geometry. Materials are assigned separately in Scene.");
-        ImGui::SeparatorText("Materials in scene");
-        std::vector<assets::AssetId> referencedMaterials;
-        for (const auto& actor : world_.actors) {
-            if (actor.mesh.meshId != mesh->id ||
-                std::find(referencedMaterials.begin(), referencedMaterials.end(), actor.mesh.materialId) != referencedMaterials.end())
-                continue;
-            referencedMaterials.push_back(actor.mesh.materialId);
-        }
-        for (const auto id : referencedMaterials) {
-            const auto* material = assets_.findMaterial(id);
-            const auto count = std::count_if(world_.actors.begin(), world_.actors.end(),
-                [mesh, id](const auto& actor) { return actor.mesh.meshId == mesh->id && actor.mesh.materialId == id; });
-            if (material) {
-                const auto label = material->name + "###MeshMaterial." + std::to_string(id);
-                const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
-                const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
-                if (ImGui::Button(label.c_str(), {buttonWidth, 0})) selectMaterial(id);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", material->name.c_str());
-                const auto usage = std::to_string(count) + " Actor(s)";
-                continueButtonRow(usage.c_str());
-                ImGui::TextUnformatted(usage.c_str());
-            } else {
-                ImGui::TextWrapped("Missing material #%llu (%zu Actor(s))",
-                    static_cast<unsigned long long>(id), static_cast<std::size_t>(count));
-            }
-        }
-        if (referencedMaterials.empty())
-            ImGui::TextWrapped("No Actor currently uses this mesh. Assign a material in Scene after adding it to the scene.");
-        ImGui::TextWrapped("Click a material to open its independent editor window.");
     } else {
-        ImGui::TextDisabled("Select a Mesh in the Content browser.");
+        ImGui::TextWrapped("Missing mesh #%llu", static_cast<unsigned long long>(actor->mesh.meshId));
     }
 }
 
@@ -840,35 +985,31 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
     actorPanelFocused_ = false;
     const auto* mainViewport = ImGui::GetMainViewport();
-    // Standard two-row toolbar: row 1 is menus + scene actions, row 2 is render
-    // settings + status. The height is derived from the current style so a font,
-    // DPI or padding change can never make the bar overlap the docked panels.
+    // BeginMenu needs a native horizontal menu bar. SameLine in a normal
+    // window leaves menus in vertical mode, consuming the remaining width.
+    // Reserve the menu decoration plus one padded row of rendering controls.
     const ImGuiStyle& style = ImGui::GetStyle();
     const float rowHeight = ImGui::GetFrameHeight();
-    const float toolbarHeight = style.WindowPadding.y * 2.0f + rowHeight * 2.0f + style.ItemSpacing.y + 1.0f;
+    const float toolbarHeight = rowHeight * 2.0f + style.WindowPadding.y * 2.0f + style.WindowBorderSize * 2.0f;
     dockManager_.beginFrame(toolbarHeight);
     ImGui::SetNextWindowViewport(mainViewport->ID);
-    ImGui::SetNextWindowPos(mainViewport->Pos);
-    ImGui::SetNextWindowSize({mainViewport->Size.x, toolbarHeight});
+    ImGui::SetNextWindowPos(mainViewport->WorkPos);
+    ImGui::SetNextWindowSize({mainViewport->WorkSize.x, toolbarHeight});
     ImGui::Begin("RestArtEngine Editor", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoSavedSettings);
-    // Row 1: menus and scene-wide actions.
-    dockManager_.drawLayoutMenu();
-    ImGui::SameLine();
-    drawEditMenu();
-    ImGui::SameLine();
-    drawUiMenu();
-    ImGui::SameLine();
-    commandButton("scene.save");
-    ImGui::SameLine();
-    if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Save All")) saveAll(renderer);
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
-    // Row 2 starts on a new line automatically (no SameLine after the status).
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar);
+    if (ImGui::BeginMenuBar()) {
+        dockManager_.drawLayoutMenu();
+        drawEditMenu();
+        drawUiMenu();
+        commandButton("scene.save");
+        if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
+        if (ImGui::Button("Save All")) saveAll(renderer);
+        ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
+        ImGui::EndMenuBar();
+    }
+    // EndMenuBar restores the content cursor below the menu decoration.
     ImGui::SetNextItemWidth(110);
     int path = settings.path == renderer::RenderPath::Deferred ? 1 : 0;
     if (ImGui::Combo("##pipeline", &path, "Forward\0Deferred\0"))
@@ -882,10 +1023,12 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 
+    drawGarbageCollection();
 
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer, materialPreview());
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer,
+        [this] { duplicateForDrag(); }, materialPreview());
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
-        dockManager_.requestFocus(EditorPanel::Scene);
+        dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
     trackTransformEdit();
 
@@ -894,7 +1037,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         drawScene();
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
-    dockManager_.drawPanel(EditorPanel::Details, [&] { drawMeshDetails(); });
+    dockManager_.drawPanel(EditorPanel::Details, [&] {
+        drawInstanceDetails();
+        actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    });
     dockManager_.drawPanel(EditorPanel::Settings, [&] {
         ImGui::TextDisabled("Scene");
         ImGui::Text("Actors: %zu", world_.actors.size());
@@ -949,10 +1095,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawMaterialWindow(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -988,7 +1134,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     // Outliner/commands can change the selection after the viewport was drawn.
     // Queue their activation once, then retain the final selection as baseline.
     if (selectedActor_ != sceneInspectorActor_)
-        dockManager_.requestFocus(EditorPanel::Scene);
+        dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
 }
 

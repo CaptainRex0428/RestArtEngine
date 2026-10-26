@@ -24,6 +24,7 @@ project "RestArtEngine"
 		DepIncludeDir["ImGuizmo"]
 	}
 
+	-- Resolve Win32/DX11 imports at the executable link, not inside DearImGui.lib.
 	links
 	{
 		"DearImGui",

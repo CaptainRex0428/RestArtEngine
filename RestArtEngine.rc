@@ -6,6 +6,7 @@
 #define IDI_RAENGINE 101
 
 IDI_RAENGINE ICON "assets/icons/RAEngine.ico"
+RAENGINE_LOGO RCDATA "assets/icons/RAEngine.png"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,2,0,0

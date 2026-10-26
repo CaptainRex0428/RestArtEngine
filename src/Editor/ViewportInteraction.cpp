@@ -168,6 +168,7 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
 bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
                                const assets::AssetLibrary& assets, std::vector<scene::ActorId>& selection,
                                scene::ActorId& selected, renderer::SceneRenderer& renderer,
+                               const std::function<void()>& duplicateForDrag,
                                const assets::MaterialAsset* materialOverride) {
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
@@ -255,8 +256,9 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
 
     // Right-drag orbits; Alt+left-drag is the DCC-style alternative.
     const bool altOrbiting = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    if (canCamera && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
-        (io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))) orbiting_ = true;
+    if (canCamera && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) orbiting_ = true;
+    // Alt+left is claimed after this frame's gizmo hit test. A handle owns
+    // duplication; otherwise the same gesture starts camera orbiting.
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) && !altOrbiting) orbiting_ = false;
     if (orbiting_ && hovered_) {
         settings.cameraYaw -= io.MouseDelta.x * .008f;
@@ -318,10 +320,23 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         // Scale is always along the Actor's own axes: world scaling a rotated
         // object would require shear, which a position/rotation/scale cannot store.
         const XMMATRIX pivotBefore = actorMatrix(actor->transform);
-        if (ImGuizmo::Manipulate(&viewData._11, &projectionData._11, operations[operation_],
+        const bool manipulated = ImGuizmo::Manipulate(&viewData._11, &projectionData._11, operations[operation_],
             local_ || operation_ == 2 ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &matrix._11,
-            nullptr, snap_ ? snap : nullptr)) {
-            changed = applyMatrix(matrix, operation_, actor->transform);
+            nullptr, snap_ ? snap : nullptr);
+        const bool nowUsing = ImGuizmo::IsUsing();
+        if (nowUsing && !usingGizmo_) duplicateOnDrag_ = io.KeyAlt;
+        scene::Transform next = actor->transform;
+        if (manipulated && applyMatrix(matrix, operation_, next) &&
+            (!duplicateOnDrag_ || ImGui::IsMouseDragging(ImGuiMouseButton_Left))) {
+            if (duplicateOnDrag_) {
+                // Copy before applying the first delta, with no arbitrary
+                // offset. Appending Actors may invalidate every old pointer.
+                duplicateForDrag();
+                actor = world.findActor(selected);
+                duplicateOnDrag_ = false;
+            }
+            actor->transform = next;
+            changed = true;
             // Group transform: every other selected Actor is moved by the same
             // world-space delta the gizmo applied to the pivot.
             if (changed && selection.size() > 1) {
@@ -345,8 +360,11 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
             }
         }
         gizmoHovered = ImGuizmo::IsOver();
-        usingGizmo_ = ImGuizmo::IsUsing();
+        usingGizmo_ = nowUsing;
     } else usingGizmo_ = false;
+    if (!usingGizmo_) duplicateOnDrag_ = false;
+    if (canCamera && !usingGizmo_ && !gizmoHovered && io.KeyAlt &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) orbiting_ = true;
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         pickedThisFrame_ = true;
@@ -356,20 +374,12 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
             // the clicked Actor as the primary one.
             const auto it = std::find(selection.begin(), selection.end(), hit);
             if (it != selection.end()) selection.erase(it); else selection.push_back(hit);
-            selected = hit;
+            selected = selection.empty() ? 0 : selection.back();
         } else {
             selected = hit;
             selection.assign(hit ? 1 : 0, hit);
         }
     }
-    ImGui::SetCursorScreenPos({imageMin.x + 8, std::max(imageMin.y + 8, imageMax.y - 23)});
-    const char* hint = snap_ ? "Snap: Move 0.5 | Rotate 15 deg | Scale 0.1" :
-        "LMB select | RMB/Alt+LMB orbit | MMB pan | Wheel zoom | F focus";
-    const ImVec2 textPos = ImGui::GetCursorScreenPos();
-    const ImVec2 textSize = ImGui::CalcTextSize(hint);
-    ImGui::GetWindowDrawList()->AddRectFilled({textPos.x - 4, textPos.y - 2},
-        {textPos.x + textSize.x + 4, textPos.y + textSize.y + 2}, IM_COL32(12, 18, 26, 210), 3);
-    ImGui::TextColored({.85f, .9f, 1.0f, 1.0f}, "%s", hint);
     ImGui::End();
     return changed;
 }

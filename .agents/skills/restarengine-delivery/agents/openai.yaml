@@ -1,0 +1,4 @@
+interface:
+  display_name: "RestArtEngine Delivery"
+  short_description: "Verify engine changes, integration, and completion evidence"
+  default_prompt: "使用 $restarengine-delivery 为本轮引擎改动选择验证，并核验子任务与集成交付证据。"

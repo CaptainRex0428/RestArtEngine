@@ -59,6 +59,7 @@ Makefile
 imgui.ini
 RestArtEngine.imgui.ini
 RestArtEngine.theme.ini
+RestArtEngine.gc.json
 RestArtEngine.panels.ini
 
 # JetBrains Rider - keep only shared project settings, ignore machine-local state

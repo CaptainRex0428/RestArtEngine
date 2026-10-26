@@ -1,10 +1,15 @@
 param([string]$Executable = '')
 $ErrorActionPreference = 'Stop'
+$windowExecutable = $Executable
+. (Join-Path $PSScriptRoot 'Test-Capture.ps1') -HelpersOnly
+$Executable = $windowExecutable
 $root = Split-Path $PSScriptRoot -Parent
 if (!$Executable) { $Executable = Join-Path $root 'bin/windows-x86_64/Debug/RestArtEngine.exe' }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $outputDir = Join-Path $root 'artifacts/window-test'
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+$testProject = Join-Path $outputDir ('Sandbox-' + [guid]::NewGuid().ToString('N'))
+Copy-Item -LiteralPath (Join-Path $root 'Projects/Sandbox') -Destination $testProject -Recurse
 if (!('WindowTestNative' -as [type])) { Add-Type @"
 using System;
 using System.Text;
@@ -22,7 +27,8 @@ public static class WindowTestNative {
 "@
 }
 $events = [System.Collections.Generic.List[string]]::new()
-$process = Start-Process -FilePath $Executable -ArgumentList @('--capture-dir', ('"' + $outputDir + '"')) -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $outputDir 'stdout.txt') -RedirectStandardError (Join-Path $outputDir 'stderr.txt')
+$process = Start-Process -FilePath $Executable -ArgumentList @('--project', ('"' + $testProject + '/Sandbox.raproject"')) -WorkingDirectory $outputDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $outputDir 'stdout.txt') -RedirectStandardError (Join-Path $outputDir 'stderr.txt')
+$null = $process.Handle
 try {
     $script:testWindow = [IntPtr]::Zero
     $script:testProcessId = $process.Id
@@ -46,10 +52,14 @@ try {
     if($process.HasExited) {throw 'Default application did not stay alive'}
     $events.Add('PASS: default application stays alive and has a native window.')
     function Send-Key([int]$key) {
+        Focus-CaptureOwner $window
         [WindowTestNative]::PostMessage($window,0x100,[IntPtr]$key,[IntPtr]::Zero) | Out-Null
         Start-Sleep -Milliseconds 150
         [WindowTestNative]::PostMessage($window,0x101,[IntPtr]$key,[IntPtr]::Zero) | Out-Null
         Start-Sleep -Milliseconds 250
+        if ($key -eq 0x78) {
+            Save-CaptureDialog $process.Id (Join-Path $outputDir ('window-' + [guid]::NewGuid().ToString('N') + '.bmp'))
+        }
     }
     Send-Key 0x78
     foreach($size in @(@(980,700),@(1600,960),@(1280,800))) {

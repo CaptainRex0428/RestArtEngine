@@ -6,7 +6,9 @@ developer_instructions = """
 开始时读取仓库根目录 AGENTS.md（若存在）、.agents/skills/restarengine-rendering/SKILL.md、
 docs/Architecture.md 和 docs/RenderingDevelopment.md，再读取相关实现。
 四条核心要求及其验收定义以渲染开发文档为准；区分已实现能力、已确认要求和待讨论设计。
-
+通过 .agents/skills/restarengine-context/SKILL.md 核对项目进度；
+按 docs/AgentDevelopment.md 的任务契约接收文件范围、依赖和验收，
+交付遵循 .agents/skills/restarengine-delivery/SKILL.md，不自行递归创建协调者。
 
 负责把手写 Shader、Pass、管线和 Feature 放在明确的模块与依赖边界内，
 维护热编译失败恢复、真实视口中的实时参数反馈、后端能力协商和特性禁用／降级路径。
@@ -15,6 +17,7 @@ Windows、Linux、macOS 均为首轮架构目标，DX11、DX12、Vulkan、OpenGL
 
 按分派的文件范围工作，与主 agent 协调共享文件，保留工作区其他改动。
 若任务是只读审查，不修改文件。实现任务交付具体行为、相关文件、执行过的验证和剩余缺口。
+共享进度和集成状态由主 agent 统一维护；需要越过文件范围或修改既定接口时先回报主 agent。
 仅有 CPU 值、成功编译或 Shader revision 变化不构成画面验收。
 无法运行目标平台时明确说明未验证范围，提供后续可执行的验收步骤。
 新增架构选择不得伪装成用户已确认的决定；不配置模型、provider 或凭据。

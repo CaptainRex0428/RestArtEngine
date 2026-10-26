@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Scene/World.h>
+#include <RestArtEngine/Core/GarbageCollector.h>
 #include <RestArtEngine/Project/Project.h>
 #include <RestArtEngine/Editor/ViewportInteraction.h>
 #include <RestArtEngine/Renderer/SceneRenderer.h>
@@ -16,9 +17,11 @@ namespace rae::editor {
 class SceneEditor {
 public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
+    // Borrowed service; the caller keeps it alive until detached or editor destruction.
+    void setGarbageCollector(rae::GarbageCollector* gc, const std::filesystem::path& settingsPath);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
-    // May also be submitted while the main window is minimized or its UI is hidden.
-    // Closing the independent tool preserves the material and Shader session drafts.
+    // Also submitted while the scene window is minimized or its UI is hidden.
+    // The tool keeps the same material/shader drafts when its OS window closes.
     void drawMaterialWindow(renderer::SceneRenderer&);
     void resetLayout() { dockManager_.resetLayout(); }
     void requestClose() { closeRequested_ = true; }
@@ -29,7 +32,7 @@ public:
     // existing commit/persistence boundaries. Valid until the next editor edit.
     [[nodiscard]] const assets::MaterialAsset* materialPreview() const;
     scene::ActorId selectedActor() const { return selectedActor_; }
-    // Full selection; the primary Actor (gizmo pivot / Scene inspector target) is selectedActor().
+    // Full selection; the primary Actor (gizmo pivot / Scene and Details target) is selectedActor().
     [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
     [[nodiscard]] bool isSelected(scene::ActorId id) const;
     // Editor transactions (Ctrl+Z / Ctrl+Y). Exposed so the self-test and any
@@ -43,13 +46,15 @@ public:
 private:
     void drawOutliner();
     void drawScene();
-    void drawMeshDetails();
+    void drawInstanceDetails();
     void selectActor(scene::ActorId id, bool additive);
     void deleteSelectedActor();
     void duplicateSelectedActor();
+    void duplicateForDrag();
     void registerCommands();
     void drawEditMenu();
     void drawUiMenu();
+    void drawGarbageCollection();
     bool commandButton(std::string_view id);
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.
@@ -88,12 +93,22 @@ private:
     bool openMaterialTab_ = false, openShaderTab_ = false;
     bool materialWindowOpen_ = false, materialWindowFocusRequested_ = false;
     bool materialWindowFocused_ = false;
+    rae::GarbageCollector* garbageCollector_ = nullptr;
+    std::filesystem::path garbageCollectionSettingsPath_;
+    rae::GarbageCollectionSettings garbageCollectionDraft_;
+    bool garbageCollectionOpen_ = false, garbageCollectionDraftDirty_ = false;
+    bool garbageCollectionFocused_ = false;
+    bool garbageCollectionRequested_ = false;
+    std::uint64_t garbageCollectionRequestCount_ = 0;
+    std::string garbageCollectionMessage_;
     EditorDockManager dockManager_;
     EditorCommandRegistry commands_;
     UndoStack undo_;
     std::vector<scene::ActorId> selection_;
     struct ActorSnapshot { scene::ActorId id = 0; scene::Transform transform; };
     std::vector<ActorSnapshot> settledSelection_, dragStartTransforms_;
+    std::vector<scene::ActorId> dragCopies_, dragSourceSelection_;
+    scene::ActorId dragSourcePrimary_ = 0;
     scene::Transform settledTransform_{};
     scene::ActorId settledTransformActor_ = 0;
     scene::Transform detailsBefore_{};

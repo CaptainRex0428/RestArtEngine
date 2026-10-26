@@ -8,31 +8,49 @@
 
 以下提到的 `Content/` 和材质 `Shaders/` 都是**当前工程内的目录**。默认 Sandbox 分别对应引擎仓库内的 `Projects/Sandbox/Content/` 和 `Projects/Sandbox/Shaders/`。引擎根目录只保留公共 Shader 管线与默认材质模板，编辑器不会将工程材质或导入网格保存到引擎根目录。
 
-如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格资源列表；材质与 Shader 编辑位于独立系统窗口，Mesh 信息位于左侧 Scene；尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。阅读较长源码时可调整独立材质窗口的尺寸。
+如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格资源列表；左侧 Details 跟随场景中选中的 Actor 实例，与资源列表的浏览选择分开。材质参数与 Shader 编辑在按需打开的系统独立窗口中。尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。
 
 ## 面板布局
 
-六个面板（World Outliner、Scene、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左上 Outliner、左下 Scene / Details 页签、右侧设置、底部 Content 和中央场景视口。
+六个面板（World Outliner、Scene、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左上 Outliner、左下同组的 Scene / Details 页签、右侧设置、底部 Content 和中央场景视口。
+
+**Scene** 提供主选中 Actor 的名称、可见性、变换与 Mesh / Material 分配编辑；**Details** 显示该场景实例的名称、Actor ID、网格类型／几何数量／来源以及它当前使用的材质。即使两个实例使用同一个 Sphere 网格，Details 也只显示当前主实例的信息，不汇总其他实例的材质。点击 Outliner 或视口中的 Actor 切到 Details；底部 Mesh 浏览不改变场景选择、Details 内容或强制切页。多选时明确显示主实例，无选中实例时显示空状态。手动切页后不会每帧强制跳回。
 
 - 拖动面板标签，或悬浮窗口的标题栏，在停靠预览出现时松开鼠标。
 - 放到目标区域的左、右、上、下停靠目标，可分割区域；放到中央目标，可将两个面板合并到同一个标签组。
-- 拖离标签组可悬浮，再拖回停靠目标即可回嵌。工作区面板悬浮范围限于主编辑器窗口；材质编辑器使用独立系统窗口，可移出主窗口。
+- 六个工作区面板拖离标签组后可在主编辑器窗口内悬浮，再拖回停靠目标即可回嵌。材质编辑器是单独的系统窗口，可移出主窗口；其他面板仍保持主窗口内的工作方式。
 - 拖动相邻面板间的分隔条调整占比；悬浮窗口可通过边框调整尺寸。Scene Viewport 会跟随本帧内容区域改变大小。
 - 顶部 **Layout** 菜单可以聚焦指定面板；**Restore default layout** 重建默认六面板布局。
 
 Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机和 Gizmo 使用该图像的当前屏幕矩形。视口窗口浮动或与其他面板合并标签后，场景图像仍跟随它显示，不占用原位置的固定矩形。
 
-交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局，之后保留用户的停靠安排。自动化自测不加载个人布局文件。Content & Editors 仅保留 Meshes；Material Editor / Shader Editor 位于独立材质窗口。
+交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局。已有五面板布局仅在原 Details 所在组补入 Scene；原 Details 自由浮动时保留其位置尺寸并组成双页签，其他区域不重建。已有 Scene 的布局按用户安排保留。自动化自测不加载个人布局文件。Content & Editors 内只保留 Meshes 资源列表及导入／创建入口；Material Editor / Shader Editor 两页位于独立材质窗口中。
 
-## 工具栏
+## 窗口外框与工具栏
 
-顶部工具栏使用两行：第一行放菜单、场景保存 / 加载与保存状态，第二行放渲染路径、检查视图、光追、截图和运行状态。高度由当前字体行高、内边距和行距计算，DockSpace 从工具栏下方开始。
+场景编辑器与 Project Manager 使用引擎绘制的标题栏和主题边框，跟随 Black / Dark Blue 配色；场景窗口标题显示当前工程名。右侧提供最小化、最大化 / 还原和关闭按钮，关闭仍经过未保存修改提示。拖动标题栏移动窗口，双击标题栏最大化 / 还原；边缘和角落可缩放，标题栏图标或 Alt+Space 可打开 Windows 系统菜单。
+
+最大化使用显示器工作区，避开任务栏；F11 隐藏标题栏与编辑面板，退出后恢复原窗口。最大化按钮保留 Windows 的 `HTMAXBUTTON` 命中语义以支持系统吸附布局，具体弹出界面取决于 Windows 版本和系统设置。自定义标题栏属于主应用窗口，不会将编辑器面板变成独立系统窗口。
+
+顶部工具栏使用两行：第一行是 ImGui 原生菜单栏，放置 Layout / Edit / UI、场景保存 / 加载与保存状态；第二行是窗口内容区，放置渲染路径、检查视图、光追、截图和运行状态。高度包含菜单栏、一行控件、上下内边距及边框，DockSpace 从工具栏下方开始。顶层菜单向下展开，弹出层会临时覆盖下方内容，关闭后恢复显示。
 
 ## 主题切换
 
 已接入 `UI > Theme > Black / Dark Blue`（提交 `d62960b`），默认 Black，Dark Blue 保留原蓝色配色；两套配色均已截图验证。
 
 切换通过 `EditorTheme` 更新 ImGui 配色，两种主题共享间距和圆角等几何样式。选择保存到进程工作目录下的 `RestArtEngine.theme.ini`，启动时读取；文件缺失或内容无法识别时回退 Black。这是本机偏好，不属于工程资产，也不是系统用户目录中的全局设置。字体加载仍由 `ImGuiLayer` 负责，尚无字体 / DPI 配置界面。
+
+## Capture 截图
+
+点击工具栏 `Capture` 或按 `F9`，系统弹出“另存为”对话框，由用户选择保存位置和文件名，格式为 BMP。初次默认打开系统“图片”目录，同次会话记住上次选址；保存到已有文件时系统要求确认覆盖。取消不会生成文件，保存失败会提示并保留编辑器，不自动写入引擎或工程的 `screenshots` 目录。截图内容仍为当前渲染窗口画面（包括当前显示的编辑器 UI）。
+
+`--capture-dir` 仅用于批量／自测，手动 Capture 始终弹框。`--frames N` 本身只运行 N 帧，需要自动导出时显式搭配 `--capture-dir PATH` 或 `--capture-temp`。用户选择保存的图片不参与 GC。
+
+## 资源回收设置
+
+通过 `UI → Garbage collection...` 调整自动回收：默认每 60 秒检查一次，内存缓存闲置 60 秒后可回收，受管临时截图保留 1 小时。修改后点击 `Apply & save` 生效并保存到本机 `RestArtEngine.gc.json`；`Collect now` 在帧末执行一轮，即使关闭自动回收也可使用，仍遵守闲置和保留条件。
+
+窗口显示最近回收的 CPU 内存、GPU 资源估算、临时截图数量及耗时。场景对象、资产、撤销记录和普通截图保留；批量截图需显式使用 `--capture-temp` 才参与到期清理。完整边界与命令行选项见 [资源 GC 与临时 Capture](GarbageCollection.md)。
 
 ## Rider 编译按钮
 
@@ -42,10 +60,10 @@ Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild 
 
 ## Actor 与 Mesh
 
-1. 在 Outliner 中选择 Actor，或直接左键点击视口中的网格。Scene 显示其名称、可见性、位置、旋转与缩放。
+1. 在 Outliner 中选择 Actor，或直接左键点击视口中的网格。左侧切到 Details，显示被点击的具体实例；需要编辑名称、可见性和变换时切换 Scene 页。
 2. 用 `+ Sphere` 或 `+ Cube` 新建 Actor，或用 Duplicate 复制当前 Actor。复制得到独立 Actor ID，仍可共享原来的 Mesh / Material 资产。Plane 可以在 Content 的 Meshes 页选择后用 `Add Actor from mesh` 创建。
 3. 在 Scene 中更换 Mesh 与 Material 引用。使用 Outliner 的 `Delete` 按钮，或右键 Actor 后选择 `Delete Actor` 删除场景实例；对应的 Mesh 与 Material 资产保留。
-4. 在 Content 的 Mesh 页面导入 OBJ；源文件复制到 `Content/Meshes/`，再将该 Mesh 分配给 Actor。
+4. 在 Content 的 Meshes 页面导入 OBJ；源文件复制到 `Content/Meshes/`。通过 `Add Actor from mesh` 创建实例，或在 Scene 中将它分配给现有 Actor；仅浏览或导入资源不会把它当作场景实例显示在 Details。
 5. `Save Scene` 保存到工程描述中的 `defaultScene`，默认是 `Content/Scenes/Default.rascene`。重新加载场景会读取保存的 Actor 与资产引用；加载失败时保留当前场景并显示错误。
 
 旋转使用度，场景 Y 轴向上。OBJ 暂时读取位置和法线，不读取贴图、UV、MTL 或骨骼；需要纹理的 DCC 材质不会自动迁移。缺少法线时由导入器生成，复杂多边形建议导入前先三角化。
@@ -63,7 +81,8 @@ Rider 中的重新编译使用 IDE 自带的 **Rebuild Solution** 或 **Rebuild 
 | 工具栏 World / Local | 切换移动和旋转的世界 / 局部坐标模式；缩放始终沿局部轴 |
 | 工具栏 Snap | 开关步进吸附：移动 0.5 单位、旋转 15°、缩放 0.1 |
 | 右键拖动视口 | 环绕观察场景 |
-| Alt + 左键拖动视口 | 环绕观察场景（与右键相同） |
+| Alt + 左键拖动变换手柄 | 复制选中的 Actor 并拖动副本；多选时复制整组 |
+| Alt + 左键拖动视口（手柄以外） | 环绕观察场景（与右键相同） |
 | 中键拖动视口 | 平移相机焦点 |
 | 视口滚轮 | 调整相机距离 |
 | 选中 Actor 后按 F | 相机聚焦到该 Actor |
@@ -76,22 +95,25 @@ W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete
 
 多选时 Scene 显示主 Actor，Gizmo 以主 Actor 为枢轴对整组应用变换；一次拖拽记为一条撤销记录。Scene 的位置、旋转、缩放编辑在控件结束编辑时记录，同一 Actor 的同一字段在 700ms 内连续提交可合并。新增、复制、删除也支持撤销；撤销批量删除会恢复所有实例和顺序，但当前只选中其中一个恢复的 Actor。
 
+按住 Alt 后从变换手柄开始拖动，会在首次有效拖动时复制，原件保留在原位置，副本共享原 Mesh / Material 并成为新选择。没有额外的固定位置偏移，单击不移动不会生成副本；每次手势只复制一次，中途松开 Alt 不影响继续拖动，普通拖动开始后再按 Alt 不切换为复制。整组“复制＋最终变换”合为一条历史：Ctrl+Z 删除副本并恢复原选中集合，Ctrl+Y 恢复同一批副本的 ID、最终变换与选择。该操作和 Ctrl+D 的逐个复制历史不同。
+
 历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿及 Actor 名称、可见性、Mesh / Material 引用修改尚未纳入历史。Actor 仍持有一个 StaticMeshComponent，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
-
-
-### Mesh Details 与独立材质窗口
-
-底部 Content 保留 Meshes 资源列表与导入／创建入口。点击资源后左侧 Details 显示 Mesh 类型、顶点／三角形数量、来源及使用该 Mesh 的场景材质引用；材质来自 Actor 引用并去重，不表示 Mesh 资产自身绑定材质槽。点击 Actor 显示 Scene，点击 Mesh 显示 Details，手动页签不会按帧被强制切回。
-
-Scene 的 `Edit assigned material`、Details 的材质名称、Content 的 `Open material editor` 或 `UI > Material editor...` 打开同一系统材质窗口。窗口包含 Material Editor / Shader Editor，重复打开复用并聚焦，最小化后可恢复，关闭保留会话草稿；主窗口最小化时仍可编辑。退出引擎继续处理未保存状态，参数 Apply／Save 和切换确认语义沿用原行为。
-
-已有五面板布局仅在旧 Details 所在位置补入 Scene；自由浮动 Details 按原几何组成双页签。已有 Scene 配置不重置，其他区域安排继续保留。
 
 ## Material 参数编辑
 
+### 打开独立材质窗口
+
+在 Scene 的 `Static Mesh Component` 中点击 **Edit assigned material**，打开该 Actor 当前使用的材质。也可以先选择场景中的实例，再点击 Details 中的当前材质名称。两个实例即使共享同一 Mesh，也按各自的材质引用显示；此处不展示整个 Mesh 在场景中的材质集合。打开的仍是共享材质资产编辑器，修改会影响所有引用该材质的实例，不会自动创建材质副本。
+
+独立窗口包含 **Material Editor** 和 **Shader Editor** 两页，具有系统标题栏、边框和任务栏入口，可移到引擎主窗口外；重复点击材质会复用并聚焦已有窗口，最小化后可恢复。没有场景引用时可用 Content 中的 **Open material editor** 或 `UI > Material editor...` 打开材质库，再选择或新建材质。
+
+关闭材质窗口只隐藏界面，当前会话中的参数草稿、实时预览及 Shader 草稿继续保留；重新打开即可继续。主窗口最小化时，可见材质窗口仍可编辑；退出整个引擎仍走原有未保存修改提示。窗口间移动不代表已实现逐显示器字体 DPI 自动缩放。
+
+### 编辑与保存
+
 Ground 默认启用 `Grid`：世界 XZ 平面每 1 个单位一格，每 5 个单位加粗。Material Editor 的 `Grid` 复选框随材质 Apply / Save 保存，可配合 Base Color 调整底色；前向、延迟、Unlit 与解析反射都使用相同网格材质。
 
-独立系统窗口中的 Material Editor 可以创建和选择材质，调整 Base Color、Roughness、Metallic 与 Grid。颜色编辑、滑块拖动和开关变化在同帧渲染中预览，所有引用该材质的 Actor 一起更新，前向、延迟及光追反射使用同一组预览参数；无需点击 Apply 或重新编译 Shader。
+独立材质窗口中的 Material Editor 可以创建和选择材质，调整 Base Color、Roughness、Metallic 与 Grid。颜色编辑、滑块拖动和开关变化在同帧渲染中预览，所有引用该材质的 Actor 一起更新，前向、延迟及光追反射使用同一组预览参数；无需点击 Apply 或重新编译 Shader。
 
 界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/{id}.ramat`；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
 
@@ -107,7 +129,7 @@ Ground 默认启用 `Grid`：世界 XZ 平面每 1 个单位一格，每 5 个�
 
 ## Shader 编辑与 Apply
 
-独立窗口的 Shader 页面编辑**当前工程**的 `Shaders/Materials/Standard.hlsli`，默认完整路径是 `Projects/Sandbox/Shaders/Materials/Standard.hlsli`。这是当前工程所有标准材质共享的 HLSL 源码。材质参数资产保存每个材质的数值，Shader 决定这些数值如何参与表面计算。修改共享 Shader 会影响该工程中使用它的所有 Actor，不会修改引擎默认模板或其他工程。
+独立材质窗口的 Shader Editor 页面编辑**当前工程**的 `Shaders/Materials/Standard.hlsli`，默认完整路径是 `Projects/Sandbox/Shaders/Materials/Standard.hlsli`。这是当前工程所有标准材质共享的 HLSL 源码。材质参数资产保存每个材质的数值，Shader 决定这些数值如何参与表面计算。修改共享 Shader 会影响该工程中使用它的所有 Actor，不会修改引擎默认模板或其他工程。
 
 当前可编辑入口为：
 
@@ -143,7 +165,7 @@ Apply 与 Save 的区别：
 
 编译器重新生成前向与延迟等所需入口。所有入口和 GPU Shader 创建成功后才替换现有管线；单个入口失败不会留下新旧 Shader 混用的半更新状态。失败草稿仍可继续修改，不会因为编译错误而黑屏或关闭程序。
 
-退出引擎时如有未保存的场景、材质或 Shader 修改，会提供 `Save All & Exit`、`Discard & Exit` 和 Cancel。Shader 编译失败时不能通过保存退出，需修正草稿或明确丢弃修改。
+关闭窗口时如有未保存的场景、材质或 Shader 修改，会提供 `Save All & Exit`、`Discard & Exit` 和 Cancel。Shader 编译失败时不能通过保存退出，需修正草稿或明确丢弃修改。
 
 **引擎目录**的 `Shaders/Private/Scene.hlsl` 提供当前渲染管线和工程材质入口之间的接口；引擎的 `Shaders/Materials/Standard.hlsli` 是默认模板，编辑器 Save 不覆盖它。编辑工程的 `Standard.hlsli` 时保留入口函数签名与结构；想改变顶点布局、常量缓冲布局或渲染入口，需要同步修改渲染器 C++。Apply 会通过反射检查绑定、常量布局与输入输出接口，不兼容的修改会被拒绝并保留原运行版本。
 
@@ -151,7 +173,7 @@ Apply 编译当前在内存里的编辑内容，外部编辑器保存的内容�
 
 ## 预览与验证
 
-F11 进入视口全屏：主窗口无边框覆盖所在显示器，隐藏编辑面板。再次 F11、Esc 或 F1 恢复之前的窗口与 UI 显示状态；如果进入全屏前已隐藏 UI，退出后仍保持隐藏。Esc 在普通窗口模式仍是请求关闭。上述快捷键在文本输入期间不触发。已打开的材质窗口仍可使用；应用级快捷键限制在主窗口焦点，工具窗文本输入不会触发场景操作。
+F11 进入视口全屏：主窗口无边框覆盖所在显示器，隐藏主工作区面板，已经打开的独立材质窗口仍可使用。再次 F11、Esc 或 F1 恢复之前的窗口与 UI 显示状态；如果进入全屏前已隐藏 UI，退出后仍保持隐藏。Esc 在普通窗口模式仍是请求关闭。上述快捷键只在主系统窗口具有焦点且没有文本输入时触发；材质窗口的键盘操作不会关闭引擎或切换主窗口全屏。该模式不改变其他工作区面板的 Dock 范围，也不代表独占显示模式。
 
 F2 切换 Forward / Deferred；F3 开关解析光追效果；F1 隐藏 / 显示面板；右键拖动视口旋转相机，滚轮缩放；F9 截图。Lit 显示完整光照，Unlit 显示不受光照影响的材质本色并保留曝光和色调映射，Albedo 用于检查不经过曝光和色调映射的基础颜色。Viewport 的 Shadow method 可选择 2x2 PCF、硬比较、3x3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追或禁用阴影；PCSS 复用现有深度图并执行 blocker search 与百分比渐进滤波，CSM 使用两个方向光级联切片改善近景和远景的深度分配，GTAO 与接触阴影使用延迟 G-buffer，前向路径回退到普通深度阴影。
 

@@ -60,10 +60,9 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 **编辑器**
 
-- Dear ImGui Docking 工作区：Outliner、Scene、Details、Viewport settings、Content & Editors 和 Scene Viewport 六个面板可分割停靠、合并标签及悬浮；Scene / Details 默认在左侧同组。
-- 独立系统材质窗口：点击 Scene 或 Mesh Details 的材质入口打开，可移出主窗口；包含材质参数与共享 HLSL 编辑，关闭保留会话草稿。
+- Dear ImGui Docking 工作区：Outliner、Scene、Details、Viewport settings、Content & Editors 和 Scene Viewport 六个面板可分割停靠、合并标签及悬浮；左侧 Scene / Details 默认以页签切换。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
-- 材质参数拖动时实时预览，Apply 确认、Save 保存，Discard draft 恢复；`Grid` 程序化网格材质。
+- 独立系统材质窗口：从 Scene 或 Details 中当前 Actor 实例的材质入口打开，可移出主窗口，包含材质参数和共享 HLSL 编辑；参数拖动实时预览，Apply 确认、Save 保存，Discard draft 恢复。
 - 所有材质统一提供 `Two-sided` 独立开关，控制背面可见性与背面法线，沿用实时预览和保存流程。
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
@@ -72,6 +71,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Scene 编辑主 Actor。
 - 编辑命令：菜单、按钮与快捷键通过命令注册表执行已接入的动作；双行工具栏按样式计算高度。
 - F11 视口全屏：窗口无边框覆盖当前显示器并隐藏面板，再按 F11 或 Esc 恢复。
+- 自定义窗口标题栏：编辑器与 Project Manager 外观跟随主题，保留窗口拖动、缩放、最小化 / 最大化及关闭确认；F11 同时隐藏标题栏。
+- 资源 GC：可配置检查周期、闲置缓存时间和临时截图保留时间；`UI → Garbage collection...` 调整设置或手动回收，永久截图保留。
 - 启动加载界面：全屏背景 + 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
 
 **工程与分发**
@@ -136,6 +137,8 @@ CMake 目标：
 
 两种构建方式共享源码，输出目录互相独立（CMake 输出到 `build/`；Premake 输出到 `bin/` 与 `settings/`，solution 由 Premake 生成、不提交）。
 
+修改 Premake 配置后先运行 `scripts/GenerateWIN.bat`，再让 IDE 重新加载工程并执行 Rebuild。静态库只归档自身对象，系统导入库由最终程序链接；依赖与警告处理规范见 [Architecture](docs/Architecture.md#构建依赖与警告)。
+
 > 应用图标：项目 logo 为 [`assets/icons/RAEngine.png`](assets/icons/RAEngine.png)，构建时通过 [`RestArtEngine.rc`](RestArtEngine.rc) 嵌入由它生成的 `assets/icons/RAEngine.ico`，因此任务栏与窗口标题栏显示引擎 logo。
 
 ## 快速开始
@@ -150,13 +153,13 @@ CMake 目标：
 
 进入编辑器后：
 
-- Outliner 或视口选 Actor，Scene 改变换与 Mesh / Material；
-- 底部 Content 的 Meshes 导入和选择 Mesh，左侧 Details 查看几何与场景材质引用；点击材质入口在独立系统窗口编辑参数与 HLSL；
+- Outliner 或视口选 Actor，切到左侧 Scene 修改变换与 Mesh / Material；
+- 底部 Content 的 Meshes 用于导入和浏览网格；选择场景中的具体 Actor 后，左侧 Details 显示该实例的网格与当前材质。点击材质或 Scene 的 `Edit assigned material`，在独立系统窗口编辑材质与 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
-编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理六个面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。材质编辑器使用独立系统窗口，其他面板保持主窗口内停靠。
+编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理六个工作区面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。材质编辑器单独使用系统窗口，可移出主窗口；其他面板仍保持主窗口内工作。
 
-顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左上 Outliner、左下 Scene / Details 页签、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；Content 仅保留 Meshes 资源列表，材质参数与 Shader 页位于独立窗口；旧五面板布局在原 Details 位置增量加入 Scene。首次使用 Docking 时会建立新的默认布局，替换旧版自由窗口的位置安排。
+顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左上 Outliner、左下 Scene / Details 页签、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；底部 Content 保留 Meshes，材质参数和 Shader 编辑页位于独立窗口。首次使用 Docking 时建立默认布局；已有五面板布局只在原 Details 所在组补入 Scene，保留其他区域安排。
 
 ## 场景操作
 
@@ -165,10 +168,11 @@ CMake 目标：
 | 左键点击视口网格 | 选择 Actor，并显示变换手柄 |
 | W / E / R / Space | 切换移动 / 旋转 / 缩放工具（Space 循环） |
 | 拖动变换手柄 | 修改选中 Actor 的 Transform |
+| Alt + 拖动变换手柄 | 复制选中 Actor（支持整组）并移动副本，整次操作可一次撤销 |
 | 工具栏 World / Local、Snap | 切换坐标模式、开关步进吸附 |
-| Delete（视口 / Outliner / Scene） | 删除选中 Actor，保留共享 Mesh / Material 资产 |
+| Delete | 删除选中 Actor，保留共享 Mesh / Material 资产；文本编辑时屏蔽 |
 | 右键拖动视口 | 环绕旋转相机 |
-| Alt + 左键拖动 | 环绕旋转相机（与右键一致） |
+| Alt + 左键拖动（手柄以外） | 环绕旋转相机（与右键一致） |
 | 中键拖动视口 | 平移相机焦点 |
 | 视口滚轮 | 推拉相机距离 |
 | 选中 Actor 后按 F | 相机聚焦该 Actor 并适配其包围盒 |
@@ -179,7 +183,7 @@ CMake 目标：
 | F9 / Capture 按钮 | 保存当前画面 |
 | Esc / 关闭窗口 | 退出（有未保存修改时会询问） |
 
-文本输入时 W / E / R / Space / Delete 不会作用于场景。Outliner 与视口支持多选（Ctrl / Shift 点击切换成员，Shift 当前不做连续范围选择），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y，也支持 Ctrl+Shift+Z 重做）。Ctrl+D 复制选中 Actor，Ctrl+S 保存场景。多选复制目前逐个记入撤销历史。
+文本输入时 W / E / R / Space / Delete 不会作用于场景。Outliner 与视口支持多选（Ctrl / Shift 点击切换成员，Shift 当前不做连续范围选择），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y，也支持 Ctrl+Shift+Z 重做）。Ctrl+D 复制选中 Actor，Ctrl+S 保存场景。Ctrl+D 多选复制目前逐个记入撤销历史；Alt＋拖动手柄则将整组复制与最终变换记为一条。
 
 Viewport settings 还可调 Key light、Exposure、VSync、Shadow method，并支持 Reset camera（同时复位焦点）。
 
@@ -273,7 +277,7 @@ Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不�
 
 ## 启动加载界面
 
-打开工程 / 引擎启动期间，窗口会显示 `assets/load/load.png` 全屏加载界面。底部的文案、百分比与进度条全部按**图片的相对比例**定位，替换图片不需要改代码：
+打开工程 / 引擎启动期间，窗口会显示 `assets/load/load.png` 加载界面，完整图片拉伸铺满自定义标题栏下方的主窗口工作区。布局使用主 viewport 的本帧工作区位置与尺寸，支持启用多窗口后的桌面坐标；窗口偏离桌面原点不会裁掉背景或进度文字。底部的文案、百分比与进度条全部按**图片的相对比例**定位，替换图片不需要改代码：
 
 | 元素 | 相对位置 |
 | --- | --- |
@@ -337,13 +341,16 @@ RestArtEngine.exe --forward | --deferred   # 选择渲染路径
 RestArtEngine.exe --rt                     # 开启解析光追阴影与反射
 RestArtEngine.exe --no-ui                  # 不绘制编辑器面板
 RestArtEngine.exe --frames N               # 运行 N 帧后退出（配合 --capture-dir）
-RestArtEngine.exe --capture-dir <path>     # 截图输出目录（默认 screenshots）
+RestArtEngine.exe --capture-dir <path>     # 批量运行／自测的截图输出目录
 RestArtEngine.exe --self-test              # 渲染自测
 RestArtEngine.exe --editor-self-test       # 编辑器自测
+RestArtEngine.exe --gc-self-test           # 资源回收与重建、GC 设置界面自测
+RestArtEngine.exe --gc-interval 30         # GC 检查间隔（秒），也可在 UI 中保存设置
+RestArtEngine.exe --frames 8 --capture-temp # 最后帧截图写入受管临时缓存
 RestArtEngine.exe --help
 ```
 
-截图格式为 BMP，默认写入程序工作目录下的 `screenshots`。
+手动点击 Capture 或按 F9 会打开系统“另存为”对话框，选择位置与文件名后保存 BMP；取消不生成文件，也不默认写入项目。初次默认打开系统“图片”目录，同次会话记住上次选择的目录。`--capture-dir` 只控制批量／自测输出，不能跳过手动保存对话框；单独 `--frames N` 只运行并退出，不自动截图。自测未指定目录时输出到系统临时目录的 `RestArtEngine/Validation`。
 
 ## 当前边界
 
@@ -352,7 +359,7 @@ RestArtEngine.exe --help
 - 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
 - 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称、可见性及 Mesh / Material 引用修改尚未纳入撤销历史。
-- 六个工作区面板在主窗口内停靠，材质编辑器为独立系统窗口；尚无动态面板插件、图钉自动隐藏或命名布局。
+- 六个工作区面板的 Docking 悬浮限于主窗口；材质编辑器可使用独立系统窗口。尚无动态面板插件、命名布局或完整逐显示器字体 DPI 适配。
 - 主题切换已提交（Black / Dark Blue、偏好保存）：`UI → Theme` 切换，两套配色均已截图验证；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
 
@@ -370,6 +377,10 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 
 ## 文档
 
+- [开发状态索引](docs/DevelopmentStatus.md)：需求、进度、源码与验证证据的统一入口
+- [资源 GC](docs/GarbageCollection.md)：回收范围、配置、临时截图保护及验证入口
+- [agent 与 skills 协作](docs/AgentDevelopment.md)：`$restarengine-core` 主引擎协调、专项分派与集成验收
+- [渲染开发要求](docs/RenderingDevelopment.md)：热编译、实时参数、跨平台目标与现状缺口
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
 - [GUI 设计与进度](docs/GodotGuiStudy.md)：Godot 职责划分参考、已提交功能、工作区实现与验证范围
@@ -377,5 +388,3 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节
 - [阴影方案](docs/ShadowMethods.md)：各方案资源路径、取舍与验证矩阵
-
-GUI 专项入口见 [GUI 设计规范](docs/GuiDevelopment.md) 与 [GUI 协作约定](docs/AgentDevelopment.md)。

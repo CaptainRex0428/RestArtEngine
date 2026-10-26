@@ -27,13 +27,9 @@ project "DearImGui"
 		"imgui/backends"
 	}
 
-	links
-	{
-		"d3d11",
-		"dxgi",
-		"d3dcompiler",
-		"dwmapi"
-	}
+	-- Archive only ImGui objects. Premake forwards StaticLib links to lib.exe,
+	-- which would merge system import libraries and duplicate their descriptors.
+	-- The consuming executable declares Win32/DX11 libraries in RestArtEngine.lua.
 
 	location (LocationDir)
 	targetdir (TargetDir)

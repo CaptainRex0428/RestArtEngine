@@ -6,6 +6,8 @@
 
 ## 目录约定
 
+资源回收入口见 [GarbageCollection.md](GarbageCollection.md)：Core 负责可配置调度和受管临时截图，Renderer／ImGui 各自回收闲置缓存；实际调用位于 Project Manager／编辑器的帧末。场景、CPU 资产、草稿和撤销历史继续按其原有生命周期管理。用户 Capture／F9 由应用层打开原生保存对话框，Renderer 只接收选定路径；取消不导出，用户图片不登记到 GC。批量／测试截图通过显式输出参数单独路由，不恢复默认项目截图目录。
+
 | 目录 | 职责与放置规则 |
 | --- | --- |
 | `include/RestArtEngine/Core/`、`src/Core/` | 引擎生命周期等公共基础设施。 |
@@ -125,7 +127,7 @@ SceneEditor
 
 当前每个 Actor 有一个 `StaticMeshComponent`，没有通用组件注册、反射或 ECS 调度系统。`Transform` 保存位置、以度为单位的 XYZ 欧拉旋转和缩放。场景采用 Y 轴向上；这与 UE 常见的 Z 轴向上约定不同，不能直接套用 UE 坐标。
 
-`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Scene，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
+`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Scene 面板，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
 
 Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜单与场景上下文中的 Delete 快捷键都只移除 Actor 实例，保留共享资产。文本输入会屏蔽场景快捷键，避免编辑名称、材质或 Shader 时误操作。多选通过 Outliner 的 Ctrl/Shift 点击与视口 Ctrl/Shift 点击扩展，批量删除与批量变换各记一条撤销；仍无组件父子层级（见 [UndoTransactions.md](UndoTransactions.md)）。
 
@@ -133,25 +135,39 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 ## 编辑器布局与视口合成
 
-编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护六个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用仅用于创建和恢复默认布局。
+编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护六个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用限于默认布局创建／恢复及旧布局迁移。
 
-DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。普通工作区面板留在主 viewport，材质编辑器单独启用系统 viewport；旧五面板布局在原 Details 所在组补入 Scene，保留其他节点与浮动几何，已有 Scene 设置不重绑。
+DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。新增 Scene 时，仅在缺少 Scene 设置的旧布局中把它加入原 Details 所在节点；旧 Details 为自由浮窗时按原位置尺寸创建双页签浮动组。迁移不重建其他节点，后续已有 Scene 配置即尊重用户安排。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。六个工作区面板显式留在主 viewport，保持主窗口内 Docking；材质编辑器使用单独的系统 viewport。
 
-场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的屏幕矩形；投影宽高比、鼠标拾取及 Gizmo 使用同一矩形。这样停靠、分割和浮动无需保留旧位置的渲染区域，图像也按窗口的层级参与遮挡。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
+默认左上为 Outliner，左下的 Scene / Details 共用同一个 dock 节点，底部 Content 的 Meshes 保留资源列表与导入／创建入口。Scene 编辑主选中 Actor 的属性；Details 以同一 Actor ID 实时解析实例身份、可见性、当前 Mesh 几何与来源，以及该实例唯一的 Material 引用，不从 Content 的 `selectedMesh_` 取目标，不遍历同 Mesh 实例汇总材质。多选明确主实例，无选中或已删除实例显示空状态，资源失效显示缺失提示；不新增 Mesh 材质绑定。场景／Outliner 选择事件请求显示 Details，Content 选择／导入只更新资源浏览状态；焦点请求按事件消费一次，手动切页后不逐帧抢回。两个实例查看页均归入 Actor 输入作用域，Scene / Details 保留既有窗口身份和原生 Docking 布局。
+
+场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的主客户区／纹理局部矩形；图像和 Gizmo 使用对应的桌面矩形，拾取鼠标减去主 viewport 原点。两者通过同帧原点转换，移动主窗口后仍使用相同图像区域和投影宽高比。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
+
+材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Scene 的 Actor 材质入口和 Details 中的 Mesh 实际场景材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
+
+`ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
 
 Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotGuiStudy.md)。本轮使用 ImGui 实现停靠体系，没有将 Godot 的 GUI 运行时引入引擎。
 
-工具栏由 `SceneEditor` 绘制为两行，高度按 `GetFrameHeight()`、窗口内边距与行距计算，并传入 `EditorDockManager::beginFrame`，不再使用固定 90px 高度。F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏面板，退出时恢复；它不改变 Docking 的主窗口边界，F11 本身不切换多 viewport 配置。
+工具栏由 `SceneEditor` 绘制为两行：窗口带 `ImGuiWindowFlags_MenuBar`，第一行通过 `BeginMenuBar / EndMenuBar` 绘制 Layout / Edit / UI 和场景操作，第二行在正常内容区绘制渲染控件。高度为两倍 `GetFrameHeight()` 加上下窗口内边距与边框，并传入 `EditorDockManager::beginFrame`。不得用普通内容区的 `BeginMenu + SameLine` 模拟菜单栏：`SameLine` 不改变菜单的纵向布局模式，菜单项会占用剩余宽度，挤出后续控件；`EditorDockManager::drawLayoutMenu` 也必须在菜单栏内调用。
 
-材质／Shader 会话由 `SceneEditor::drawMaterialWindow` 在按需打开的系统窗口绘制，关闭隐藏但不清除草稿，应用退出统一确认。主窗最小化或隐藏主 UI 时工具窗继续提交，`EditorDockManager::keepAlive` 保持原 Dock 树。`ImGuiLayer` 的多 viewport 选项默认关闭；编辑器显式启用，其他入口仍为单窗口。后端负责平台 swapchain／RTV 与呈现，适配层绑定正确 ImGui context、处理原生输入与延迟关闭，并在释放后端前销毁平台窗。主纹理局部矩形与桌面 UI 坐标由同帧原点转换，主窗口移动后仍正确拾取与绘制 Gizmo。
+`WindowChrome` 位于 ImGui / Win32 适配层，由每个窗口的 `WindowState` 持有，`ImGuiLayer` 借用并在帧开始时绘制。它通过 `WM_NCCALCSIZE` 去掉系统标题栏绘制，保留 `WS_OVERLAPPEDWINDOW`；标题、按钮与分隔线使用 ImGui 主题，DWM 边框色同步当前主题。`WM_NCHITTEST` 区分拖动区、系统菜单、八向缩放和三个标题按钮，按钮发送原生系统命令，关闭沿用 `WM_CLOSE` → 编辑器未保存提示。主窗口样式、系统菜单和 `HTMAXBUTTON` 的保留遵循微软的[自定义窗口框架](https://learn.microsoft.com/en-us/windows/win32/dwm/customframe)与[吸附布局接入](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/ui/apply-snap-layout-menu)说明。
 
-Scene / Details 默认在左下同组；Scene 为 Actor 属性编辑，Details 为 Content 选中 Mesh 的信息与真实场景材质引用，底部仅保留资源列表。选择触发一次性切页，用户手动切页不会每帧被抢回。
+标题栏左上角复用 `assets/icons/RAEngine.png`：通过 `RestArtEngine.rc` 嵌入程序，由 `ImGuiLayer` 解码并持有 DX11 纹理，在关闭 UI 时释放，不依赖启动目录；图片区域保留原生系统菜单命中。
+
+自绘窗口的 `WM_NCACTIVATE` 在非最小化时直接返回 `TRUE`，允许激活状态切换并由客户端继续负责标题绘制；最小化时保留默认处理，遵循微软的 [WM_NCACTIVATE 返回值与最小化约定](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-ncactivate)。2026-10-26 的实际 Capture 回归确认，原来调用 `DefWindowProc(..., -1)` 仍会在模态保存框打开时覆盖出经典浅色系统标题栏；仅拦截 `WM_NCPAINT` 不足以避免该路径。修复位于共用 `WindowChrome`，保留 `WM_ACTIVATE`、系统模态 owner 禁用／恢复和原生保存框归属，不改窗口样式或对话框主题。
+
+标题栏作为 viewport 顶部保留区域，`WindowChrome` 同帧更新 `WorkPos / WorkSize`，工具栏、DockSpace 和 Project Manager 从工作区开始布局；场景拾取与 Gizmo 继续使用图像本帧屏幕矩形。最小窗口为 480×360 逻辑像素以允许常见吸附分区，窄窗口中的面板内容仍可能需要滚动。当前应用仍使用系统 DPI 感知，标题按钮与边缘命中按窗口 DPI 计算；未将此功能宣称为全编辑器跨屏 DPI 缩放支持。
+
+启动 `LoadingScreen::draw` 同样在 chrome 布局之后读取主 viewport 的 `WorkPos / WorkSize`，显式向该 viewport 的 background draw list 提交，并将背景、遮罩、文字、百分比和进度条统一偏移到工作区，再裁剪到工作区边界。调用者只传进度与文案，避免把 `IO.DisplaySize` 的本地尺寸与多 viewport 的桌面绘制坐标混用。图片继续使用完整 UV 拉伸铺满，图片缺失时的纯色背景采用同一布局；不覆盖标题栏，不引入裁切图片的填充策略。`LoadingScreenTests`（CMake `BUILD_TESTING=ON`）覆盖图片解码与无图回退、完整 UV、标题栏排除、三种尺寸及正负桌面坐标下的几何一致性；实际跨屏 DPI 不由这些坐标测试证明。
+
+F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏标题栏和面板，退出时恢复；切换窗口样式之前同步 chrome 状态，保证 `WM_NCCALCSIZE` 和最大化工作区处理不会裁剪全屏尺寸。普通最大化适配显示器工作区，F11 覆盖整个显示器；两者均不启用多窗口渲染。
 
 ## 编辑命令、事务与主题
 
 `EditorCommandRegistry` 位于 Editor 层，集中登记命令 ID、分组、文案、快捷键、回调与可用条件。已接入撤销 / 重做、Actor 新建 / 复制 / 删除、场景保存和布局恢复命令；菜单和相关按钮通过命令执行。渲染切换、F11 等应用级按键仍由 `MinimalApp` 处理，并非所有 UI 动作都已迁入注册表。`SceneEditor` 在文本输入或 Gizmo 使用期间跳过命令快捷键派发。
 
-`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Scene 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条，多选复制仍逐个记录。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
+`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Scene 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条。Ctrl+D 多选复制仍逐个记录；Alt＋拖动由 `ViewportInteraction` 判定手势并回调 `SceneEditor` 复制选中集合，结束时将创建副本与最终变换记成一条事务，同时保存原选择和副本选择。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
 
 `EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换（提交 `d62960b`）；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。两套配色已分别截图验证。
 
@@ -212,12 +228,23 @@ Scene / Details 默认在左下同组；Scene 为 Actor 属性编辑，Details �
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
 | 编辑命令、快捷键与撤销历史 | `src/Editor/EditorCommands.cpp`、`src/Editor/UndoStack.cpp`；动作接入在 `SceneEditor.cpp` |
 | 编辑器配色与主题偏好 | `src/ImGui/EditorTheme.cpp`、`src/ImGui/ImGuiLayer.cpp` |
+| 自定义标题栏、窗口按钮、原生命中测试 | `src/ImGui/WindowChrome.cpp`；窗口状态与 F11 集成在 `app/MinimalApp.cpp` |
 | 面板身份、默认 Dock 树、布局恢复 | `src/Editor/EditorDockManager.cpp` |
 | 视口拾取、变换手柄、相机 | `src/Editor/ViewportInteraction.cpp` |
 | 启动加载界面与背景图 | `src/Editor/LoadingScreen.cpp`、`assets/load/load.png` |
 | 新的公开接口 | `include/RestArtEngine/<模块>/`，实现放 `src/<模块>/` |
 
 `app/` 是引擎的可执行入口（不是示例工程），新增可复用功能应放进对应模块而不是堆进入口文件。
+
+### 构建依赖与警告
+
+构建配置修改应落到 `RestArtEngine.lua`、`vendor/imgui.lua` 或 `CMakeLists.txt`，再重新生成工程；`settings/*.vcxproj` 与 solution 属于生成物，不手工修补。
+
+静态库只归档自身对象文件；系统 DLL 导入库在最终可执行文件／动态库链接阶段解析。Premake 的 `StaticLib` 不设置这些系统 `links`，否则 MSVC librarian 会把导入库合并进归档；引擎的系统依赖在 `RestArtEngine.lua` 声明。CMake 为导出的 DearImGui 目标保留 `INTERFACE` 链接需求，供消费者使用；引擎自身直接使用的系统依赖仍显式声明。
+
+新增警告先查原因与影响，不以全局降级警告等级、`/IGNORE:4006` 或 `/FORCE:MULTIPLE` 代替修复。第三方代码确需局部豁免时限定到具体文件／告警编号并解释原因。微软的 [LNK4006 文档](https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-warning-lnk4006?view=msvc-170) 明确指出合并导入库可能导致重复符号；CMake 链接接口语义见 [target_link_libraries](https://cmake.org/cmake/help/latest/command/target_link_libraries.html)。
+
+涉及归档／链接依赖的改动，应重新生成并执行实际 Rebuild，检查最终程序也能完成链接，不能仅凭增量构建“无任务”判断警告已修复。验证配置和结果写入开发状态页。
 
 ### 必须守住的约定
 
@@ -237,4 +264,12 @@ cmake --build --preset windows-debug
 ```
 
 `--editor-self-test` 与 `Validate-Render.ps1` 需要 D3D11 设备（硬件设备不可用时回退 WARP，速度较慢）。
+
+窗口外框回归：`powershell -ExecutionPolicy Bypass -File scripts/Test-WindowChrome.ps1`（可通过 `-Executable` 指定构建）。脚本复制 Sandbox 到独立输出目录，隔离布局、主题与场景修改，仅控制自己启动的测试进程；验证场景编辑器与 Project Manager 的标题 / 边角 / 系统菜单命中、最小化、最大化工作区、还原、双击标题以及干净关闭的明确零退出码。场景编辑器另测 F11 / Esc、缩放、实际 F9 截图，以及脏场景点击关闭后保留进程和场景文件。脏关闭用例最后只终止测试进程，不保存测试编辑。
+
+2026-10-23 外框验证：上述原生测试及编辑器自测通过，D3D11 debug layer 错误数为 0；截图和输出分别在本机 `artifacts/window-chrome-native/`、`artifacts/window-chrome-editor/`。编辑器自测还覆盖两套主题、标题栏 / 工具栏 / DockSpace 不重叠、停靠、多选 Alt 拖动与 Shader 编辑。原生脚本验证了 `HTMAXBUTTON` 接入及缩放边角命中，未模拟操作系统吸附弹窗悬停或跨显示器拖动；这两项仍需交互验收。
+
+2026-10-26 Capture 外框回归：`Test-Capture.ps1` 从桌面合成画面读取测试窗口，保存弹框前／弹框中／取消后的 PNG 并检查标题背景像素，而非只读取不会包含系统覆绘的 DX11 截图。Black 与 Dark Blue 均覆盖 F9、实际点击 Capture、嵌套覆盖确认、owner 禁用及取消恢复，另保留 Unicode 保存／覆盖语义检查；修复前同一断言失败，修复后两主题通过。`Test-WindowChrome.ps1` 的编辑器／Project Manager 窗口操作也通过；本机证据见 `artifacts/capture-chrome/`，具体构建与覆盖记录见 DevelopmentStatus。
+
+2026-10-23 顶部菜单重叠修复：CMake Debug 构建及 `--editor-self-test --capture-dir artifacts/toolbar-menu-validation` 通过，D3D11 debug layer 开启且错误数为 0。新增自测注入鼠标点击 Layout / Edit / UI，检查菜单内容可达、弹出位置在标题下方、菜单行 / 渲染行 / DockSpace 垂直边界分离；覆盖 Black / Dark Blue、980px 常规尺寸及 1440px 下 150% 字体与样式缩放，截图已人工检查。该缩放测试不等于操作系统跨显示器 DPI 测试；输出目录属于本机验证产物，不提交。
 

@@ -20,7 +20,8 @@ target_include_directories(DearImGui PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui>
     $<INSTALL_INTERFACE:include/RestArtEngine/ThirdParty/imgui>)
 target_include_directories(DearImGui PRIVATE vendor/imgui/backends)
-target_link_libraries(DearImGui PRIVATE d3d11 dxgi d3dcompiler dwmapi)
+# These are consumer link requirements; do not merge import libraries into the archive.
+target_link_libraries(DearImGui INTERFACE d3d11 dxgi d3dcompiler dwmapi)
 
 # The single engine executable: project manager, editor, and renderer.
 # It owns the project selection screen and editor entry point; users build and
@@ -29,7 +30,9 @@ target_link_libraries(DearImGui PRIVATE d3d11 dxgi d3dcompiler dwmapi)
 add_executable(RestArtEngine
     app/MinimalApp.cpp
     app/EditorSmoke.cpp
+    app/GarbageCollectionSmoke.cpp
     src/Core/Engine.cpp
+    src/Core/GarbageCollector.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
     src/Assets/AssetLibrary.cpp
@@ -37,7 +40,9 @@ add_executable(RestArtEngine
     src/Project/Project.cpp
     src/ImGui/ImGuiLayer.cpp
     src/ImGui/EditorTheme.cpp
+    src/ImGui/WindowChrome.cpp
     src/Editor/EditorDockManager.cpp
+    src/Editor/EditorCommands.cpp
     src/Editor/SceneEditor.cpp
     src/Editor/UndoStack.cpp
     src/Editor/ViewportInteraction.cpp
@@ -61,6 +66,18 @@ endif()
 set_source_files_properties(vendor/ImGuizmo/src/ImGuizmo.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/wd4245>")
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(GarbageCollectorTests tests/GarbageCollectorTests.cpp src/Core/GarbageCollector.cpp)
+    target_include_directories(GarbageCollectorTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(GarbageCollectorTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    add_test(NAME GarbageCollectorTests COMMAND GarbageCollectorTests)
+    add_executable(LoadingScreenTests tests/LoadingScreenTests.cpp src/Editor/LoadingScreen.cpp)
+    target_include_directories(LoadingScreenTests PRIVATE include)
+    target_link_libraries(LoadingScreenTests PRIVATE DearImGui windowscodecs ole32)
+    add_test(NAME LoadingScreenTests COMMAND LoadingScreenTests "${CMAKE_CURRENT_SOURCE_DIR}/assets/load/load.png")
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS RestArtEngine DearImGui EXPORT RestArtEngineTargets

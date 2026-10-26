@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -289,6 +290,7 @@ bool mirroredTransform(const scene::Actor& actor) {
 } // namespace
 
 struct SceneRenderer::Impl {
+    using Clock = std::chrono::steady_clock;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swapChain;
@@ -312,7 +314,15 @@ struct SceneRenderer::Impl {
     std::uint64_t rayTriangleHash = 0;
     UINT rayTriangleCount = 0;
     UINT raySceneActorCount = 0;
-    struct GpuMesh { ComPtr<ID3D11Buffer> vertices, indices; UINT count = 0; std::uint64_t hash = 0; };
+    Clock::time_point rayLastUsed{};
+    bool raySceneActive = false;
+    std::uint64_t usageEpoch = 0;
+    struct GpuMesh {
+        ComPtr<ID3D11Buffer> vertices, indices;
+        UINT count = 0;
+        std::uint64_t hash = 0, bytes = 0, lastUsedEpoch = 0;
+        Clock::time_point lastUsed{};
+    };
     std::unordered_map<assets::AssetId, GpuMesh> meshes;
     std::filesystem::path shaderRoot = "Shaders";
     std::filesystem::path materialOverride;
@@ -489,7 +499,11 @@ struct SceneRenderer::Impl {
         };
         hashBytes(mesh.vertices.data(), mesh.vertices.size() * sizeof(assets::MeshVertex));
         hashBytes(mesh.indices.data(), mesh.indices.size() * sizeof(std::uint32_t));
-        if (const auto it = meshes.find(mesh.id); it != meshes.end() && it->second.hash == hash) return true;
+        if (const auto it = meshes.find(mesh.id); it != meshes.end() && it->second.hash == hash) {
+            it->second.lastUsed = Clock::now();
+            it->second.lastUsedEpoch = usageEpoch;
+            return true;
+        }
         for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) { error = "Mesh index out of bounds: " + mesh.name; return false; }
         GpuMesh gpu; gpu.hash = hash; gpu.count = static_cast<UINT>(mesh.indices.size());
         D3D11_BUFFER_DESC description{};
@@ -500,6 +514,9 @@ struct SceneRenderer::Impl {
         description.ByteWidth = static_cast<UINT>(mesh.indices.size() * sizeof(std::uint32_t));
         description.BindFlags = D3D11_BIND_INDEX_BUFFER; initial.pSysMem = mesh.indices.data();
         if (failed(device->CreateBuffer(&description, &initial, &gpu.indices), "Create mesh indices", error)) return false;
+        gpu.bytes = mesh.vertices.size() * sizeof(assets::MeshVertex) + mesh.indices.size() * sizeof(std::uint32_t);
+        gpu.lastUsed = Clock::now();
+        gpu.lastUsedEpoch = usageEpoch;
         meshes[mesh.id] = std::move(gpu); return true;
     }
 
@@ -789,6 +806,8 @@ bool SceneRenderer::render(const SceneSettings& settings, std::string& error) {
 
 bool SceneRenderer::clear(const float color[4], std::string& error) {
     error.clear();
+    ++impl_->usageEpoch;
+    impl_->raySceneActive = false;
     if (!impl_->context || !impl_->backbuffer) {
         error = "Renderer is not initialized.";
         return false;
@@ -804,6 +823,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                            const assets::MaterialAsset* materialOverride) {
     error.clear();
     auto& state = *impl_;
+    ++state.usageEpoch;
+    state.raySceneActive = false;
     if (!state.device || !state.backbuffer) { error = "Renderer has no render target."; return false; }
     const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
     if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
@@ -824,6 +845,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const XMMATRIX projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.0f),
         static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight), 0.05f, 100.0f);
     const bool wantsRayScene = settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay;
+    state.raySceneActive = wantsRayScene;
+    if (wantsRayScene) state.rayLastUsed = Impl::Clock::now();
     if (wantsRayScene && !state.prepareRayTriangles(world, assets, error, materialOverride)) return false;
     SceneConstants data{};
     XMStoreFloat4x4(&data.viewProjection, view * projection);
@@ -1095,6 +1118,72 @@ bool SceneRenderer::present(bool vsync, std::string& error) {
     return !failed(impl_->swapChain->Present(vsync ? 1 : 0, 0), "Present", error);
 }
 
+RendererCacheStats SceneRenderer::cacheStats() const {
+    RendererCacheStats result;
+    result.meshCount = impl_->meshes.size();
+    for (const auto& [id, mesh] : impl_->meshes) result.meshGpuBytesEstimate += mesh.bytes;
+    if (impl_->rayTriangleBuffer) {
+        result.rayTriangleCount = impl_->rayTriangleCount;
+        result.rayGpuBytesEstimate = static_cast<std::uint64_t>(impl_->rayTriangleCount) * sizeof(RayTriangle);
+    }
+    return result;
+}
+
+rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSeconds) {
+    rae::GarbageCollectionMemoryStats result;
+    if (!impl_->context || !std::isfinite(maxIdleSeconds) || maxIdleSeconds < 0) return result;
+    auto& state = *impl_;
+    const auto now = Impl::Clock::now();
+    const auto expired = [&](const auto& lastUsed) {
+        return std::chrono::duration<double>(now - lastUsed).count() >= maxIdleSeconds;
+    };
+    // The immediate context owns binding references too. Remove only bindings
+    // to evicted resources; keep all live render targets/pipeline/UI resources.
+    ComPtr<ID3D11Buffer> boundVertex, boundIndex;
+    UINT stride = 0, offset = 0, indexOffset = 0;
+    DXGI_FORMAT indexFormat{};
+    state.context->IAGetVertexBuffers(0, 1, &boundVertex, &stride, &offset);
+    state.context->IAGetIndexBuffer(&boundIndex, &indexFormat, &indexOffset);
+    for (auto it = state.meshes.begin(); it != state.meshes.end();) {
+        const auto& mesh = it->second;
+        if (mesh.lastUsedEpoch == state.usageEpoch || !expired(mesh.lastUsed)) { ++it; continue; }
+        if (boundVertex.Get() == mesh.vertices.Get()) {
+            ID3D11Buffer* empty = nullptr;
+            const UINT zero = 0;
+            state.context->IASetVertexBuffers(0, 1, &empty, &zero, &zero);
+            boundVertex.Reset();
+        }
+        if (boundIndex.Get() == mesh.indices.Get()) {
+            state.context->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
+            boundIndex.Reset();
+        }
+        result.gpuBytesReleasedEstimate += mesh.bytes;
+        result.objectsReleased += 2;
+        it = state.meshes.erase(it);
+    }
+    if (!state.raySceneActive && state.rayTriangleBuffer && expired(state.rayLastUsed)) {
+        ComPtr<ID3D11ShaderResourceView> boundRay;
+        state.context->PSGetShaderResources(4, 1, &boundRay);
+        if (boundRay.Get() == state.rayTriangleView.Get()) {
+            ID3D11ShaderResourceView* empty = nullptr;
+            state.context->PSSetShaderResources(4, 1, &empty);
+        }
+        boundRay.Reset();
+        result.gpuBytesReleasedEstimate += static_cast<std::uint64_t>(state.rayTriangleCount) * sizeof(RayTriangle);
+        result.objectsReleased += 2;
+        state.rayTriangleView.Reset();
+        state.rayTriangleBuffer.Reset();
+        // Invalidate the hash fast path as well, so identical scene contents
+        // rebuild the buffer/SRV when ray effects are enabled again.
+        state.rayTriangleHash = 0;
+        state.rayTriangleCount = 0;
+        state.raySceneActorCount = 0;
+        state.rayLastUsed = {};
+    }
+    // D3D11 owns pending GPU work. No Flush/idle wait and no residency claim.
+    return result;
+}
+
 void SceneRenderer::shutdown() {
     if (impl_ && impl_->context) { impl_->context->ClearState(); impl_->context->Flush(); }
     if (impl_) {
@@ -1131,6 +1220,22 @@ std::uint32_t SceneRenderer::validationErrorCount() const {
 
 bool SceneRenderer::saveScreenshot(const wchar_t* path, std::string& error) {
     error.clear();
+    std::FILE* file = nullptr;
+    if (!path || _wfopen_s(&file, path, L"wb") != 0 || !file) {
+        error = "Could not open screenshot output file.";
+        return false;
+    }
+    // Close on every exit, including allocation exceptions during readback.
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> owned(file, &std::fclose);
+    const bool written = saveScreenshot(owned.get(), error);
+    const bool closed = std::fclose(owned.release()) == 0;
+    if (!closed && written) error = "Could not close screenshot output file.";
+    return written && closed;
+}
+
+bool SceneRenderer::saveScreenshot(std::FILE* file, std::string& error) {
+    error.clear();
+    if (!file) { error = "Screenshot output stream is null."; return false; }
     auto& state = *impl_;
     if (!state.swapChain) { error = "Renderer is not initialized."; return false; }
     ComPtr<ID3D11Texture2D> source, staging;
@@ -1142,10 +1247,12 @@ bool SceneRenderer::saveScreenshot(const wchar_t* path, std::string& error) {
     description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     description.MiscFlags = 0;
     if (failed(state.device->CreateTexture2D(&description, nullptr, &staging), "Create screenshot staging", error)) return false;
+    // Allocate before Map so a failed allocation cannot leave the staging
+    // texture mapped. The conversion below performs no further allocations.
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(description.Width) * description.Height * 4);
     state.context->CopyResource(staging.Get(), source.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (failed(state.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Read screenshot", error)) return false;
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(description.Width) * description.Height * 4);
     for (UINT y = 0; y < description.Height; ++y) {
         const auto* row = static_cast<const unsigned char*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch;
         auto* output = pixels.data() + static_cast<std::size_t>(y) * description.Width * 4;
@@ -1169,13 +1276,10 @@ bool SceneRenderer::saveScreenshot(const wchar_t* path, std::string& error) {
     info.biBitCount = 32;
     info.biCompression = BI_RGB;
     info.biSizeImage = static_cast<DWORD>(pixels.size());
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, path, L"wb") != 0 || !file) { error = "Could not open screenshot output file."; return false; }
     const bool written = std::fwrite(&fileHeader, sizeof(fileHeader), 1, file) == 1 &&
         std::fwrite(&info, sizeof(info), 1, file) == 1 &&
         std::fwrite(pixels.data(), 1, pixels.size(), file) == pixels.size();
-    const bool closed = std::fclose(file) == 0;
-    if (!written || !closed) { error = "Could not write complete screenshot."; return false; }
+    if (!written) { error = "Could not write complete screenshot."; return false; }
     return true;
 }
 

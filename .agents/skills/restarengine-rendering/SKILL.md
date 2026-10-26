@@ -9,6 +9,8 @@ description: "Develop and review RestArtEngine rendering, hand-written shaders, 
 
 ## 先确认现状
 
+分派任务先用 [restarengine-context](../restarengine-context/SKILL.md) 核对项目事实与进度索引；交付使用 [restarengine-delivery](../restarengine-delivery/SKILL.md) 的证据标准。主 agent 给出文件归属、依赖、目标画面和验收范围，统一契约见 [AgentDevelopment.md](../../../docs/AgentDevelopment.md)。已经核对且没有相关变化的文档无需重复读取。
+
 读取仓库 `AGENTS.md`（若存在）、[docs/Architecture.md](../../../docs/Architecture.md) 和 [docs/RenderingDevelopment.md](../../../docs/RenderingDevelopment.md)，检查工作区状态，再读与任务有关的源码。现有结构以 `README.md` 与 `Architecture.md` 为准；渲染开发文档将要求、现状缺口和设计草案分开记录，不把草案当作现成接口。
 
 按改动范围选择入口：

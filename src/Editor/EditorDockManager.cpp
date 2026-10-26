@@ -107,8 +107,8 @@ void EditorDockManager::applyFocusRequest() {
 
 void EditorDockManager::beginFrame(float toolbarHeight) {
     const auto* viewport = ImGui::GetMainViewport();
-    const ImVec2 position{viewport->Pos.x, viewport->Pos.y + toolbarHeight};
-    const ImVec2 size{std::max(1.0f, viewport->Size.x), std::max(1.0f, viewport->Size.y - toolbarHeight)};
+    const ImVec2 position{viewport->WorkPos.x, viewport->WorkPos.y + toolbarHeight};
+    const ImVec2 size{std::max(1.0f, viewport->WorkSize.x), std::max(1.0f, viewport->WorkSize.y - toolbarHeight)};
     ImGui::SetNextWindowPos(position);
     ImGui::SetNextWindowSize(size);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -150,8 +150,7 @@ void EditorDockManager::drawPanel(EditorPanel panel, const std::function<void()>
 }
 
 void EditorDockManager::drawLayoutMenu() {
-    if (ImGui::SmallButton("Layout")) ImGui::OpenPopup("Editor layout");
-    if (!ImGui::BeginPopup("Editor layout")) return;
+    if (!ImGui::BeginMenu("Layout")) return;
     ImGui::TextDisabled("Drag tabs to split, merge, or float panels");
     ImGui::Separator();
     if (ImGui::MenuItem("Restore default layout")) resetLayout();
@@ -161,7 +160,7 @@ void EditorDockManager::drawLayoutMenu() {
         if (ImGui::MenuItem(label))
             requestFocus(static_cast<EditorPanel>(&panel - panels_.data()));
     }
-    ImGui::EndPopup();
+    ImGui::EndMenu();
 }
 
 } // namespace rae::editor
