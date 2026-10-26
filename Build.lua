@@ -5,17 +5,16 @@ include "Config.lua"
 workspace "RestArtEngine"
 	architecture "x64"
 	startproject "RestArtEngine"
-	configurations
-	{
-		"Debug",
-		"Release",
-        "Dist"
-	}
+	-- Shared with Config.lua so the Rider run configuration always mirrors the
+	-- solution configurations.
+	configurations(EngineConfigurations)
 
     filter "system:windows"
     buildoptions { "/EHsc", "/Zc:preprocessor", "/Zc:__cplusplus", "/utf-8" }
 
-	add_rider_refreshconfig()
+	if _ACTION == "vs2022" then
+		add_rider_run_configurations()
+	end
 	add_fork_custom_commands()
 
 group ""
