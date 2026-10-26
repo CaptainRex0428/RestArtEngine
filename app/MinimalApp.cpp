@@ -690,7 +690,8 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         SetProcessDPIAware();
-        rae::imgui::currentTheme() = rae::imgui::loadThemePreference(rae::imgui::defaultThemePreferencePath());
+        rae::imgui::uiPreferences() = rae::imgui::loadUiPreferences(rae::imgui::defaultUiPreferencesPath());
+        rae::imgui::currentTheme() = rae::imgui::uiPreferences().theme;
         if (selfTest) { vsync = false; frameLimit = 14; }
         rae::project::ProjectPaths project;
         std::string error;

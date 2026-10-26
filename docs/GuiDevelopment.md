@@ -16,7 +16,7 @@
 | 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene、Details、Viewport settings、Content & Editors、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 保留 Meshes，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
 | 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选与 Alt 拖动复制；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，颜色取主题强调色。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
-| 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
+| 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。`UI` 菜单承载主题与选中描边设置（开关、粗细、主题强调色或预设颜色），与本机 `RestArtEngine.ui.ini` 同步。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
 
 Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理，不管理 Dock 节点。编辑器模块负责布局、控件与交互；Shader、Pass、GPU 资源和后端能力归渲染模块。跨模块改动先约定数据与预览契约。
 
@@ -81,7 +81,7 @@ Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content
 
 | 变化 | 相关验收 |
 | --- | --- |
-| 主题、字体、组件与布局 | Black / Dark Blue 的层级、状态和对比度；默认与受影响窄布局、长中英文/路径、缩放后无重叠和不可达操作。确认正常/禁用/错误等实际相关状态。 |
+| 主题、字体、组件与布局 | Black / Dark Blue 的层级、状态和对比度；默认与受影响窄布局、长中英文/路径、缩放后无重叠和不可达操作。`UI` 菜单里的描边设置应可点击、可读、在两种主题下都可见。确认正常/禁用/错误等实际相关状态。 |
 | Dock 或视口区域 | 分割、合并标签、浮动回嵌、恢复默认、重新启动读回；同帧图像矩形、遮挡、拾取、相机和 Gizmo。 |
 | 编辑交互 | 文本和场景快捷键隔离、焦点和弹窗、单选/多选、一次操作撤销与重做；选中描边应贴合实际轮廓、前后渲染路径一致、两种主题都可见；适用时覆盖 Apply / Save / Discard / Cancel、切换与关闭。 |
 | 原生窗口 | 原生命中、缩放、最小化恢复、最大化、关闭确认、F11；改动涉及吸附/跨屏时单独做 OS 交互，不能用命中值代替。 |

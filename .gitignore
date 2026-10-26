@@ -59,6 +59,7 @@ Makefile
 imgui.ini
 RestArtEngine.imgui.ini
 RestArtEngine.theme.ini
+RestArtEngine.ui.ini
 RestArtEngine.gc.json
 RestArtEngine.panels.ini
 

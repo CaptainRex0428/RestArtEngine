@@ -437,9 +437,55 @@ void SceneEditor::drawUiMenu() {
             const auto theme = static_cast<imgui::EditorTheme>(index);
             if (ImGui::MenuItem(imgui::themeName(theme), nullptr, imgui::currentTheme() == theme)) {
                 imgui::setTheme(theme);
-                imgui::saveThemePreference(imgui::defaultThemePreferencePath(), theme);
+                auto& preferences = imgui::uiPreferences();
+                preferences.theme = theme;
+                imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
                 status_ = std::string("Theme: ") + imgui::themeName(theme);
             }
+        }
+        ImGui::EndMenu();
+    }
+    // Editor-only viewport aids live here so viewport settings stay about the
+    // scene, not about how the editor highlights it.
+    if (ImGui::BeginMenu("Selection Outline")) {
+        auto& preferences = imgui::uiPreferences();
+        bool changed = false;
+        bool enabled = preferences.selectionOutline;
+        if (ImGui::MenuItem("Show outline", nullptr, &enabled)) {
+            preferences.selectionOutline = enabled;
+            changed = true;
+        }
+        ImGui::SetNextItemWidth(170);
+        if (ImGui::SliderFloat("Thickness", &preferences.outlineThickness, 1.0f, 6.0f, "%.1f px")) changed = true;
+        bool themeColor = preferences.outlineThemeColor;
+        if (ImGui::MenuItem("Use theme accent", nullptr, &themeColor)) {
+            preferences.outlineThemeColor = themeColor;
+            changed = true;
+        }
+        ImGui::Separator();
+        struct Preset { const char* name; float color[3]; };
+        static const Preset presets[] = {
+            {"Orange", {1.0f, 0.70f, 0.25f}},
+            {"White", {0.95f, 0.95f, 0.95f}},
+            {"Cyan", {0.25f, 0.80f, 1.0f}},
+        };
+        ImGui::BeginDisabled(preferences.outlineThemeColor);
+        for (const auto& preset : presets) {
+            const bool selected = !preferences.outlineThemeColor &&
+                std::abs(preferences.outlineColor[0] - preset.color[0]) < 0.02f &&
+                std::abs(preferences.outlineColor[1] - preset.color[1]) < 0.02f &&
+                std::abs(preferences.outlineColor[2] - preset.color[2]) < 0.02f;
+            if (ImGui::MenuItem(preset.name, nullptr, selected)) {
+                for (int channel = 0; channel < 3; ++channel)
+                    preferences.outlineColor[channel] = preset.color[channel];
+                preferences.outlineThemeColor = false;
+                changed = true;
+            }
+        }
+        ImGui::EndDisabled();
+        if (changed) {
+            imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
+            status_ = "Selection outline updated.";
         }
         ImGui::EndMenu();
     }
@@ -987,14 +1033,18 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     // Editor-only selection outline: the renderer reads this borrowed list for
     // this frame only. Colour follows the active theme accent so Black and Dark
     // Blue keep a consistent selection language.
-    settings.outlineActors = selection_.empty() ? nullptr : selection_.data();
-    settings.outlineActorCount = static_cast<std::uint32_t>(selection_.size());
-    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+    const auto& preferences = imgui::uiPreferences();
+    const bool outlineVisible = preferences.selectionOutline && !selection_.empty();
+    settings.outlineActors = outlineVisible ? selection_.data() : nullptr;
+    settings.outlineActorCount = outlineVisible ? static_cast<std::uint32_t>(selection_.size()) : 0;
+    const ImVec4 accent = preferences.outlineThemeColor
+        ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark)
+        : ImVec4(preferences.outlineColor[0], preferences.outlineColor[1], preferences.outlineColor[2], 1.0f);
     settings.outlineColor[0] = accent.x;
     settings.outlineColor[1] = accent.y;
     settings.outlineColor[2] = accent.z;
     settings.outlineColor[3] = 1.0f;
-    settings.outlineThickness = 2.0f;
+    settings.outlineThickness = preferences.outlineThickness;
     const auto* mainViewport = ImGui::GetMainViewport();
     // BeginMenu needs a native horizontal menu bar. SameLine in a normal
     // window leaves menus in vertical mode, consuming the remaining width.

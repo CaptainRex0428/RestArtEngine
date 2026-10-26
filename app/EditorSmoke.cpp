@@ -162,6 +162,23 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         rae::imgui::saveThemePreference(path, EditorTheme::Black);
         require(rae::imgui::loadThemePreference(path) == EditorTheme::Black,
             "Theme preference did not round-trip back to Black.");
+        // The UI menu edits the outline settings; they share the same file and
+        // must survive a reload without disturbing the palette.
+        auto preferences = rae::imgui::loadUiPreferences(path);
+        preferences.theme = EditorTheme::DarkBlue;
+        preferences.selectionOutline = false;
+        preferences.outlineThickness = 4.5f;
+        preferences.outlineThemeColor = false;
+        preferences.outlineColor[0] = 0.1f;
+        preferences.outlineColor[1] = 0.2f;
+        preferences.outlineColor[2] = 0.3f;
+        rae::imgui::saveUiPreferences(path, preferences);
+        const auto reloaded = rae::imgui::loadUiPreferences(path);
+        require(reloaded.theme == EditorTheme::DarkBlue && !reloaded.selectionOutline &&
+            std::abs(reloaded.outlineThickness - 4.5f) < 0.001f && !reloaded.outlineThemeColor &&
+            std::abs(reloaded.outlineColor[0] - 0.1f) < 0.001f &&
+            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f,
+            "Selection outline preferences did not round-trip.");
         std::filesystem::remove(path);
     }
     {
@@ -651,6 +668,23 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         rae::imgui::saveThemePreference(path, EditorTheme::Black);
         require(rae::imgui::loadThemePreference(path) == EditorTheme::Black,
             "Theme preference did not round-trip back to Black.");
+        // The UI menu edits the outline settings; they share the same file and
+        // must survive a reload without disturbing the palette.
+        auto preferences = rae::imgui::loadUiPreferences(path);
+        preferences.theme = EditorTheme::DarkBlue;
+        preferences.selectionOutline = false;
+        preferences.outlineThickness = 4.5f;
+        preferences.outlineThemeColor = false;
+        preferences.outlineColor[0] = 0.1f;
+        preferences.outlineColor[1] = 0.2f;
+        preferences.outlineColor[2] = 0.3f;
+        rae::imgui::saveUiPreferences(path, preferences);
+        const auto reloaded = rae::imgui::loadUiPreferences(path);
+        require(reloaded.theme == EditorTheme::DarkBlue && !reloaded.selectionOutline &&
+            std::abs(reloaded.outlineThickness - 4.5f) < 0.001f && !reloaded.outlineThemeColor &&
+            std::abs(reloaded.outlineColor[0] - 0.1f) < 0.001f &&
+            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f,
+            "Selection outline preferences did not round-trip.");
         std::filesystem::remove(path);
     }
     {
@@ -1059,6 +1093,26 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                     require(!context->OpenPopupStack.empty() && context->OpenPopupStack[0].Window &&
                         context->OpenPopupStack[0].Window->Pos.y >= toolbar->MenuBarRect().Max.y - 1,
                         "Top-level menu opens beside/over its heading instead of below the menu bar.");
+                    if (menu == 2) {
+                        // The UI menu owns the editor-only viewport aids: theme and
+                        // the selection outline settings. Open the nested submenu
+                        // through the same popup the user sees and verify its
+                        // controls are reachable.
+                        auto* popup = context->OpenPopupStack[0].Window;
+                        require(popup && popup->Size.y > 0, "UI menu popup has no size.");
+                        const float padding = context->Style.WindowPadding.y;
+                        const float separator = context->Style.ItemSpacing.y + 1.0f;
+                        const float rowHeight = (popup->Size.y - padding * 2.0f - separator) / 4.0f;
+                        input.mouse = {popup->Pos.x + 30.0f, popup->Pos.y + padding + rowHeight * 1.5f};
+                        capture("toolbar_ui_hover", true);
+                        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+                        capture("toolbar_ui_submenu", true, true);
+                        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+                        capture("toolbar_ui_submenu", true, true);
+                        require(renderedUiText.find("Show outline") != std::string::npos &&
+                            renderedUiText.find("Use theme accent") != std::string::npos,
+                            "UI menu is missing the selection outline settings.");
+                    }
                     input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Escape, true); };
                     capture("toolbar_close", true);
                     input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Escape, false); };

@@ -1,6 +1,8 @@
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
 #include <fstream>
+#include <cstdio>
+#include <cmath>
 
 namespace rae::imgui {
 namespace {
@@ -139,26 +141,83 @@ void setTheme(EditorTheme theme) {
     applyTheme(theme);
 }
 
-std::filesystem::path defaultThemePreferencePath() {
+std::filesystem::path defaultUiPreferencesPath() {
     // Stored next to the ImGui layout ini; both are per-user, never committed.
+    return std::filesystem::path("RestArtEngine.ui.ini");
+}
+
+std::filesystem::path legacyThemePreferencePath() {
+    // Before the outline settings existed the same file only stored `theme=`.
     return std::filesystem::path("RestArtEngine.theme.ini");
 }
 
-EditorTheme loadThemePreference(const std::filesystem::path& path) {
+UiPreferences& uiPreferences() {
+    static UiPreferences preferences;
+    return preferences;
+}
+
+namespace {
+
+// Tolerant key=value reader: unknown keys are ignored and malformed values keep
+// the previous field, so a hand-edited file cannot break startup.
+void readPreferences(const std::filesystem::path& path, UiPreferences& preferences) {
     std::ifstream stream(path);
-    if (!stream) return EditorTheme::Black;
+    if (!stream) return;
     std::string line;
     while (std::getline(stream, line)) {
-        if (line == "theme=darkblue" || line == "theme=dark_blue") return EditorTheme::DarkBlue;
-        if (line == "theme=black") return EditorTheme::Black;
+        if (line.rfind("theme=", 0) == 0) {
+            preferences.theme = line.find("darkblue") != std::string::npos || line.find("dark_blue") != std::string::npos
+                ? EditorTheme::DarkBlue : EditorTheme::Black;
+        } else if (line == "outline=off") {
+            preferences.selectionOutline = false;
+        } else if (line == "outline=on") {
+            preferences.selectionOutline = true;
+        } else if (line.rfind("outline_theme_color=", 0) == 0) {
+            preferences.outlineThemeColor = line.find("off") == std::string::npos;
+        } else if (line.rfind("outline_thickness=", 0) == 0) {
+            try {
+                const float value = std::stof(line.substr(18)); // "outline_thickness=" is 18 chars
+                if (value > 0.0f && value <= 16.0f) preferences.outlineThickness = value;
+            } catch (...) {
+                // Keep the default when the value is not numeric.
+            }
+        } else if (line.rfind("outline_color=", 0) == 0) {
+            float red = 0.0f, green = 0.0f, blue = 0.0f;
+            if (std::sscanf(line.c_str() + 14, "%f,%f,%f", &red, &green, &blue) == 3)
+                preferences.outlineColor[0] = red, preferences.outlineColor[1] = green, preferences.outlineColor[2] = blue;
+        }
     }
-    return EditorTheme::Black;
+}
+
+} // namespace
+
+UiPreferences loadUiPreferences(const std::filesystem::path& path) {
+    UiPreferences preferences{};
+    readPreferences(path, preferences);
+    if (!std::filesystem::exists(path) && path == defaultUiPreferencesPath())
+        readPreferences(legacyThemePreferencePath(), preferences);
+    return preferences;
+}
+
+void saveUiPreferences(const std::filesystem::path& path, const UiPreferences& preferences) {
+    std::ofstream stream(path, std::ios::trunc);
+    if (!stream) return;
+    stream << "theme=" << (preferences.theme == EditorTheme::DarkBlue ? "darkblue" : "black") << '\n';
+    stream << "outline=" << (preferences.selectionOutline ? "on" : "off") << '\n';
+    stream << "outline_thickness=" << preferences.outlineThickness << '\n';
+    stream << "outline_theme_color=" << (preferences.outlineThemeColor ? "on" : "off") << '\n';
+    stream << "outline_color=" << preferences.outlineColor[0] << ','
+           << preferences.outlineColor[1] << ',' << preferences.outlineColor[2] << '\n';
+}
+
+EditorTheme loadThemePreference(const std::filesystem::path& path) {
+    return loadUiPreferences(path).theme;
 }
 
 void saveThemePreference(const std::filesystem::path& path, EditorTheme theme) {
-    std::ofstream stream(path, std::ios::trunc);
-    if (!stream) return;
-    stream << "theme=" << (theme == EditorTheme::DarkBlue ? "darkblue" : "black") << '\n';
+    UiPreferences preferences = loadUiPreferences(path);
+    preferences.theme = theme;
+    saveUiPreferences(path, preferences);
 }
 
 } // namespace rae::imgui
