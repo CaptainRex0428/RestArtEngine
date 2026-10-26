@@ -503,7 +503,7 @@ void SceneEditor::drawOutlineSettings() {
     ImGui::BeginDisabled(preferences.outlineThemeColor);
     struct Preset { const char* name; float color[3]; };
     static const Preset presets[] = {
-        {"Orange", {1.0f, 0.70f, 0.25f}},
+        {"Orange", {0.992f, 0.471f, 0.016f}},
         {"White", {0.95f, 0.95f, 0.95f}},
         {"Cyan", {0.25f, 0.80f, 1.0f}},
     };

@@ -1608,6 +1608,9 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         click(materialRect("Discard draft").GetCenter());
         require(editor.materialPreview() == nullptr, "Discard kept an active material preview.");
         capture("material_preview_discarded", true);
+            // One more frame: the override clears during the click frame, so compare an
+            // image that already rendered without the preview.
+            capture("material_preview_discarded", true);
         require(scenePixels(output / "material_preview_discarded.bmp", settings) == before,
             "Discard did not restore the committed material's scene pixels.");
 

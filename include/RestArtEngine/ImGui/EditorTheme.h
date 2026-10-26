@@ -28,9 +28,11 @@ struct UiPreferences {
     bool selectionOutline = true;
     // Ring radius in scene-texture pixels.
     float outlineThickness = 2.0f;
-    // Reuse the active theme accent instead of a fixed colour.
-    bool outlineThemeColor = true;
-    float outlineColor[3] = {1.0f, 0.70f, 0.25f};
+    // Reuse the active theme accent instead of the fixed brand orange.
+    bool outlineThemeColor = false;
+    // Brand orange (#FD7804) sampled from the project artwork; also the default
+    // entry in the colour presets.
+    float outlineColor[3] = {0.992f, 0.471f, 0.016f};
     // Also outline geometry in front of the selection (symmetric depth test).
     bool outlineFrontObjects = false;
 };

@@ -76,7 +76,7 @@ struct SceneSettings {
     const std::uint64_t* outlineActors = nullptr;
     std::uint32_t outlineActorCount = 0;
     // rgb + alpha, normally the active theme accent.
-    float outlineColor[4] = {1.0f, 0.70f, 0.25f, 1.0f};
+    float outlineColor[4] = {0.992f, 0.471f, 0.016f, 1.0f};
     // Ring radius in scene-texture pixels.
     float outlineThickness = 2.0f;
     // Outline geometry in front of the selection too (symmetric depth test).
