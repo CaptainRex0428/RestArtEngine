@@ -1,0 +1,3 @@
+interface:
+  display_name: "RestArtEngine Rendering"
+  short_description: "Develop portable rendering with live shaders and parameters"
