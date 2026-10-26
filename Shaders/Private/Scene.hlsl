@@ -626,7 +626,8 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
     const float centerDepth = depthBuffer.Load(int3(pixel, 0)).r;
     const int radius = (int)max(1.0, round(outlineParams.x));
     float solid = 0.0;
-    float hidden = 0.0;
+    float hiddenEdge = 0.0;
+    float hiddenArea = 0.0;
     [unroll] for (int index = 0; index < 8; ++index)
     {
         const int2 offset = int2(round(kOutlineDirections[index] * (float)radius));
@@ -637,10 +638,21 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
         // depth and therefore never generate an inner border.
         if (neighbour.r > 0.5 && abs(depthBuffer.Load(int3(samplePosition, 0)).r - centerDepth) > 1e-5)
             solid = 1.0;
-        if (neighbour.g > 0.5) hidden = 1.0;
+        // G marks fragments hidden behind other geometry. Only the boundary of
+        // that region becomes the dashed contour; its interior is left alone so
+        // the hint stays a line instead of a hatched fill.
+        if (neighbour.g > 0.5)
+        {
+            hiddenArea = 1.0;
+            if (center.g < 0.5) hiddenEdge = 1.0;
+        }
     }
-    // Occluded runs stay readable as a dashed hint instead of disappearing.
+    // Style: 0 = dashed contour (default), 1 = translucent fill of the occluded
+    // region, kept as a separate presentation mode.
     const bool dashOn = ((pixel.x + pixel.y) & 7) < 4;
-    const float alpha = solid > 0.5 ? outlineColor.a : (hidden > 0.5 && dashOn ? outlineColor.a * 0.9 : 0.0);
+    float alpha = 0.0;
+    if (solid > 0.5) alpha = outlineColor.a;
+    else if (outlineParams.w > 0.5 && hiddenArea > 0.5) alpha = outlineColor.a * 0.25;
+    else if (outlineParams.w <= 0.5 && hiddenEdge > 0.5 && dashOn) alpha = outlineColor.a * 0.9;
     return alpha > 0.0 ? float4(outlineColor.rgb, alpha) : float4(0.0, 0.0, 0.0, 0.0);
 }

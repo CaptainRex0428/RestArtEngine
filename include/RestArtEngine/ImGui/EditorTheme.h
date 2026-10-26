@@ -31,6 +31,8 @@ struct UiPreferences {
     // Reuse the active theme accent instead of a fixed colour.
     bool outlineThemeColor = true;
     float outlineColor[3] = {1.0f, 0.70f, 0.25f};
+    // Occluded geometry presentation: 0 = dashed contour, 1 = translucent fill.
+    int outlineOccludedStyle = 0;
 };
 
 [[nodiscard]] UiPreferences& uiPreferences();

@@ -497,6 +497,12 @@ void SceneEditor::drawOutlineSettings() {
     ImGui::SetNextItemWidth(180);
     changed |= ImGui::SliderFloat("Thickness", &preferences.outlineThickness, 1.0f, 6.0f, "%.1f px");
     changed |= ImGui::Checkbox("Use theme accent", &preferences.outlineThemeColor);
+    ImGui::SeparatorText("Occluded");
+    if (ImGui::RadioButton("Dashed contour", preferences.outlineOccludedStyle == 0))
+        preferences.outlineOccludedStyle = 0, changed = true;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Filled", preferences.outlineOccludedStyle == 1))
+        preferences.outlineOccludedStyle = 1, changed = true;
     ImGui::SeparatorText("Colour");
     ImGui::BeginDisabled(preferences.outlineThemeColor);
     struct Preset { const char* name; float color[3]; };
@@ -1125,6 +1131,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     settings.outlineColor[2] = accent.z;
     settings.outlineColor[3] = 1.0f;
     settings.outlineThickness = preferences.outlineThickness;
+    settings.outlineOccludedStyle = preferences.outlineOccludedStyle;
     const auto* mainViewport = ImGui::GetMainViewport();
     // BeginMenu needs a native horizontal menu bar. SameLine in a normal
     // window leaves menus in vertical mode, consuming the remaining width.

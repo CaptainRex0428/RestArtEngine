@@ -66,7 +66,7 @@ public:
     void composite(ID3D11DeviceContext* context, ID3D11RenderTargetView* sceneColor,
                    ID3D11ShaderResourceView* sceneDepth, const D3D11_VIEWPORT& viewport,
                    ID3D11VertexShader* fullscreenShader, ID3D11PixelShader* compositeShader,
-                   const float color[4], float thickness);
+                   const float color[4], float thickness, int occludedStyle);
 
 private:
     struct Impl;

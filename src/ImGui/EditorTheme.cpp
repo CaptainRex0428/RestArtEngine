@@ -181,6 +181,10 @@ void readPreferences(const std::filesystem::path& path, UiPreferences& preferenc
             } catch (...) {
                 // Keep the default when the value is not numeric.
             }
+        } else if (line == "outline_occluded=filled") {
+            preferences.outlineOccludedStyle = 1;
+        } else if (line == "outline_occluded=dashed") {
+            preferences.outlineOccludedStyle = 0;
         } else if (line.rfind("outline_color=", 0) == 0) {
             float red = 0.0f, green = 0.0f, blue = 0.0f;
             if (std::sscanf(line.c_str() + 14, "%f,%f,%f", &red, &green, &blue) == 3)
@@ -206,6 +210,7 @@ void saveUiPreferences(const std::filesystem::path& path, const UiPreferences& p
     stream << "outline=" << (preferences.selectionOutline ? "on" : "off") << '\n';
     stream << "outline_thickness=" << preferences.outlineThickness << '\n';
     stream << "outline_theme_color=" << (preferences.outlineThemeColor ? "on" : "off") << '\n';
+    stream << "outline_occluded=" << (preferences.outlineOccludedStyle > 0 ? "filled" : "dashed") << '\n';
     stream << "outline_color=" << preferences.outlineColor[0] << ','
            << preferences.outlineColor[1] << ',' << preferences.outlineColor[2] << '\n';
 }
