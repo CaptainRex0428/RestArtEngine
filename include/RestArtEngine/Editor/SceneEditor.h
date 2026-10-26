@@ -55,6 +55,7 @@ private:
     void drawEditMenu();
     void drawUiMenu();
     void drawGarbageCollection();
+    void drawOutlineSettings();
     bool commandButton(std::string_view id);
     // Records the mutation that just happened; both directions are captured as
     // copies so replaying never reads the live selection.
@@ -97,6 +98,8 @@ private:
     std::filesystem::path garbageCollectionSettingsPath_;
     rae::GarbageCollectionSettings garbageCollectionDraft_;
     bool garbageCollectionOpen_ = false, garbageCollectionDraftDirty_ = false;
+    // Editor-only selection outline settings window, opened from the UI menu.
+    bool outlineSettingsOpen_ = false, outlineSettingsFocused_ = false;
     bool garbageCollectionFocused_ = false;
     bool garbageCollectionRequested_ = false;
     std::uint64_t garbageCollectionRequestCount_ = 0;

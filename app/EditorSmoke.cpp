@@ -1095,23 +1095,39 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                         "Top-level menu opens beside/over its heading instead of below the menu bar.");
                     if (menu == 2) {
                         // The UI menu owns the editor-only viewport aids: theme and
-                        // the selection outline settings. Open the nested submenu
-                        // through the same popup the user sees and verify its
-                        // controls are reachable.
+                        // the selection outline settings. The latter open a small
+                        // dedicated window instead of crowding the popup; verify the
+                        // entry is reachable, the window opens, and it closes again.
                         auto* popup = context->OpenPopupStack[0].Window;
                         require(popup && popup->Size.y > 0, "UI menu popup has no size.");
                         const float padding = context->Style.WindowPadding.y;
                         const float separator = context->Style.ItemSpacing.y + 1.0f;
                         const float rowHeight = (popup->Size.y - padding * 2.0f - separator) / 4.0f;
-                        input.mouse = {popup->Pos.x + 30.0f, popup->Pos.y + padding + rowHeight * 1.5f};
+                        // "Selection outline..." is the last entry; click its actual
+                        // centre so disabled neighbours or extra separators cannot
+                        // shift the hit target.
+                        const float lastItemY = popup->Pos.y + popup->Size.y - context->Style.WindowPadding.y -
+                            (ImGui::GetTextLineHeight() + context->Style.ItemSpacing.y) * 0.5f;
+                        input.mouse = {popup->Pos.x + 40.0f, lastItemY};
                         capture("toolbar_ui_hover", true);
-                        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
-                        capture("toolbar_ui_submenu", true, true);
-                        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
-                        capture("toolbar_ui_submenu", true, true);
+                        click(input.mouse);
+                        capture("toolbar_outline_window", true, true);
+                        const auto* outlineWindow = findWindow("Selection Outline");
+                        require(outlineWindow != nullptr, "Selection outline settings window did not open.");
                         require(renderedUiText.find("Show outline") != std::string::npos &&
                             renderedUiText.find("Use theme accent") != std::string::npos,
-                            "UI menu is missing the selection outline settings.");
+                            "Selection outline settings window has no controls.");
+                        click({outlineWindow->Pos.x + outlineWindow->Size.x - outlineWindow->TitleBarHeight * 0.5f,
+                            outlineWindow->Pos.y + outlineWindow->TitleBarHeight * 0.5f});
+                        capture("toolbar_outline_closed", true);
+                        // The close button flips p_open this frame; the window is
+                        // removed on the following frame.
+                        capture("toolbar_outline_closed", true);
+                        // ImGui may keep the window object one extra frame; what
+                        // matters is that it is no longer submitted/drawn.
+                        const auto* closedWindow = findWindow("Selection Outline");
+                        require(closedWindow == nullptr || !closedWindow->WasActive,
+                            "Selection outline settings window did not close.");
                     }
                     input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Escape, true); };
                     capture("toolbar_close", true);

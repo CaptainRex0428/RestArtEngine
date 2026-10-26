@@ -445,50 +445,6 @@ void SceneEditor::drawUiMenu() {
         }
         ImGui::EndMenu();
     }
-    // Editor-only viewport aids live here so viewport settings stay about the
-    // scene, not about how the editor highlights it.
-    if (ImGui::BeginMenu("Selection Outline")) {
-        auto& preferences = imgui::uiPreferences();
-        bool changed = false;
-        bool enabled = preferences.selectionOutline;
-        if (ImGui::MenuItem("Show outline", nullptr, &enabled)) {
-            preferences.selectionOutline = enabled;
-            changed = true;
-        }
-        ImGui::SetNextItemWidth(170);
-        if (ImGui::SliderFloat("Thickness", &preferences.outlineThickness, 1.0f, 6.0f, "%.1f px")) changed = true;
-        bool themeColor = preferences.outlineThemeColor;
-        if (ImGui::MenuItem("Use theme accent", nullptr, &themeColor)) {
-            preferences.outlineThemeColor = themeColor;
-            changed = true;
-        }
-        ImGui::Separator();
-        struct Preset { const char* name; float color[3]; };
-        static const Preset presets[] = {
-            {"Orange", {1.0f, 0.70f, 0.25f}},
-            {"White", {0.95f, 0.95f, 0.95f}},
-            {"Cyan", {0.25f, 0.80f, 1.0f}},
-        };
-        ImGui::BeginDisabled(preferences.outlineThemeColor);
-        for (const auto& preset : presets) {
-            const bool selected = !preferences.outlineThemeColor &&
-                std::abs(preferences.outlineColor[0] - preset.color[0]) < 0.02f &&
-                std::abs(preferences.outlineColor[1] - preset.color[1]) < 0.02f &&
-                std::abs(preferences.outlineColor[2] - preset.color[2]) < 0.02f;
-            if (ImGui::MenuItem(preset.name, nullptr, selected)) {
-                for (int channel = 0; channel < 3; ++channel)
-                    preferences.outlineColor[channel] = preset.color[channel];
-                preferences.outlineThemeColor = false;
-                changed = true;
-            }
-        }
-        ImGui::EndDisabled();
-        if (changed) {
-            imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
-            status_ = "Selection outline updated.";
-        }
-        ImGui::EndMenu();
-    }
     ImGui::Separator();
     if (ImGui::MenuItem("Material editor...", nullptr, materialWindowOpen_, !assets_.materials.empty())) {
         selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
@@ -498,7 +454,70 @@ void SceneEditor::drawUiMenu() {
         garbageCollectionOpen_ = true;
         ImGui::SetWindowFocus("Garbage collection");
     }
+    // Editor-only viewport aids get their own small window, matching the other
+    // settings entries in this menu instead of crowding the popup itself.
+    if (ImGui::MenuItem("Selection outline...", nullptr, outlineSettingsOpen_)) {
+        outlineSettingsOpen_ = true;
+        ImGui::SetWindowFocus("Selection Outline");
+    }
     ImGui::EndMenu();
+}
+
+void SceneEditor::drawOutlineSettings() {
+    // Clear the focus flag before the early-out: a window closed this frame must
+    // not keep suppressing scene shortcuts on the next ones.
+    outlineSettingsFocused_ = false;
+    if (!outlineSettingsOpen_) return;
+    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+    // Small centered dialog: auto-resize keeps the controls visible instead of
+    // pushing the colour presets below a scrollbar.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints({360, 0}, {FLT_MAX, FLT_MAX});
+    const bool visible = ImGui::Begin("Selection Outline", &outlineSettingsOpen_,
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize);
+    outlineSettingsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (!visible) { ImGui::End(); return; }
+    ImGui::TextWrapped("Editor-only highlight for the selected Actors. "
+        "Not saved into the scene and not drawn in standalone runs.");
+    ImGui::SeparatorText("Style");
+    auto& preferences = imgui::uiPreferences();
+    bool changed = false;
+    changed |= ImGui::Checkbox("Show outline", &preferences.selectionOutline);
+    ImGui::BeginDisabled(!preferences.selectionOutline);
+    ImGui::SetNextItemWidth(180);
+    changed |= ImGui::SliderFloat("Thickness", &preferences.outlineThickness, 1.0f, 6.0f, "%.1f px");
+    changed |= ImGui::Checkbox("Use theme accent", &preferences.outlineThemeColor);
+    ImGui::SeparatorText("Colour");
+    ImGui::BeginDisabled(preferences.outlineThemeColor);
+    struct Preset { const char* name; float color[3]; };
+    static const Preset presets[] = {
+        {"Orange", {1.0f, 0.70f, 0.25f}},
+        {"White", {0.95f, 0.95f, 0.95f}},
+        {"Cyan", {0.25f, 0.80f, 1.0f}},
+    };
+    for (const auto& preset : presets) {
+        const std::string swatchId = std::string("##") + preset.name;
+        ImGui::ColorButton(swatchId.c_str(), ImVec4(preset.color[0], preset.color[1], preset.color[2], 1.0f),
+            ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha, ImVec2(18, 18));
+        ImGui::SameLine();
+        const bool selected = std::abs(preferences.outlineColor[0] - preset.color[0]) < 0.02f &&
+            std::abs(preferences.outlineColor[1] - preset.color[1]) < 0.02f &&
+            std::abs(preferences.outlineColor[2] - preset.color[2]) < 0.02f;
+        if (ImGui::RadioButton(preset.name, selected)) {
+            for (int channel = 0; channel < 3; ++channel)
+                preferences.outlineColor[channel] = preset.color[channel];
+            preferences.outlineThemeColor = false;
+            changed = true;
+        }
+    }
+    ImGui::EndDisabled();
+    if (preferences.outlineThemeColor) ImGui::TextDisabled("Using the active theme accent.");
+    ImGui::EndDisabled();
+    if (changed) {
+        imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
+        status_ = "Selection outline updated.";
+    }
+    ImGui::End();
 }
 
 void SceneEditor::drawGarbageCollection() {
@@ -1085,6 +1104,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::End();
 
     drawGarbageCollection();
+    drawOutlineSettings();
 
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer,
         [this] { duplicateForDrag(); }, materialPreview());
@@ -1156,10 +1176,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawMaterialWindow(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!garbageCollectionFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!garbageCollectionFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();

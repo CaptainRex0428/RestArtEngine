@@ -211,7 +211,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 2. 遮罩通道只重绘选中 Actor 的轮廓到一张场景尺寸的遮罩纹理；深度只读比较（`LESS_EQUAL`、不写深度），因此被其他物体遮挡的部分不会外溢描边。
 3. 合成通道用屏幕空间膨胀把遮罩扩成描边，用 `SV_Position` 换算的纹理坐标采样并与场景颜色 alpha 混合；不按视口局部 UV 采样，保证停靠面板任意尺寸时描边仍贴合轮廓。
 
-渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection Outline` 的偏好填入（开关、粗细、是否用主题强调色、预设颜色），偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，因此独立运行不承担该通道的开销。描边颜色不写入场景资产，也不参与撤销或保存。
+渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，因此独立运行不承担该通道的开销。描边颜色不写入场景资产，也不参与撤销或保存。
 
 ## 开发指引
 
