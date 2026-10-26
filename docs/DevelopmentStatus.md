@@ -128,6 +128,27 @@ CMake 与 Premake Debug 构建通过。新增 `LoadingScreenTests` 通过，覆�
 
 本次最终代码在 Windows/DX11 的验证：CMake Debug 与 Premake／MSBuild Debug 构建通过；CTest 的 GC 与加载页测试 2/2 通过；从已提交 Sandbox 创建隔离副本，完整编辑器自测、GC GPU／UI 自测、14 帧渲染自测及图像比较均通过，D3D11 验证错误 0。覆盖独立材质窗口、实时预览、Two-sided、实例 Details、Alt 单／多选复制与撤销、Shader 回滚、停靠重排及布局恢复。本机证据为 `artifacts/linear-integration/{editor,gc,render}/`。本轮不重复原生 Capture 保存框的桌面像素测试，其实现与此前通过版本一致，历史证据见上文；不新增跨平台／跨屏验收结论。原分支历史和集成前工作文件已在本机备份。
 
+## 三条任务线完整性复核（2026-10-26）
+
+在整合提交 `36f4a42` 上复核全部相关任务提交，以下六个原始提交均为当前 `master` 的祖先，已提交功能无需再次 cherry-pick 或另造重复提交：
+
+| 任务 | 提交 | 保留内容 |
+| --- | --- | --- |
+| 渲染规范 | `c94095d` | 渲染角色、技能、工程结构、热编译、实时反馈及跨平台设计边界。 |
+| 材质实时预览 | `1d9b8aa` | 只读草稿预览、连续滑块反馈及 Apply／Save／Discard 契约。 |
+| 双面材质 | `3c6de25` | 逐材质 Two-sided、光栅／光追／阴影／拾取、持久化与旧文件兼容。 |
+| GUI 规范 | `39416f0` | GUI 角色、技能、主题与设计／验收流程。 |
+| 原生工具窗基础 | `c95860c` | 独立平台窗口、消息／焦点处理、最小化及销毁生命周期。 |
+| 材质窗口与面板 | `5dfe4b5` | 独立材质／Shader 窗口、草稿保留、Scene／Details 页签与旧布局迁移。 |
+
+分别完成渲染和 GUI 的只读专项复核：关键 HLSL、资产结构与序列化和双面材质提交一致；独立材质窗口及材质／Shader 控件核心实现和 GUI 提交一致；后续 GC 与实例 Details 改动保留两侧契约。Details 改为选中 Actor 实例属于后续需求修正。Visual Studio 式显隐／图钉／命名布局仍是设计提案，三平台／四后端仍以 RenderingDevelopment 中的已实现边界为准。
+
+复用上节同一运行时代码的两套 Debug 构建、CTest、完整编辑器／GC／渲染回归证据；新增真实桌面补测 `Test-Capture.ps1`，覆盖 F9、鼠标 Capture、中文选址、取消、覆盖拒绝／确认、模态期间标题像素及关闭恢复，全部通过，D3D11 错误 0，已检查弹窗期间和关闭后的实际截图。证据为 `artifacts/linear-integration/native-capture-confirmed/`。
+
+窗口补测首轮在 Project Manager 双击最大化后的还原步骤失败。脚本原本以同步 `SendMessage` 发送按下、异步 `PostMessage` 发送抬起；`IsZoomed` 观察到状态变化时，原生最大化处理仍可能未退出，同步按下存在重入风险。现将两边输入统一排队，不改引擎运行时、不放宽断言或添加重试。隔离脚本和最终 `Test-WindowChrome.ps1` 均通过编辑器／Project Manager 最大化、还原、最小化、双击标题、命中区域、F11／Esc、实际 F9 保存及脏关闭保护。失败及两次成功证据分别保留在 `native-chrome-confirmed/`、`native-chrome-queued-probe/`、`native-chrome-final/`；未记录消息级追踪，不将重入顺序推断写成已观测的运行时故障。
+
+提交归属核对记录为本机 `artifacts/linear-integration/all-task-commits.json`。Sandbox 原始文件哈希保持不变，仍不纳入本次提交。上述运行范围为 Windows/DX11；跨屏 DPI、系统吸附弹窗及未实现后端不新增通过结论。
+
 ## 维护方式
 
 协调者在阶段完成或任务交接时更新本页，领域执行者回报证据并更新获准范围内的领域文档。记录日期、实现／验证／提交状态、证据入口和下一步；结果变化时修正当前条目，历史验证保持日期与范围，不以旧结果覆盖新失败。

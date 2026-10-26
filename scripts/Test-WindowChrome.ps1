@@ -75,7 +75,9 @@ function Caption-Click([int]$index, [int]$expected) {
     $x = [int]($bounds.Width - (2.5 - $index) * 46 * $scale)
     $y = [int](18 * $scale)
     Assert ((Hit $x $y) -eq $expected) "Caption button $index has the wrong native hit target."
-    [ChromeNative]::SendMessage($script:window, 0xA1, [IntPtr]$expected,
+    # Queue both input edges. A synchronous down can reenter an in-progress
+    # native maximize after IsZoomed changes, before capture handling settles.
+    [ChromeNative]::PostMessage($script:window, 0xA1, [IntPtr]$expected,
         [ChromeNative]::Pack($bounds.X + $x, $bounds.Y + $y)) | Out-Null
     [ChromeNative]::PostMessage($script:window, 0x202, [IntPtr]::Zero, [ChromeNative]::Pack($x, $y)) | Out-Null
 }
