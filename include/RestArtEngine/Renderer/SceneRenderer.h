@@ -79,8 +79,9 @@ struct SceneSettings {
     float outlineColor[4] = {1.0f, 0.70f, 0.25f, 1.0f};
     // Ring radius in scene-texture pixels.
     float outlineThickness = 2.0f;
-    // Also outline the geometry in front of the selection (default off).
-    bool outlineOccluders = false;
+    // Draw the occluder/selection intersection ring as a solid line instead of
+    // dashes. The occluder silhouette is never outlined.
+    bool outlineSolidIntersection = false;
 
 };
 

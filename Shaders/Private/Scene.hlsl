@@ -632,26 +632,26 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
         const int2 offset = int2(round(kOutlineDirections[index] * (float)radius));
         const int2 samplePosition = max(pixel + offset, int2(0, 0));
         const float4 neighbour = outlineMask.Load(int3(samplePosition, 0));
-        // Default: a silhouette needs the selected fragment to be *nearer* than
-        // the pixel we paint on, which keeps interior details out and avoids
-        // outlining an occluder in front. outlineParams.w > 0.5 switches to a
-        // symmetric depth test, so front occluders are outlined as well.
+        // A silhouette needs the selected fragment to be *nearer* than the pixel
+        // we paint on. This keeps interior details out and never traces the whole
+        // occluder silhouette: the only thing drawn on an occluder is the
+        // intersection ring below.
         const float neighbourDepth = depthBuffer.Load(int3(samplePosition, 0)).r;
-        const bool silhouette = outlineParams.w > 0.5
-            ? abs(neighbourDepth - centerDepth) > 1e-5
-            : neighbourDepth + 1e-6 < centerDepth;
-        if (neighbour.r > 0.5 && silhouette)
+        if (neighbour.r > 0.5 && neighbourDepth + 1e-6 < centerDepth)
             solid = 1.0;
         // G marks fragments hidden behind other geometry. Only the boundary of
         // that region becomes the dashed contour; its interior is left alone so
         // the hint stays a line instead of a hatched fill.
         if (neighbour.g > 0.5 && center.g < 0.5) hiddenEdge = 1.0;
     }
-    // Occluded geometry is always a dashed contour: a hint along the silhouette,
-    // never a fill of the hidden area.
+    // The only mark on an occluder is the ring where it crosses the selection:
+    // dashed by default, solid when the editor asks for a crisp intersection
+    // line. The occluder's own silhouette is never traced.
     const bool dashOn = ((pixel.x + pixel.y) & 7) < 4;
+    const bool solidIntersection = outlineParams.w > 0.5;
     float alpha = 0.0;
     if (solid > 0.5) alpha = outlineColor.a;
-    else if (hiddenEdge > 0.5 && dashOn) alpha = outlineColor.a * 0.9;
+    else if (hiddenEdge > 0.5 && (solidIntersection || dashOn))
+        alpha = outlineColor.a * (solidIntersection ? 1.0 : 0.9);
     return alpha > 0.0 ? float4(outlineColor.rgb, alpha) : float4(0.0, 0.0, 0.0, 0.0);
 }

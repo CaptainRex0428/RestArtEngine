@@ -200,7 +200,7 @@ bool SelectionOutlinePass::drawMasks(ID3D11DeviceContext* context, ID3D11DepthSt
 void SelectionOutlinePass::composite(ID3D11DeviceContext* context, ID3D11RenderTargetView* sceneColor,
                                      ID3D11ShaderResourceView* sceneDepth, const D3D11_VIEWPORT& viewport,
                                      ID3D11VertexShader* fullscreenShader, ID3D11PixelShader* compositeShader,
-                                     const float color[4], float thickness, bool outlineOccluders) {
+                                     const float color[4], float thickness, bool solidIntersection) {
     auto& state = *impl_;
     if (!context || !sceneColor || !state.maskView || !sceneDepth) return;
     OutlineConstants data{};
@@ -208,8 +208,8 @@ void SelectionOutlinePass::composite(ID3D11DeviceContext* context, ID3D11RenderT
     data.params[0] = thickness;
     data.params[1] = state.width ? 1.0f / static_cast<float>(state.width) : 0.0f;
     data.params[2] = state.height ? 1.0f / static_cast<float>(state.height) : 0.0f;
-    // 1 = symmetric depth test (also outline front occluders).
-    data.params[3] = outlineOccluders ? 1.0f : 0.0f;
+    // 1 = solid intersection ring instead of dashes.
+    data.params[3] = solidIntersection ? 1.0f : 0.0f;
     context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
     context->OMSetRenderTargets(1, &sceneColor, nullptr);
     context->RSSetViewports(1, &viewport);
