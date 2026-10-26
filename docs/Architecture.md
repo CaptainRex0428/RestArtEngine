@@ -203,6 +203,16 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 光追开关当前使用 GPU Shader 中的解析求交：内置 Sphere / Plane / Cube 使用精确解析路径，OBJ、未来 MeshAsset 以及超过 32 个内置对象的部分使用 `StructuredBuffer<RayTriangle>` 三角形路径。每帧按 Actor 变换上传全部可见网格三角形，不设置引擎级三角形预算；仅在数量无法用 D3D11 结构化缓冲区的字节数或元素数表示时拒绝分配，避免静默丢弃场景几何。没有 DXR、硬件 RT 管线、通用网格 BVH 或路径追踪。节点材质编辑、纹理资产、加速结构和其他后端是后续扩展。
 
+### 编辑器选中描边
+
+选中描边是**编辑器可视化**，不属于运行时场景渲染。它由一个独立通道 `SelectionOutlinePass`（`include/RestArtEngine/Renderer/SelectionOutline.h`、`src/Renderer/SelectionOutline.cpp`）承担，位置在场景着色全部完成之后、编辑器合成场景纹理之前：
+
+1. 场景几何照常写入颜色与深度（前向或延迟路径）。
+2. 遮罩通道只重绘选中 Actor 的轮廓到一张场景尺寸的遮罩纹理；深度只读比较（`LESS_EQUAL`、不写深度），因此被其他物体遮挡的部分不会外溢描边。
+3. 合成通道用屏幕空间膨胀把遮罩扩成描边，用 `SV_Position` 换算的纹理坐标采样并与场景颜色 alpha 混合；不按视口局部 UV 采样，保证停靠面板任意尺寸时描边仍贴合轮廓。
+
+开关与颜色来自 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`（默认取主题强调色）、`outlineThickness`（像素半径）。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，因此独立运行不承担该通道的开销。描边颜色不写入场景资产，也不参与撤销或保存。
+
 ## 开发指引
 
 ### 目录归属

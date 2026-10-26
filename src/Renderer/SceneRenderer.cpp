@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include "RestArtEngine/Renderer/SceneRenderer.h"
+#include "RestArtEngine/Renderer/SelectionOutline.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
 #include <d3d11shader.h>
@@ -77,6 +78,13 @@ struct alignas(16) ShadowConstants {
 };
 static_assert(sizeof(ObjectConstants) == 160 && sizeof(RayConstants) == 5136 && sizeof(RayTriangle) == 80);
 static_assert(sizeof(ShadowConstants) == 160);
+// Editor-only outline constants, kept out of SceneConstants so the runtime scene
+// contract is unchanged when no editor selection exists.
+struct alignas(16) OutlineConstants {
+    XMFLOAT4 color;  // rgb + alpha, authored by the editor theme
+    XMFLOAT4 params; // ring radius in pixels, 1/width, 1/height, reserved
+};
+static_assert(sizeof(OutlineConstants) == 32);
 XMMATRIX actorMatrix(const scene::Actor& actor) {
     const auto& t = actor.transform;
     return XMMatrixScaling(t.scale[0], t.scale[1], t.scale[2]) *
@@ -150,10 +158,11 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ObjectConstants", D3D_SIT_CBUFFER, 1, sizeof(ObjectConstants)},
         {"RayConstants", D3D_SIT_CBUFFER, 2, sizeof(RayConstants)},
         {"ShadowConstants", D3D_SIT_CBUFFER, 3, sizeof(ShadowConstants)},
+        {"OutlineConstants", D3D_SIT_CBUFFER, 4, sizeof(OutlineConstants)},
         {"albedoBuffer", D3D_SIT_TEXTURE, 0, 0}, {"normalBuffer", D3D_SIT_TEXTURE, 1, 0}, {"positionBuffer", D3D_SIT_TEXTURE, 2, 0},
         {"shadowMap", D3D_SIT_TEXTURE, 3, 0}, {"gbufferSampler", D3D_SIT_SAMPLER, 0, 0},
         {"shadowSampler", D3D_SIT_SAMPLER, 1, 0},
-        {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}
+        {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0}
     };
     for (UINT i = 0; i < desc.BoundResources; ++i) {
         D3D11_SHADER_INPUT_BIND_DESC binding{}; reflection->GetResourceBindingDesc(i, &binding);
@@ -194,7 +203,9 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ShadowConstants","lightViewProjection",0,64},
         {"ShadowConstants","lightViewProjectionCascade1",64,64},
         {"ShadowConstants","shadowParameters",128,16},
-        {"ShadowConstants","cascadeParameters",144,16}
+        {"ShadowConstants","cascadeParameters",144,16},
+        {"OutlineConstants","outlineColor",0,16},
+        {"OutlineConstants","outlineParams",16,16}
     };
     for (const auto& variable : variables) {
         auto* cb = reflection->GetConstantBufferByName(variable.buffer);
@@ -307,6 +318,10 @@ struct SceneRenderer::Impl {
     std::array<ComPtr<ID3D11ShaderResourceView>, 3> gbufferViews;
     ComPtr<ID3D11VertexShader> geometryVS, fullscreenVS;
     ComPtr<ID3D11PixelShader> forwardPS, gbufferPS, deferredPS, backgroundPS;
+    ComPtr<ID3D11PixelShader> outlineMaskPS, outlineCompositePS;
+    // Created on the first editor frame that has a selection; runtime frames
+    // never allocate the mask.
+    std::unique_ptr<SelectionOutlinePass> outline;
     ComPtr<ID3D11InputLayout> inputLayout;
     ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants;
     ComPtr<ID3D11Buffer> rayTriangleBuffer;
@@ -435,7 +450,11 @@ struct SceneRenderer::Impl {
                 !failed(device->CreatePixelShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &result), entry, error);
         };
         if (!pixelShader("PSForward", forwardPS) || !pixelShader("PSGBuffer", gbufferPS) ||
-            !pixelShader("PSDeferred", deferredPS) || !pixelShader("PSBackground", backgroundPS)) return false;
+            !pixelShader("PSDeferred", deferredPS) || !pixelShader("PSBackground", backgroundPS) ||
+            !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS))
+            return false;
+        if (!outline) outline = std::make_unique<SelectionOutlinePass>();
+        if (!outline->initialize(device.Get(), error)) return false;
 
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(SceneConstants);
@@ -663,6 +682,36 @@ struct SceneRenderer::Impl {
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
             data.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1);
             data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, materialFlags(*material));
+            context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
+            ID3D11Buffer* vertexBuffer = gpu.vertices.Get();
+            context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+            context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
+            context->DrawIndexed(gpu.count, 0, 0);
+        }
+        return true;
+    }
+
+    // Draws only the editor's selected actors into the outline mask. The mask
+    // pass owns depth/blend state; this routine reuses the mesh cache and the
+    // per-actor constant update of the scene draw so both stay in sync.
+    bool drawSelectedGeometry(const std::uint64_t* actors, std::uint32_t count, const scene::World& world,
+                              const assets::AssetLibrary& assets, std::string& error) {
+        if (!actors || count == 0) return true;
+        const UINT stride = sizeof(assets::MeshVertex), offset = 0;
+        std::unordered_set<assets::AssetId> preparedMeshes;
+        for (const auto& actor : world.actors) {
+            if (!actor.visible || !validTransform(actor)) continue;
+            bool selected = false;
+            for (std::uint32_t index = 0; index < count && !selected; ++index) selected = actors[index] == actor.id;
+            if (!selected) continue;
+            const auto* mesh = assets.findMesh(actor.mesh.meshId);
+            if (!mesh) continue;
+            if (preparedMeshes.insert(mesh->id).second && !prepareMesh(*mesh, error)) return false;
+            auto& gpu = meshes.at(mesh->id);
+            ObjectConstants data{};
+            const auto matrix = actorMatrix(actor);
+            XMStoreFloat4x4(&data.worldMatrix, matrix);
+            XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
             context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
             ID3D11Buffer* vertexBuffer = gpu.vertices.Get();
             context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
@@ -1016,6 +1065,24 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
         state.drawFullscreen(state.backgroundPS.Get());
         if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
+    }
+    // Editor-only selection outline. The mask re-draws the selected silhouettes
+    // against the scene depth (occluded parts are skipped), then the composite
+    // dilates that mask over the scene colour. Runtime callers leave the outline
+    // fields empty, so this block never runs outside the editor.
+    if (settings.editorViewport && settings.outlineActors && settings.outlineActorCount > 0) {
+
+        if (!state.outline) { error = "Selection outline is not initialized."; return false; }
+        if (!state.outline->prepare(state.width, state.height, error)) return false;
+        const auto drawSelected = [&] {
+            return state.drawSelectedGeometry(settings.outlineActors, settings.outlineActorCount, world, assets, error);
+        };
+        if (!state.outline->drawMask(state.context.Get(), state.depth.Get(), sceneViewport,
+                state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
+                state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
+        state.outline->composite(state.context.Get(), backbuffer, sceneViewport,
+            state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
+            settings.outlineColor, settings.outlineThickness);
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
     if (settings.editorViewport) {

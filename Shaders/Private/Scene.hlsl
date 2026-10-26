@@ -586,3 +586,50 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
     return OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 }
+
+// ---------------------------------------------------------------------------
+// Editor-only selection outline.
+//
+// The runtime path never binds t5/b4: the renderer issues these entry points
+// only when the editor supplies a selection, so the standalone scene render
+// does not pay for the mask or the composite. PSOutlineMask writes the selected
+// silhouette into a scene-sized mask; PSOutlineComposite dilates it into the
+// scene colour so the ring hugs the object in screen space.
+// ---------------------------------------------------------------------------
+cbuffer OutlineConstants : register(b4)
+{
+    float4 outlineColor;  // rgb + alpha, authored by the editor theme
+    float4 outlineParams; // ring radius in pixels, 1/width, 1/height, reserved
+};
+Texture2D<float4> outlineMask : register(t5);
+
+static const float2 kOutlineDirections[8] =
+{
+    float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
+    float2(0.7071, 0.7071), float2(-0.7071, 0.7071), float2(0.7071, -0.7071), float2(-0.7071, -0.7071)
+};
+
+float4 PSOutlineMask(GeometryOutput input) : SV_TARGET
+{
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+
+float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
+{
+    // input.uv spans the *viewport* rect, while the mask covers the whole scene
+    // texture. Map the pixel position into texture space so the ring lines up
+    // with the selected silhouette in docked panels of any size.
+    float2 texel = outlineParams.yz;
+    float2 uv = input.position.xy * texel;
+    if (outlineMask.SampleLevel(gbufferSampler, uv, 0).r > 0.5)
+        return float4(0.0, 0.0, 0.0, 0.0);
+    float radius = max(outlineParams.x, 0.5);
+    float ring = 0.0;
+    [unroll] for (int index = 0; index < 8; ++index)
+    {
+        float2 offset = kOutlineDirections[index] * texel * radius;
+        ring = max(ring, outlineMask.SampleLevel(gbufferSampler, uv + offset, 0).r);
+        ring = max(ring, outlineMask.SampleLevel(gbufferSampler, uv + offset * 0.5, 0).r);
+    }
+    return ring > 0.5 ? float4(outlineColor.rgb, outlineColor.a) : float4(0.0, 0.0, 0.0, 0.0);
+}

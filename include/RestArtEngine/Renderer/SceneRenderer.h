@@ -70,6 +70,15 @@ struct SceneSettings {
     // list. An inactive dock tab must not fall back to fullscreen rendering.
     bool editorViewport = false;
     bool viewportVisible = true;
+    // Editor-only selection outline. `outlineActors` is borrowed for the render
+    // call only; runtime callers leave it null, so the outline pass is never
+    // created outside the editor.
+    const std::uint64_t* outlineActors = nullptr;
+    std::uint32_t outlineActorCount = 0;
+    // rgb + alpha, normally the active theme accent.
+    float outlineColor[4] = {1.0f, 0.70f, 0.25f, 1.0f};
+    // Ring radius in scene-texture pixels.
+    float outlineThickness = 2.0f;
 };
 
 // Native D3D11 preview renderer. The broader RHI remains separate until its

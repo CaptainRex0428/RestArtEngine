@@ -35,6 +35,7 @@ add_executable(RestArtEngine
     src/Core/GarbageCollector.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
+    src/Renderer/SelectionOutline.cpp
     src/Assets/AssetLibrary.cpp
     src/Scene/World.cpp
     src/Project/Project.cpp

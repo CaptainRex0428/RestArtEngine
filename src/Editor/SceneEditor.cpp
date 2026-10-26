@@ -984,6 +984,17 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
 
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
     actorPanelFocused_ = false;
+    // Editor-only selection outline: the renderer reads this borrowed list for
+    // this frame only. Colour follows the active theme accent so Black and Dark
+    // Blue keep a consistent selection language.
+    settings.outlineActors = selection_.empty() ? nullptr : selection_.data();
+    settings.outlineActorCount = static_cast<std::uint32_t>(selection_.size());
+    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+    settings.outlineColor[0] = accent.x;
+    settings.outlineColor[1] = accent.y;
+    settings.outlineColor[2] = accent.z;
+    settings.outlineColor[3] = 1.0f;
+    settings.outlineThickness = 2.0f;
     const auto* mainViewport = ImGui::GetMainViewport();
     // BeginMenu needs a native horizontal menu bar. SameLine in a normal
     // window leaves menus in vertical mode, consuming the remaining width.
