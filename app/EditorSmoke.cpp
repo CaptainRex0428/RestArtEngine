@@ -1115,7 +1115,8 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                         const auto* outlineWindow = findWindow("Selection Outline");
                         require(outlineWindow != nullptr, "Selection outline settings window did not open.");
                         require(renderedUiText.find("Show outline") != std::string::npos &&
-                            renderedUiText.find("Use theme accent") != std::string::npos,
+                            renderedUiText.find("Use theme accent") != std::string::npos &&
+                            renderedUiText.find("Custom") != std::string::npos,
                             "Selection outline settings window has no controls.");
                         click({outlineWindow->Pos.x + outlineWindow->Size.x - outlineWindow->TitleBarHeight * 0.5f,
                             outlineWindow->Pos.y + outlineWindow->TitleBarHeight * 0.5f});

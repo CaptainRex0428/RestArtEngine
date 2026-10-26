@@ -495,6 +495,7 @@ void SceneEditor::drawOutlineSettings() {
         {"White", {0.95f, 0.95f, 0.95f}},
         {"Cyan", {0.25f, 0.80f, 1.0f}},
     };
+    bool presetSelected = false;
     for (const auto& preset : presets) {
         const std::string swatchId = std::string("##") + preset.name;
         ImGui::ColorButton(swatchId.c_str(), ImVec4(preset.color[0], preset.color[1], preset.color[2], 1.0f),
@@ -503,12 +504,30 @@ void SceneEditor::drawOutlineSettings() {
         const bool selected = std::abs(preferences.outlineColor[0] - preset.color[0]) < 0.02f &&
             std::abs(preferences.outlineColor[1] - preset.color[1]) < 0.02f &&
             std::abs(preferences.outlineColor[2] - preset.color[2]) < 0.02f;
+        presetSelected = presetSelected || selected;
         if (ImGui::RadioButton(preset.name, selected)) {
             for (int channel = 0; channel < 3; ++channel)
                 preferences.outlineColor[channel] = preset.color[channel];
             preferences.outlineThemeColor = false;
             changed = true;
         }
+    }
+    // Custom colour: selecting the mode keeps the current swatch, and any picked
+    // colour switches the outline off the theme accent.
+    const std::string customSwatch = "##custom-swatch";
+    ImGui::ColorButton(customSwatch.c_str(),
+        ImVec4(preferences.outlineColor[0], preferences.outlineColor[1], preferences.outlineColor[2], 1.0f),
+        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha, ImVec2(18, 18));
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Custom", !presetSelected)) {
+        preferences.outlineThemeColor = false;
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110);
+    if (ImGui::ColorEdit3("##custom-color", preferences.outlineColor, ImGuiColorEditFlags_NoInputs)) {
+        preferences.outlineThemeColor = false;
+        changed = true;
     }
     ImGui::EndDisabled();
     if (preferences.outlineThemeColor) ImGui::TextDisabled("Using the active theme accent.");
