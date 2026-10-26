@@ -632,10 +632,12 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
         const int2 offset = int2(round(kOutlineDirections[index] * (float)radius));
         const int2 samplePosition = max(pixel + offset, int2(0, 0));
         const float4 neighbour = outlineMask.Load(int3(samplePosition, 0));
-        // Only a real depth break counts as a silhouette. Interior details that
-        // live inside one surface (the ground grid, coplanar seams) keep the same
-        // depth and therefore never generate an inner border.
-        if (neighbour.r > 0.5 && abs(depthBuffer.Load(int3(samplePosition, 0)).r - centerDepth) > 1e-5)
+        // A silhouette needs the selected fragment to be *nearer* than the pixel
+        // we are painting on. Comparing one way keeps interior details (ground
+        // grid, coplanar seams) out, and also avoids drawing a solid border on an
+        // occluder that merely sits in front of the selection.
+        const float neighbourDepth = depthBuffer.Load(int3(samplePosition, 0)).r;
+        if (neighbour.r > 0.5 && neighbourDepth + 1e-6 < centerDepth)
             solid = 1.0;
         // G marks fragments hidden behind other geometry. Only the boundary of
         // that region becomes the dashed contour; its interior is left alone so
