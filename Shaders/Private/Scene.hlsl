@@ -20,7 +20,7 @@ struct RayObject
     row_major float4x4 inverseWorld;
     row_major float4x4 normalTransform;
     float4 color;
-    // roughness, metallic, primitive (sphere=0, plane=1, cube=2), grid
+    // roughness, metallic, primitive (sphere=0, plane=1, cube=2), material flags
     float4 properties;
 };
 cbuffer RayConstants : register(b2)
@@ -38,7 +38,7 @@ struct RayTriangle
     float3 position2;
     float3 normal;
     float4 color;
-    // roughness, metallic, primitive-reserved, grid
+    // roughness, metallic, primitive-reserved, material flags
     float4 properties;
 };
 StructuredBuffer<RayTriangle> rayTriangles : register(t4);
@@ -107,13 +107,19 @@ FullscreenOutput VSFullscreen(uint vertexId : SV_VertexID)
     return output;
 }
 
+// properties.w is an integer value: bit 0 Grid, bit 1 Two-sided.
+bool IsTwoSided(float4 properties)
+{
+    return ((uint)properties.w & 2u) != 0;
+}
+
 Surface MaterialAt(float3 position, float3 normal, float4 color, float4 properties)
 {
     Surface material;
     material.albedo = max(color.rgb, 0.0);
     material.roughness = properties.x;
     material.metallic = properties.y;
-    material.grid = properties.w;
+    material.grid = (float)((uint)properties.w & 1u);
     material = EvaluateMaterial(position, normal, material);
     material.albedo = max(material.albedo, 0.0);
     material.roughness = clamp(material.roughness, 0.045, 1.0);
@@ -136,7 +142,8 @@ float3 Environment(float3 direction, float roughness)
 }
 
 // Keep local ray directions unnormalized to preserve world-distance t under scale.
-bool TraceScene(float3 origin, float3 direction, out float distance, out float3 hitNormal, out int hitObject)
+bool TraceScene(float3 origin, float3 direction, out float distance, out float3 hitNormal, out int hitObject,
+                bool shadowRay)
 {
     distance = 1e20;
     hitNormal = float3(0, 1, 0);
@@ -145,6 +152,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
     {
         float3 localOrigin = mul(float4(origin, 1), rayObjects[i].inverseWorld).xyz;
         float3 localDirection = mul(float4(direction, 0), rayObjects[i].inverseWorld).xyz;
+        bool twoSided = IsTwoSided(rayObjects[i].properties);
         float t = 1e20;
         float3 localNormal = float3(0, 1, 0);
         if (rayObjects[i].properties.z < 0.5)
@@ -155,7 +163,9 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
             float discriminant = b * b - a * c;
             if (discriminant >= 0 && a > 1e-12)
             {
-                t = (-b - sqrt(discriminant)) / a;
+                // A shadow visibility ray travels toward the light. For a
+                // single-sided caster its light-facing surface is the far hit.
+                t = (-b + (shadowRay && !twoSided ? 1.0 : -1.0) * sqrt(discriminant)) / a;
                 if (t <= RAY_EPSILON) t = (-b + sqrt(discriminant)) / a;
                 localNormal = localOrigin + localDirection * t;
             }
@@ -218,7 +228,8 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
             float farDistance = min(min(maximum.x, maximum.y), maximum.z);
             if (farDistance >= max(nearDistance, 0.0))
             {
-                t = nearDistance > RAY_EPSILON ? nearDistance : farDistance;
+                t = shadowRay && !twoSided ? farDistance :
+                    (nearDistance > RAY_EPSILON ? nearDistance : farDistance);
                 float3 hit = localOrigin + localDirection * t;
                 float3 a = abs(hit);
                 if (a.x >= a.y && a.x >= a.z) localNormal = float3(sign(hit.x), 0, 0);
@@ -228,8 +239,13 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         }
         if (t > RAY_EPSILON && t < distance)
         {
+            float facing = dot(localDirection, localNormal);
+            // Shadow-map geometry is viewed light -> receiver; visibility
+            // rays run in the opposite direction and accept the opposite side.
+            if (!twoSided && (shadowRay ? facing <= 0.0 : facing >= 0.0)) continue;
             distance = t;
             hitNormal = normalize(mul(float4(localNormal, 0), rayObjects[i].normalTransform).xyz);
+            if (twoSided && dot(hitNormal, direction) > 0.0) hitNormal = -hitNormal;
             hitObject = i;
         }
     }
@@ -239,6 +255,9 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
     [loop] for (int j = 0; j < (int)rayInfo.y; ++j)
     {
         RayTriangle tri = rayTriangles[j];
+        bool twoSided = IsTwoSided(tri.properties);
+        float facing = dot(direction, tri.normal);
+        if (!twoSided && (shadowRay ? facing <= 0.0 : facing >= 0.0)) continue;
         float3 edge0 = tri.position1 - tri.position0;
         float3 edge1 = tri.position2 - tri.position0;
         float3 pvec = cross(direction, edge1);
@@ -256,6 +275,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         {
             distance = t;
             hitNormal = normalize(tri.normal);
+            if (twoSided && facing > 0.0) hitNormal = -hitNormal;
             hitObject = -(j + 2);
         }
     }
@@ -267,7 +287,7 @@ bool TraceSceneAny(float3 origin, float3 direction)
     float distance; float3 normal; int object;
     // TraceScene uses -1 for a miss, so this helper also accepts generic
     // triangle hits (which are encoded as values at or below -2).
-    return TraceScene(origin, direction, distance, normal, object);
+    return TraceScene(origin, direction, distance, normal, object, true);
 }
 
 float ShadowMapPCSSVisibility(float2 uv, float depth, float2 texel, float cascade)
@@ -469,7 +489,7 @@ float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool d
     {
         float3 ray = reflect(-view, normal);
         float distance; float3 hitNormal; int hitObject;
-        if (TraceScene(position + normal * RAY_EPSILON, ray, distance, hitNormal, hitObject))
+        if (TraceScene(position + normal * RAY_EPSILON, ray, distance, hitNormal, hitObject, false))
         {
             float3 hitPosition = position + normal * RAY_EPSILON + ray * distance;
             float4 hitColor = hitObject >= 0 ? rayObjects[hitObject].color : rayTriangles[-hitObject - 2].color;
@@ -520,9 +540,15 @@ float4 PSBackground(FullscreenOutput input) : SV_TARGET
     return Background(input.uv);
 }
 
-float4 PSForward(GeometryOutput input) : SV_TARGET
+float3 SurfaceNormal(float3 normal, bool frontFace)
 {
-    float3 normal = normalize(input.worldNormal);
+    normal = normalize(normal);
+    return IsTwoSided(objectParameters) && !frontFace ? -normal : normal;
+}
+
+float4 PSForward(GeometryOutput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
+{
+    float3 normal = SurfaceNormal(input.worldNormal, frontFace);
     Surface material = MaterialAt(input.worldPosition, normal, objectColor, objectParameters);
     return OutputSurface(input.worldPosition, normal, material,
         input.position.xy / max(viewportDebug.xy, 1.0), false);
@@ -535,10 +561,10 @@ struct GBufferOutput
     float4 position : SV_TARGET2;
 };
 
-GBufferOutput PSGBuffer(GeometryOutput input)
+GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 {
     GBufferOutput output;
-    float3 normal = normalize(input.worldNormal);
+    float3 normal = SurfaceNormal(input.worldNormal, frontFace);
     Surface material = MaterialAt(input.worldPosition, normal, objectColor, objectParameters);
     output.albedo = float4(material.albedo, material.roughness);
     output.normal = float4(normal, material.metallic);

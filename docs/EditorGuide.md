@@ -86,6 +86,8 @@ Content 中的 Material Editor 可以创建和选择材质，调整 Base Color�
 
 界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/{id}.ramat`；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
 
+`Two-sided` 是所有材质共有、逐材质设置的选项。关闭时剔除背面；开启时两面可见，背面使用翻转后的法线参与材质和光照计算。开关即时预览，Apply／Save／Discard 语义与数值参数相同；光栅、阴影及解析／三角形光追都使用该材质设置。新材质默认关闭；旧 `.ramat` 或场景快照缺少 `twoSided` 字段时默认开启，保留原来未剔除背面的行为，保存后会明确写入布尔值。
+
 `Save material assets` 除了写入工程的独立 `.ramat` 文件，也保存当前场景快照，使下次启动恢复材质外观。`Save Scene` 保存当前 Actor 与已应用材质的快照，不会自动应用仍在编辑的参数草稿。`Save All` 会先应用草稿，再保存材质、Shader 与场景；Shader 编译失败时显示错误并留在编辑器中。
 
 程序启动与 `Load Scene` 以工程场景快照为准。需要读入工程 `Content/Materials/` 下的独立材质文件时，使用 `Reload material assets`；这会更新引用这些材质的 Actor。加载失败时保留当前资产并显示错误。

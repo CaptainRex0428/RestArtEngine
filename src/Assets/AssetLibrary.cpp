@@ -40,15 +40,16 @@ MeshAsset sphereMesh() {
     for (std::uint32_t ring=0; ring<rings; ++ring)
         for (std::uint32_t segment=0; segment<segments; ++segment) {
             const auto a=ring*(segments+1)+segment,b=a+segments+1;
-            if (ring != 0) mesh.indices.insert(mesh.indices.end(),{a,b,a+1});
-            if (ring != rings-1) mesh.indices.insert(mesh.indices.end(),{a+1,b,b+1});
+            // Keep geometric winding aligned with the outward vertex normals.
+            if (ring != 0) mesh.indices.insert(mesh.indices.end(),{a,a+1,b});
+            if (ring != rings-1) mesh.indices.insert(mesh.indices.end(),{a+1,b+1,b});
         }
     return mesh;
 }
 MeshAsset planeMesh() {
     MeshAsset mesh; mesh.id=2; mesh.name="Plane"; mesh.primitive=MeshPrimitive::Plane;
     mesh.vertices={{{-12,0,-12},{0,1,0}},{{12,0,-12},{0,1,0}},{{12,0,12},{0,1,0}},{{-12,0,12},{0,1,0}}};
-    mesh.indices={0,1,2,0,2,3};
+    mesh.indices={0,2,1,0,3,2};
     return mesh;
 }
 MeshAsset cubeMesh() {

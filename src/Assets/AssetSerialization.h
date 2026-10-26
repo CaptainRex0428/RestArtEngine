@@ -53,7 +53,7 @@ inline Json materialJson(const MaterialAsset& material) {
     validateMaterial(material);
     return {{"id",material.id}, {"name",material.name},
         {"baseColor",material.baseColor}, {"roughness",material.roughness}, {"metallic",material.metallic},
-        {"grid",material.grid}};
+        {"grid",material.grid}, {"twoSided",material.twoSided}};
 }
 inline MaterialAsset readMaterial(const Json& value) {
     MaterialAsset result;
@@ -63,6 +63,9 @@ inline MaterialAsset readMaterial(const Json& value) {
     result.roughness = value.at("roughness").get<float>();
     result.metallic = value.at("metallic").get<float>();
     result.grid = value.value("grid", false);
+    // Before this option existed the renderer disabled back-face culling.
+    // value<bool> also rejects non-boolean fields instead of coercing them.
+    result.twoSided = value.value("twoSided", true);
     validateMaterial(result);
     return result;
 }

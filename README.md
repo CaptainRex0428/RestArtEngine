@@ -63,6 +63,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - Dear ImGui Docking 工作区：Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 可分割停靠、合并标签及悬浮。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
 - 材质参数拖动时实时预览，Apply 确认、Save 保存，Discard draft 恢复；`Grid` 程序化网格材质。
+- 所有材质统一提供 `Two-sided` 独立开关，控制背面可见性与背面法线，沿用实时预览和保存流程。
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。

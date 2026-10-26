@@ -76,6 +76,14 @@
 
 编辑器日志／截图位于本机 `artifacts/material-preview-editor/`，渲染回归位于 `artifacts/material-preview-render/`。本次定向 UI 自动化操作的是 Roughness／Metallic；Base color／Grid 与切材质确认分支已检查接线，未单独注入交互测试。Linux、macOS 及其他图形后端尚未运行验证。
 
+### 材质 Two-sided
+
+所有材质统一具备独立的 `twoSided` 开关，不增加场景全局覆盖。新材质默认单面，旧文件缺字段时按双面兼容；实时预览、提交、丢弃和保存沿用已有材质流程。渲染实现将此选项统一用于光栅剔除、背面法线、阴影和解析／三角形光追，并处理镜像缩放。拾取遵循有效预览材质的面规则，单面背面不挡住后方对象。GPU 数据布局保持不变；具体编码与阴影方向约定见 Architecture。
+
+2026-10-23 使用独立 `build/material-preview-vs2022` 的 MSVC Debug 构建，在 Windows／D3D11／NVIDIA GeForce RTX 5060 上通过隔离 Sandbox 的完整编辑器自测及渲染回归，D3D11 debug layer 错误数为 0。新增 GPU 对照覆盖平面正反面、X／Y 镜像、背面 World normals、Forward／Deferred、解析／三角形反射及阴影，以及单面 Sphere／Cube 的远交点阴影。真实 UI 点击 Two-sided 立即改变背面像素，Apply／Discard、预览资产隔离、背面拾取、持久化及 Shader revision 不变检查通过；旧文件缺字段兼容及非布尔字段的事务性拒绝通过。既有参数拖动、Shader 热编译／错误回滚和资源契约检查继续通过。
+
+本机证据为 `artifacts/two-sided-editor/stdout.txt`、同目录的 `two_sided_*` 截图，以及 `artifacts/two-sided-render/validation-results.json`、`artifacts/two-sided-render-validation.txt`。截图已检查，宽面板中 Grid 与 Two-sided 并排，空间不足时换行。其他平台／后端未运行验证，材质属性仍未新增通用撤销能力。
+
 ## 平台与图形后端矩阵
 
 这是设计范围，不是支持完成表；实际可用性还取决于构建、驱动、设备及功能等级。

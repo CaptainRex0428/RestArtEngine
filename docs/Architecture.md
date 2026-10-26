@@ -115,6 +115,14 @@ SceneEditor
 
 材质参数草稿通过 `SceneEditor::materialPreview()` 提供每帧只读覆盖，渲染器按资产 ID 同时用于前向／延迟绘制与光追材质。颜色、粗糙度、金属度及 Grid 变化可在拖动过程中预览，不修改 `AssetLibrary` 的已提交材质，也不重新编译 Shader。Apply 提交参数，Discard draft 恢复已提交值；场景保存仍只序列化已提交资产，Save All 则先提交草稿。渲染器只借用该覆盖到本次 `render()` 返回，不持有编辑器对象或草稿指针。
 
+`MaterialAsset::twoSided` 是统一的逐材质表面选项，新材质默认单面。材质与场景快照共用序列化，旧文件缺字段时按双面读取，保持历史可见性。GPU 材质 `properties.w` 使用数值整数标记（bit 0 Grid、bit 1 Two-sided），进入 `EvaluateMaterial()` 前解码 Grid；常量缓冲和 `RayTriangle` 字节布局不变。该选项由渲染器统一处理，不要求工程手写材质 Shader 自行实现剔除。
+
+视口拾取同时读取有效材质及预览覆盖，按镜像补偿后的三角形朝向过滤单面背面，避免不可见背面挡住后方 Actor 的选择；双面预览的背面可以正常拾取。
+
+内置 Mesh 的三角形绕序与顶点法线统一朝外。DX11 按单／双面及镜像变换预建四种光栅状态，镜像时翻转正面定义；Forward 和 G-buffer 根据 `SV_IsFrontFace` 翻转双面背面的着色法线。全屏绘制恢复无剔除状态，防止继承上一对象状态。[D3D11 光栅状态定义](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_rasterizer_desc)提供了相应 API 语义。
+
+解析及三角形光追使用相同的单／双面语义，双面命中法线朝向入射侧；镜像三角形修正其几何法线方向。阴影贴图从光源朝场景绘制，阴影可见性射线则从表面朝光源追踪，因此单面阴影采用相反的面筛选；Sphere／Cube 对这类射线选取朝光的远交点，避免封闭对象漏影。
+
 当前每个 Actor 有一个 `StaticMeshComponent`，没有通用组件注册、反射或 ECS 调度系统。`Transform` 保存位置、以度为单位的 XYZ 欧拉旋转和缩放。场景采用 Y 轴向上；这与 UE 常见的 Z 轴向上约定不同，不能直接套用 UE 坐标。
 
 `ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Details，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。

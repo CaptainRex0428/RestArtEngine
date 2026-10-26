@@ -278,6 +278,14 @@ const assets::MaterialAsset* resolveMaterial(const assets::AssetLibrary& assets,
     const auto* material = assets.findMaterial(id);
     return material && materialOverride && materialOverride->id == id ? materialOverride : material;
 }
+float materialFlags(const assets::MaterialAsset& material) {
+    // Numeric integer flags shared by raster and ray material properties.
+    return static_cast<float>((material.grid ? 1u : 0u) | (material.twoSided ? 2u : 0u));
+}
+bool mirroredTransform(const scene::Actor& actor) {
+    return std::signbit(actor.transform.scale[0]) ^ std::signbit(actor.transform.scale[1]) ^
+        std::signbit(actor.transform.scale[2]);
+}
 } // namespace
 
 struct SceneRenderer::Impl {
@@ -316,6 +324,8 @@ struct SceneRenderer::Impl {
     assets::AssetLibrary defaultAssets;
     scene::World defaultWorld;
     ComPtr<ID3D11RasterizerState> rasterizer;
+    // Index bits: mirrored transform (1), two-sided material (2).
+    std::array<ComPtr<ID3D11RasterizerState>, 4> materialRasterizers;
     ComPtr<ID3D11DepthStencilState> depthEnabled, depthDisabled;
     ComPtr<ID3D11SamplerState> sampler, shadowSampler;
     static constexpr UINT shadowMapSize = 2048;
@@ -434,6 +444,14 @@ struct SceneRenderer::Impl {
         raster.CullMode = D3D11_CULL_NONE;
         raster.DepthClipEnable = TRUE;
         if (failed(device->CreateRasterizerState(&raster, &rasterizer), "Create rasterizer", error)) return false;
+        for (unsigned index = 0; index < materialRasterizers.size(); ++index) {
+            raster.CullMode = (index & 2u) ? D3D11_CULL_NONE : D3D11_CULL_BACK;
+            // Mesh winding agrees with authored normals. Mirroring changes
+            // its projected order while inverse-transpose normals stay valid.
+            raster.FrontCounterClockwise = (index & 1u) ? FALSE : TRUE;
+            if (failed(device->CreateRasterizerState(&raster, &materialRasterizers[index]),
+                       "Create material rasterizer", error)) return false;
+        }
         D3D11_DEPTH_STENCIL_DESC depthDescription{};
         depthDescription.DepthEnable = TRUE;
         depthDescription.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -549,9 +567,10 @@ struct SceneRenderer::Impl {
                 XMStoreFloat3(&triangle.position0, p0);
                 XMStoreFloat3(&triangle.position1, p1);
                 XMStoreFloat3(&triangle.position2, p2);
-                XMStoreFloat3(&triangle.normal, XMVector3Normalize(crossProduct));
+                XMStoreFloat3(&triangle.normal, XMVectorScale(XMVector3Normalize(crossProduct),
+                    mirroredTransform(actor) ? -1.0f : 1.0f));
                 triangle.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1.0f);
-                triangle.properties = XMFLOAT4(material->roughness, material->metallic, 3.0f, material->grid ? 1.0f : 0.0f);
+                triangle.properties = XMFLOAT4(material->roughness, material->metallic, 3.0f, materialFlags(*material));
                 try {
                     triangles.push_back(triangle);
                 } catch (const std::bad_alloc&) {
@@ -619,12 +638,14 @@ struct SceneRenderer::Impl {
             if (!mesh || !material) continue;
             if (preparedMeshes.insert(mesh->id).second && !prepareMesh(*mesh, error)) return false;
             auto& gpu = meshes.at(mesh->id);
+            const unsigned rasterIndex = (mirroredTransform(actor) ? 1u : 0u) | (material->twoSided ? 2u : 0u);
+            context->RSSetState(materialRasterizers[rasterIndex].Get());
             ObjectConstants data{};
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
             data.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1);
-            data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, material->grid ? 1.0f : 0.0f);
+            data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, materialFlags(*material));
             context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
             ID3D11Buffer* vertexBuffer = gpu.vertices.Get();
             context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
@@ -635,6 +656,8 @@ struct SceneRenderer::Impl {
     }
 
     void drawFullscreen(ID3D11PixelShader* pixelShader) {
+        // A preceding geometry/shadow draw may have enabled per-material culling.
+        context->RSSetState(rasterizer.Get());
         context->IASetInputLayout(nullptr);
         context->VSSetShader(fullscreenVS.Get(), nullptr, 0);
         context->PSSetShader(pixelShader, nullptr, 0);
@@ -900,7 +923,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             object.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1);
             const float primitive = mesh->primitive == assets::MeshPrimitive::Sphere ? 0.0f :
                 mesh->primitive == assets::MeshPrimitive::Plane ? 1.0f : 2.0f;
-            object.properties = XMFLOAT4(material->roughness, material->metallic, primitive, material->grid ? 1.0f : 0.0f);
+            object.properties = XMFLOAT4(material->roughness, material->metallic, primitive, materialFlags(*material));
         }
     }
     rays.info.y = wantsRayScene ? static_cast<float>(state.rayTriangleCount) : 0.0f;

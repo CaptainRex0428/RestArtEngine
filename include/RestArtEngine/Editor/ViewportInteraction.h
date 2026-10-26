@@ -13,7 +13,8 @@ public:
     // (the one the gizmo pivots on). Picking replaces the selection.
     bool draw(renderer::SceneSettings&, scene::World&, const assets::AssetLibrary&,
               std::vector<scene::ActorId>& selection, scene::ActorId& selected,
-              renderer::SceneRenderer& renderer);
+              renderer::SceneRenderer& renderer,
+              const assets::MaterialAsset* materialOverride = nullptr);
     bool isUsing() const { return usingGizmo_; }
     bool isHovered() const { return hovered_; }
     bool isFocused() const { return focused_; }

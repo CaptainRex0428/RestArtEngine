@@ -106,11 +106,11 @@ bool applyMatrix(const XMFLOAT4X4& matrix, int operation, scene::Transform& tran
 }
 
 bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
-                       GXMVECTOR b, HXMVECTOR c, float& distance) {
+                       GXMVECTOR b, HXMVECTOR c, float& distance, bool twoSided, float orientation) {
     const XMVECTOR edge1 = b - a, edge2 = c - a;
     const XMVECTOR p = XMVector3Cross(direction, edge2);
     const float determinant = XMVectorGetX(XMVector3Dot(edge1, p));
-    if (std::abs(determinant) < 1e-8f) return false;
+    if (std::abs(determinant) < 1e-8f || (!twoSided && determinant * orientation <= 0)) return false;
     const float inverse = 1.0f / determinant;
     const XMVECTOR delta = origin - a;
     const float u = XMVectorGetX(XMVector3Dot(delta, p)) * inverse;
@@ -123,7 +123,8 @@ bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
 }
 
 scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World& world,
-                   const assets::AssetLibrary& assets, FXMMATRIX view, CXMMATRIX projection) {
+                   const assets::AssetLibrary& assets, FXMMATRIX view, CXMMATRIX projection,
+                   const assets::MaterialAsset* materialOverride) {
     const ImVec2 mouse = ImGui::GetMousePos();
     const auto unproject = [&](float depth) {
         return XMVector3Unproject(XMVectorSet(mouse.x, mouse.y, depth, 1),
@@ -138,8 +139,11 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
     for (const auto& actor : world.actors) {
         if (!actor.visible || !validTransform(actor.transform)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        if (!mesh || !assets.findMaterial(actor.mesh.materialId)) continue;
+        const auto* material = assets.findMaterial(actor.mesh.materialId);
+        if (!mesh || !material) continue;
+        if (materialOverride && materialOverride->id == material->id) material = materialOverride;
         const XMMATRIX matrix = actorMatrix(actor.transform);
+        const float orientation = XMVectorGetX(XMMatrixDeterminant(matrix)) < 0 ? -1.0f : 1.0f;
         for (std::size_t i = 0; i + 2 < mesh->indices.size(); i += 3) {
             XMVECTOR vertices[3];
             bool valid = true;
@@ -150,7 +154,8 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
                 vertices[j] = XMVector3TransformCoord(XMVectorSet(p[0], p[1], p[2], 1), matrix);
             }
             float distance = 0;
-            if (valid && intersectTriangle(origin, direction, vertices[0], vertices[1], vertices[2], distance) &&
+            if (valid && intersectTriangle(origin, direction, vertices[0], vertices[1], vertices[2], distance,
+                    material->twoSided, orientation) &&
                 distance < nearest) { nearest = distance; hit = actor.id; }
         }
     }
@@ -160,7 +165,8 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
 
 bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& world,
                                const assets::AssetLibrary& assets, std::vector<scene::ActorId>& selection,
-                               scene::ActorId& selected, renderer::SceneRenderer& renderer) {
+                               scene::ActorId& selected, renderer::SceneRenderer& renderer,
+                               const assets::MaterialAsset* materialOverride) {
     hovered_ = focused_ = false;
     settings.editorViewport = true;
     settings.viewportVisible = false;
@@ -337,7 +343,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     } else usingGizmo_ = false;
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        const auto hit = pick(settings, world, assets, view, projection);
+        const auto hit = pick(settings, world, assets, view, projection, materialOverride);
         if ((io.KeyCtrl || io.KeyShift) && hit) {
             // Additive picking mirrors the Outliner: toggle membership and keep
             // the clicked Actor as the primary one.

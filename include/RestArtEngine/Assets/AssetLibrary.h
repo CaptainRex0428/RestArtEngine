@@ -24,6 +24,9 @@ struct MaterialAsset {
     float roughness = .25f;
     float metallic = .65f;
     bool grid = false;
+    // New materials cull back faces; legacy files without this field retain
+    // their previously implicit two-sided visibility when deserialized.
+    bool twoSided = false;
 };
 class AssetLibrary {
 public:

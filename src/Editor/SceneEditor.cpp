@@ -645,6 +645,12 @@ void SceneEditor::drawMaterial() {
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 180.0f));
     materialDraftDirty_ |= ImGui::SliderFloat("Metallic", &materialDraft_.metallic, 0, 1, "%.3f", ImGuiSliderFlags_AlwaysClamp);
     materialDraftDirty_ |= ImGui::Checkbox("Grid", &materialDraft_.grid);
+    const auto& style = ImGui::GetStyle();
+    const float twoSidedWidth = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize("Two-sided").x;
+    const float contentRight = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + twoSidedWidth <= contentRight) ImGui::SameLine();
+    materialDraftDirty_ |= ImGui::Checkbox("Two-sided", &materialDraft_.twoSided);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render both faces and flip back-face normals. Changes preview immediately.");
     ImGui::TextDisabled("Shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
     if (pendingMaterial_) {
         ImGui::OpenPopup("Unapplied material draft");
@@ -765,7 +771,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     // own undo, and a gizmo drag owns the keyboard until it ends.
     if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing()) commands_.processShortcuts();
 
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer);
+    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer, materialPreview());
     trackTransformEdit();
 
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });

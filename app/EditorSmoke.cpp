@@ -1,6 +1,7 @@
 #include "EditorSmoke.h"
 #include <imgui_internal.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
+#include <nlohmann/json.hpp>
 #include <DirectXMath.h>
 #include <algorithm>
 #include <cstdint>
@@ -45,6 +46,21 @@ std::string scenePixels(const std::filesystem::path& path, const rae::renderer::
             static_cast<std::size_t>(right - left) * 4);
     }
     return pixels;
+}
+std::array<int, 3> centerPixel(const std::filesystem::path& path) {
+    const auto bmp = contents(path);
+    require(bmp.size() >= 54, "Missing two-sided rendering screenshot.");
+    std::uint32_t offset = 0;
+    std::int32_t width = 0, signedHeight = 0;
+    std::memcpy(&offset, bmp.data() + 10, sizeof(offset));
+    std::memcpy(&width, bmp.data() + 18, sizeof(width));
+    std::memcpy(&signedHeight, bmp.data() + 22, sizeof(signedHeight));
+    const int height = std::abs(signedHeight), y = height / 2;
+    const int row = signedHeight < 0 ? y : height - y - 1;
+    const auto pixel = offset + (static_cast<std::size_t>(row) * width + width / 2) * 4;
+    require(width > 0 && height > 0 && pixel + 4 <= bmp.size(), "Invalid two-sided rendering screenshot.");
+    return {static_cast<unsigned char>(bmp[pixel + 2]), static_cast<unsigned char>(bmp[pixel + 1]),
+        static_cast<unsigned char>(bmp[pixel])};
 }
 struct ImGuiContextScope {
     ImGuiContext* previous = ImGui::GetCurrentContext();
@@ -218,6 +234,238 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     renderer.setMaterialShaderPath(project.shaderRoot / "Materials/Standard.hlsli");
     require(renderer.reloadShaders(error), error);
     require(renderer.shaderSource() == originalSource, "Restoring the project shader failed.");
+
+    {
+        const auto savedWorld = world;
+        const auto savedAssets = assets;
+        const auto savedSettings = settings;
+        assets.createDefaults();
+        world.actors.clear();
+        world.blackBackground = true;
+        const auto planeId = world.createActor("Two-sided plane", 2, 1);
+        auto* plane = world.findActor(planeId);
+        for (auto& scale : plane->transform.scale) scale = .15f;
+        auto* material = assets.findMaterial(1);
+        material->baseColor[0] = .8f; material->baseColor[1] = .15f; material->baseColor[2] = .04f;
+        material->roughness = .7f; material->metallic = 0; material->grid = false;
+        settings.cameraYaw = 0;
+        settings.cameraDistance = 6;
+        std::fill(std::begin(settings.cameraTarget), std::end(settings.cameraTarget), 0.f);
+        settings.shadowMethod = renderer::ShadowMethod::Disabled;
+        settings.rayTracing = false;
+        const auto nearPixel = [](const auto& first, const auto& second, int tolerance = 2) {
+            for (int channel = 0; channel < 3; ++channel)
+                if (std::abs(first[channel] - second[channel]) > tolerance) return false;
+            return true;
+        };
+        // The same authored plane is viewed from either side. Mirroring X
+        // preserves its +Y front, while mirroring Y changes that front to -Y.
+        for (const auto path : {renderer::RenderPath::Forward, renderer::RenderPath::Deferred}) {
+            settings.path = path;
+            const auto prefix = std::string("two_sided_") +
+                (path == renderer::RenderPath::Forward ? "forward" : "deferred");
+            for (int mirror = 0; mirror < 3; ++mirror) {
+                plane->transform.scale[0] = mirror == 1 ? -.15f : .15f;
+                plane->transform.scale[1] = mirror == 2 ? -.15f : .15f;
+                for (int side = 0; side < 2; ++side) {
+                    const bool front = side == 0;
+                    const float normalY = mirror == 2 ? -1.f : 1.f;
+                    settings.cameraPitch = (front ? normalY : -normalY) * .6f;
+                    settings.debugView = 1;
+                    const auto name = prefix + "_mirror" + std::to_string(mirror) + (front ? "_front" : "_back");
+                    material->twoSided = false;
+                    capture((name + "_single").c_str(), false, false, false);
+                    const auto single = centerPixel(output / (name + "_single.bmp"));
+                    material->twoSided = true;
+                    capture((name + "_double").c_str(), false, false, false);
+                    const auto two = centerPixel(output / (name + "_double.bmp"));
+                    require(two[0] > 100, "A two-sided plane was invisible from its front or back.");
+                    require(front ? nearPixel(single, two) : nearPixel(single, std::array<int, 3>{0, 0, 0}),
+                        "Single-sided plane culling disagrees with its authored normal after mirroring.");
+                    settings.debugView = 3;
+                    capture((name + "_normals").c_str(), false, false, false);
+                    const auto normal = centerPixel(output / (name + "_normals.bmp"));
+                    const auto expected = std::array<int, 3>{128, settings.cameraPitch > 0 ? 255 : 0, 128};
+                    require(nearPixel(normal, expected), "Two-sided World normals did not face the viewer.");
+                }
+            }
+        }
+
+        // A polished ground reflects the underside of a raised red plane.
+        // The primary center ray misses that plane, so the center-pixel change
+        // isolates secondary-ray face selection rather than raster visibility.
+        plane->transform.position[1] = 2.f;
+        plane->transform.position[2] = -3.f;
+        std::fill(std::begin(plane->transform.scale), std::end(plane->transform.scale), .15f);
+        const auto groundId = world.createActor("Two-sided reflection receiver", 2, 2);
+        auto* ground = world.findActor(groundId);
+        std::fill(std::begin(ground->transform.scale), std::end(ground->transform.scale), .4f);
+        auto* groundMaterial = assets.findMaterial(2);
+        groundMaterial->baseColor[0] = groundMaterial->baseColor[1] = groundMaterial->baseColor[2] = .8f;
+        groundMaterial->roughness = .05f; groundMaterial->metallic = 1.f;
+        groundMaterial->grid = false; groundMaterial->twoSided = false;
+        auto trianglePlane = *assets.findMesh(2);
+        trianglePlane.id = 4; trianglePlane.name = "Triangle two-sided plane";
+        trianglePlane.primitive = assets::MeshPrimitive::Imported;
+        assets.meshes.push_back(std::move(trianglePlane));
+        // Actor and material containers may have moved while adding fixtures.
+        plane = world.findActor(planeId); material = assets.findMaterial(1);
+        settings.debugView = 0; settings.cameraPitch = .6f;
+        settings.shadowMethod = renderer::ShadowMethod::Disabled;
+        for (const auto path : {renderer::RenderPath::Forward, renderer::RenderPath::Deferred}) {
+            settings.path = path;
+            for (const bool triangles : {false, true}) {
+                const auto name = std::string("two_sided_reflection_") +
+                    (path == renderer::RenderPath::Forward ? "forward_" : "deferred_") +
+                    (triangles ? "triangles" : "analytic");
+                plane->mesh.meshId = triangles ? 4 : 2;
+                settings.rayTracing = false; material->twoSided = false;
+                capture((name + "_no_rays").c_str(), false, false, false);
+                const auto noRays = centerPixel(output / (name + "_no_rays.bmp"));
+                settings.rayTracing = true;
+                capture((name + "_single").c_str(), false, false, false);
+                const auto single = centerPixel(output / (name + "_single.bmp"));
+                material->twoSided = true;
+                capture((name + "_double").c_str(), false, false, false);
+                const auto two = centerPixel(output / (name + "_double.bmp"));
+                require(!nearPixel(single, two, 4), "Two-sided back faces did not appear in ray reflections.");
+                material->twoSided = false;
+                plane->transform.scale[1] = -.15f;
+                capture((name + "_reversed_front").c_str(), false, false, false);
+                require(nearPixel(centerPixel(output / (name + "_reversed_front.bmp")), two),
+                    "A two-sided reflected back face differs from the equivalent front-facing normal.");
+                plane->transform.scale[1] = .15f;
+                settings.rayTracing = false; material->twoSided = true;
+                capture((name + "_no_rays_double").c_str(), false, false, false);
+                require(nearPixel(centerPixel(output / (name + "_no_rays_double.bmp")), noRays),
+                    "Reflection fixture's primary center ray intersects the occluder.");
+            }
+        }
+
+        // Shadow rays travel toward the light: a +Y single-sided plane must
+        // block downward incident light, and its -Y version must not. Closed
+        // analytic primitives must still find their far facing-light surface.
+        groundMaterial = assets.findMaterial(2);
+        groundMaterial->metallic = 0; groundMaterial->roughness = .8f;
+        plane->transform.position[0] = -.75f;
+        plane->transform.position[1] = 1.5f;
+        plane->transform.position[2] = -.5f;
+        settings.path = renderer::RenderPath::Deferred;
+        settings.rayTracing = false;
+        for (int mode = 0; mode < 3; ++mode) {
+            settings.shadowMethod = mode == 0 ? renderer::ShadowMethod::ShadowMap : renderer::ShadowMethod::AnalyticRay;
+            plane->mesh.meshId = mode == 2 ? 4 : 2;
+            std::fill(std::begin(plane->transform.scale), std::end(plane->transform.scale), .05f);
+            const auto name = "two_sided_shadow_" + std::to_string(mode);
+            material->twoSided = false;
+            plane->visible = false;
+            capture((name + "_clear").c_str(), false, false, false);
+            const auto clear = centerPixel(output / (name + "_clear.bmp"));
+            plane->visible = true;
+            capture((name + "_front").c_str(), false, false, false);
+            const auto front = centerPixel(output / (name + "_front.bmp"));
+            require(front[0] + 15 < clear[0], "A single-sided plane facing the light did not cast a shadow.");
+            plane->transform.scale[1] = -.05f;
+            capture((name + "_back_single").c_str(), false, false, false);
+            require(nearPixel(centerPixel(output / (name + "_back_single.bmp")), clear),
+                "A back-facing single-sided plane cast an unwanted shadow.");
+            material->twoSided = true;
+            capture((name + "_back_double").c_str(), false, false, false);
+            require(nearPixel(centerPixel(output / (name + "_back_double.bmp")), front),
+                "A two-sided plane failed to cast its back-face shadow.");
+        }
+        settings.shadowMethod = renderer::ShadowMethod::AnalyticRay;
+        for (const auto mesh : {assets::AssetId{1}, assets::AssetId{3}}) {
+            plane->mesh.meshId = mesh;
+            std::fill(std::begin(plane->transform.scale), std::end(plane->transform.scale), .4f);
+            const auto name = "two_sided_closed_shadow_" + std::to_string(mesh);
+            material->twoSided = false;
+            capture((name + "_single").c_str(), false, false, false);
+            const auto single = centerPixel(output / (name + "_single.bmp"));
+            material->twoSided = true;
+            capture((name + "_double").c_str(), false, false, false);
+            require(nearPixel(centerPixel(output / (name + "_double.bmp")), single),
+                "Single-sided analytic closed geometry missed the facing-light far intersection.");
+            plane->visible = false;
+            capture((name + "_clear").c_str(), false, false, false);
+            require(single[0] + 15 < centerPixel(output / (name + "_clear.bmp"))[0],
+                "Analytic sphere/cube shadow fixture did not cover the receiver.");
+            plane->visible = true;
+        }
+        world = savedWorld; assets = savedAssets; settings = savedSettings;
+        std::cout << "PASS: Per-material face culling, flipped back-face normals, mirrored transforms, "
+            "Forward/Deferred, analytic/triangle ray back faces, and facing-light raster/analytic shadows.\n";
+    }
+
+    {
+        require(!assets::MaterialAsset{}.twoSided, "New materials must default to single-sided rendering.");
+        const auto fixtureRoot = output / "TwoSidedSerialization";
+        const auto materialFolder = fixtureRoot / "Materials";
+        const auto sceneFile = fixtureRoot / "scene.rascene";
+        assets::AssetLibrary fixtureAssets;
+        fixtureAssets.createDefaults();
+        fixtureAssets.findMaterial(1)->twoSided = false;
+        fixtureAssets.findMaterial(2)->twoSided = true;
+        scene::World fixtureWorld;
+        fixtureWorld.createDefaultScene();
+        require(fixtureAssets.saveMaterials(materialFolder, error), error);
+        require(fixtureWorld.save(sceneFile, fixtureAssets, error), error);
+        assets::AssetLibrary loaded;
+        require(loaded.loadMaterials(materialFolder, error), error);
+        require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
+            "Material assets did not preserve independent Two-sided values.");
+        scene::World loadedWorld;
+        require(loadedWorld.load(sceneFile, loaded, error), error);
+        require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
+            "Scene material snapshots did not preserve Two-sided values.");
+        using Json = nlohmann::json;
+        const auto writeFixture = [](const auto& path, const Json& value) {
+            std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            file << value.dump(2) << '\n';
+            require(file.good(), "Failed writing an isolated Two-sided fixture.");
+        };
+        for (const auto id : {1, 2}) {
+            const auto path = materialFolder / (std::to_string(id) + ".ramat");
+            auto legacy = Json::parse(contents(path));
+            legacy["material"].erase("twoSided");
+            writeFixture(path, legacy);
+        }
+        require(loaded.loadMaterials(materialFolder, error), error);
+        require(loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
+            "Legacy materials without Two-sided lost their previous double-sided visibility.");
+        auto legacyScene = Json::parse(contents(sceneFile));
+        for (auto& material : legacyScene["materials"]) material.erase("twoSided");
+        const auto legacySceneFile = fixtureRoot / "legacy.rascene";
+        writeFixture(legacySceneFile, legacyScene);
+        require(loadedWorld.load(legacySceneFile, loaded, error), error);
+        require(loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
+            "Legacy scene snapshots without Two-sided were not preserved as double-sided.");
+        const auto retainedName = loaded.findMaterial(1)->name;
+        const auto retainedActor = loadedWorld.actors.front().name;
+        const auto badMaterialFile = materialFolder / "1.ramat";
+        const auto legacyMaterial = Json::parse(contents(badMaterialFile));
+        for (const auto& badType : std::array<Json, 3>{Json(1), Json("true"), Json(nullptr)}) {
+            auto invalidMaterial = legacyMaterial;
+            invalidMaterial["material"]["twoSided"] = badType;
+            invalidMaterial["material"]["name"] = "Must not commit";
+            writeFixture(badMaterialFile, invalidMaterial);
+            require(!loaded.loadMaterials(materialFolder, error) && !error.empty() &&
+                loaded.materials.size() == 2 && loaded.findMaterial(1)->twoSided &&
+                loaded.findMaterial(1)->name == retainedName && loaded.findMaterial(2)->twoSided,
+                "Invalid Two-sided material type was accepted or partially replaced the asset library.");
+            auto invalidScene = legacyScene;
+            invalidScene["materials"][0]["twoSided"] = badType;
+            invalidScene["actors"][0]["name"] = "Must not commit";
+            const auto badSceneFile = fixtureRoot / "invalid.rascene";
+            writeFixture(badSceneFile, invalidScene);
+            require(!loadedWorld.load(badSceneFile, loaded, error) && !error.empty() &&
+                loadedWorld.actors.front().name == retainedActor && loaded.findMaterial(1)->name == retainedName &&
+                loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
+                "Invalid Two-sided scene type was accepted or partially replaced scene/assets.");
+        }
+        std::cout << "PASS: Two-sided asset/scene persistence, legacy missing-field compatibility, "
+            "and transactional rejection of non-boolean values.\n";
+    }
 
     auto* sphere = world.findActor(1);
     require(sphere != nullptr, "Default sphere missing.");
@@ -733,6 +981,72 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         dragParameter("Roughness", .2f, .75f, "material_restore_drag");
         click(materialRect("Discard draft").GetCenter());
         capture("material_editor", true);
+        {
+            const auto originalWorld = world;
+            const auto originalSettings = settings;
+            auto* actor = world.findActor(editor.selectedActor());
+            require(actor != nullptr, "Two-sided UI fixture has no selected Actor.");
+            for (auto& candidate : world.actors) candidate.visible = candidate.id == actor->id;
+            actor->mesh.meshId = 2;
+            actor->transform = {};
+            std::fill(std::begin(actor->transform.scale), std::end(actor->transform.scale), .15f);
+            settings.cameraYaw = 0; settings.cameraPitch = -.6f; settings.cameraDistance = 6;
+            std::fill(std::begin(settings.cameraTarget), std::end(settings.cameraTarget), 0.f);
+            settings.path = renderer::RenderPath::Deferred;
+            settings.debugView = 1;
+            settings.rayTracing = false;
+            settings.shadowMethod = renderer::ShadowMethod::Disabled;
+            require(!assets.findMaterial(materialId)->twoSided,
+                "Two-sided UI fixture expected the new default single-sided material.");
+            capture("two_sided_ui_before", true);
+            const auto single = scenePixels(output / "two_sided_ui_before.bmp", settings);
+            click(materialRect("Two-sided").GetCenter());
+            require(editor.materialPreview() && editor.materialPreview()->twoSided &&
+                !assets.findMaterial(materialId)->twoSided && renderer.shaderRevision() == shaderVersion,
+                "Two-sided checkbox did not preview independently without committing or recompiling.");
+            capture("two_sided_ui_preview", true);
+            const auto doubleSided = scenePixels(output / "two_sided_ui_preview.bmp", settings);
+            require(single != doubleSided, "Two-sided checkbox did not immediately reveal the plane's back face.");
+            click(materialRect("Discard draft").GetCenter());
+            capture("two_sided_ui_discarded", true);
+            require(!editor.materialPreview() &&
+                scenePixels(output / "two_sided_ui_discarded.bmp", settings) == single,
+                "Discard failed to restore single-sided visibility.");
+            click(materialRect("Two-sided").GetCenter());
+            click(materialRect("Apply material").GetCenter());
+            capture("two_sided_ui_applied", true);
+            require(!editor.materialPreview() && assets.findMaterial(materialId)->twoSided &&
+                scenePixels(output / "two_sided_ui_applied.bmp", settings) == doubleSided,
+                "Apply failed to preserve the already-previewed Two-sided appearance.");
+            require(assets.saveMaterials(savedFolder, error), error);
+            require(restoredAssets.loadMaterials(savedFolder, error), error);
+            require(restoredAssets.findMaterial(materialId)->twoSided,
+                "The UI-applied Two-sided value did not survive isolated material persistence.");
+            const auto planeActorId = actor->id;
+            const ImVec2 backFacePoint{
+                settings.viewportX + settings.viewportWidth * .62f,
+                settings.viewportY + settings.viewportHeight * .58f};
+            click(materialRect("Two-sided").GetCenter());
+            require(editor.materialPreview() && !editor.materialPreview()->twoSided,
+                "Two-sided picking fixture did not preview single-sided visibility.");
+            click(backFacePoint);
+            require(editor.selectedActor() == 0, "The culled single-sided back face still blocked viewport picking.");
+            click(materialRect("Two-sided").GetCenter());
+            require(editor.materialPreview() && editor.materialPreview()->twoSided,
+                "Two-sided picking fixture did not restore its double-sided preview.");
+            click(backFacePoint);
+            require(editor.selectedActor() == planeActorId,
+                "A visible two-sided preview back face could not be selected.");
+            require(contents(project.defaultScene) == sceneOnDisk && contents(materialPath) == materialOnDisk &&
+                renderer.shaderRevision() == shaderVersion,
+                "Two-sided editing changed real project files or recompiled shaders.");
+            *assets.findMaterial(materialId) = committed;
+            click(materialRect("Discard draft").GetCenter());
+            world = originalWorld; settings = originalSettings;
+            capture("material_editor", true);
+            std::cout << "PASS: Two-sided checkbox real-time back-face preview, independent asset state, "
+                "Discard/Apply, matching back-face picking, isolated persistence, and no shader recompilation.\n";
+        }
         std::cout << "PASS: Material slider feedback while held, scene-only pixel changes, temporary asset overrides, "
             "Discard/Apply, isolated persistence, Forward/Deferred, analytic/triangle rays, and no shader recompilation.\n";
     }
