@@ -62,7 +62,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 - Dear ImGui Docking 工作区：Outliner、Details、Viewport settings、Content & Editors 和 Scene Viewport 可分割停靠、合并标签及悬浮。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
-- 材质参数草稿 → Apply → Save 两段式提交；`Grid` 程序化网格材质。
+- 材质参数拖动时实时预览，Apply 确认、Save 保存，Discard draft 恢复；`Grid` 程序化网格材质。
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。
@@ -258,8 +258,9 @@ Forward : 背景 + 几何  →  绘制时直接着色
 
 | 操作 | 运行中预览 | 磁盘 |
 | --- | --- | --- |
-| 编辑材质参数草稿 | 不变 | 不变 |
-| Apply material | 更新所有引用该材质的 Actor | 不变 |
+| 编辑材质参数草稿 | 所有引用该材质的 Actor 实时预览，拖动中持续更新 | 不变 |
+| Apply material | 将当前预览提交为资产参数，画面保持一致 | 不变 |
+| Discard draft | 恢复最近 Apply 的材质参数 | 不变 |
 | Save material assets | 不变 | 写 `Content/Materials/*.ramat` |
 | 编辑 Shader 草稿 | 不变 | 不变 |
 | Shader Apply / Compile | 成功则整体替换 6 个 shader 阶段 | 不变 |

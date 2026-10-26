@@ -38,6 +38,11 @@ const char* meshType(assets::MeshPrimitive type) {
 void message(const std::string& text) {
     if (!text.empty()) ImGui::TextWrapped("%s", text.c_str());
 }
+bool validMaterialParameters(const assets::MaterialAsset& material) {
+    const auto unitValue = [](float value) { return std::isfinite(value) && value >= 0 && value <= 1; };
+    return unitValue(material.roughness) && unitValue(material.metallic) &&
+        std::all_of(std::begin(material.baseColor), std::end(material.baseColor), unitValue);
+}
 void continueButtonRow(const char* nextLabel) {
     const auto& style = ImGui::GetStyle();
     const float nextWidth = ImGui::CalcTextSize(nextLabel).x + 2 * style.FramePadding.x;
@@ -97,7 +102,7 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
     shaderDraft_ = shaderSaved_ = renderer.shaderSource();
     shaderDraft_.reserve(std::max<std::size_t>(65536, shaderDraft_.size() * 2));
-    status_ = "Project loaded. Actor edits are live; Material and Shader edits require Apply.";
+    status_ = "Project loaded. Actor edits and material parameters preview live; Shader edits require Apply.";
     registerCommands();
     return true;
 }
@@ -179,17 +184,24 @@ void SceneEditor::selectMaterial(assets::AssetId id) {
     }
 }
 
+const assets::MaterialAsset* SceneEditor::materialPreview() const {
+    if (!materialDraftDirty_ || materialDraft_.id != selectedMaterial_ ||
+        !assets_.findMaterial(selectedMaterial_) || !validMaterialParameters(materialDraft_)) return nullptr;
+    return &materialDraft_;
+}
+
+void SceneEditor::discardMaterial() {
+    if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
+    materialDraftDirty_ = false;
+    status_ = "Material draft discarded. Preview restored to the applied material.";
+}
+
 bool SceneEditor::applyMaterial() {
     auto* target = assets_.findMaterial(selectedMaterial_);
     if (!target) { status_ = "Material no longer exists."; return false; }
-    if (materialDraft_.name.empty() || !std::isfinite(materialDraft_.roughness) || !std::isfinite(materialDraft_.metallic) ||
-        materialDraft_.roughness < 0 || materialDraft_.roughness > 1 || materialDraft_.metallic < 0 || materialDraft_.metallic > 1) {
-        status_ = "Material needs a name and Roughness/Metallic values between zero and one."; return false;
-    }
-    for (const auto channel : materialDraft_.baseColor) {
-        if (!std::isfinite(channel) || channel < 0 || channel > 1) {
-            status_ = "Material base color values must be finite and between zero and one."; return false;
-        }
+    if (materialDraft_.name.empty() || !validMaterialParameters(materialDraft_)) {
+        status_ = "Material needs a name and finite Base color/Roughness/Metallic values between zero and one.";
+        return false;
     }
     *target = materialDraft_;
     materialDraftDirty_ = false;
@@ -588,6 +600,10 @@ void SceneEditor::drawMaterial() {
     ImGui::EndDisabled();
     continueButtonRow("Apply material");
     if (ImGui::Button("Apply material")) applyMaterial();
+    continueButtonRow("Discard draft");
+    ImGui::BeginDisabled(!materialDraftDirty_);
+    if (ImGui::Button("Discard draft")) discardMaterial();
+    ImGui::EndDisabled();
     continueButtonRow("Save material assets");
     ImGui::BeginDisabled(materialDraftDirty_);
     if (ImGui::Button("Save material assets")) {
@@ -616,16 +632,18 @@ void SceneEditor::drawMaterial() {
         } else status_ = error;
     }
     ImGui::EndDisabled();
-    if (materialDraftDirty_) ImGui::TextColored({1,.7f,.25f,1}, "Draft changed: Apply to update Actors; Save writes assets.");
+    ImGui::TextWrapped("Parameters preview live. Apply confirms the draft; Save writes assets.");
+    if (materialDraftDirty_) ImGui::TextColored({1,.7f,.25f,1}, "Live preview: draft not applied or saved.");
+    else ImGui::TextDisabled("No unapplied material changes.");
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= textInput("Name", materialDraft_.name);
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= ImGui::ColorEdit3("Base color", materialDraft_.baseColor);
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
-    materialDraftDirty_ |= ImGui::SliderFloat("Roughness", &materialDraft_.roughness, .05f, 1);
+    materialDraftDirty_ |= ImGui::SliderFloat("Roughness", &materialDraft_.roughness, .05f, 1, "%.3f", ImGuiSliderFlags_AlwaysClamp);
     if (ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x >= 600.0f) ImGui::SameLine();
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 180.0f));
-    materialDraftDirty_ |= ImGui::SliderFloat("Metallic", &materialDraft_.metallic, 0, 1);
+    materialDraftDirty_ |= ImGui::SliderFloat("Metallic", &materialDraft_.metallic, 0, 1, "%.3f", ImGuiSliderFlags_AlwaysClamp);
     materialDraftDirty_ |= ImGui::Checkbox("Grid", &materialDraft_.grid);
     ImGui::TextDisabled("Shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
     if (pendingMaterial_) {
@@ -635,7 +653,7 @@ void SceneEditor::drawMaterial() {
             bool change = false;
             if (ImGui::Button("Apply & switch")) change = applyMaterial();
             ImGui::SameLine();
-            if (ImGui::Button("Discard & switch")) { materialDraftDirty_ = false; change = true; }
+            if (ImGui::Button("Discard & switch")) { discardMaterial(); change = true; }
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) { pendingMaterial_ = 0; ImGui::CloseCurrentPopup(); }
             if (change) {

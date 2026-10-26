@@ -10,7 +10,7 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 
 namespace rae::scene { class World; }
-namespace rae::assets { class AssetLibrary; }
+namespace rae::assets { class AssetLibrary; struct MaterialAsset; }
 
 namespace rae::renderer {
 
@@ -81,8 +81,11 @@ public:
                     std::string& error);
     bool resize(std::uint32_t width, std::uint32_t height, std::string& error);
     bool render(const SceneSettings& settings, std::string& error);
+    // Optional per-frame material override, matched by asset ID across raster
+    // and ray paths. Borrowed only for this call; the asset library is unchanged.
     bool render(const SceneSettings& settings, const scene::World& world,
-                const assets::AssetLibrary& assets, std::string& error);
+                const assets::AssetLibrary& assets, std::string& error,
+                const assets::MaterialAsset* materialOverride = nullptr);
     // Clears the swap-chain target without drawing a scene. Used by the
     // project manager, which only needs the GPU surface for its UI.
     bool clear(const float color[4], std::string& error);

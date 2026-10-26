@@ -113,6 +113,8 @@ SceneEditor
 
 `World` 用稳定 ID 标识 Actor；复制 Actor 分配新 ID，删除其他 Actor 不改变现有 ID。编辑器应保存 ID，在使用时重新查找对象，避免持有可能因 vector 扩容失效的指针。Actor 通过资产 ID 引用 Mesh 和 Material，同一资产可以由多个 Actor 共享。修改共享 Material 会影响所有引用它的 Actor；需要独立参数时创建另一个 Material 并重新分配。
 
+材质参数草稿通过 `SceneEditor::materialPreview()` 提供每帧只读覆盖，渲染器按资产 ID 同时用于前向／延迟绘制与光追材质。颜色、粗糙度、金属度及 Grid 变化可在拖动过程中预览，不修改 `AssetLibrary` 的已提交材质，也不重新编译 Shader。Apply 提交参数，Discard draft 恢复已提交值；场景保存仍只序列化已提交资产，Save All 则先提交草稿。渲染器只借用该覆盖到本次 `render()` 返回，不持有编辑器对象或草稿指针。
+
 当前每个 Actor 有一个 `StaticMeshComponent`，没有通用组件注册、反射或 ECS 调度系统。`Transform` 保存位置、以度为单位的 XYZ 欧拉旋转和缩放。场景采用 Y 轴向上；这与 UE 常见的 Z 轴向上约定不同，不能直接套用 UE 坐标。
 
 `ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Details，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。

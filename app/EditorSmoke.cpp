@@ -2,6 +2,8 @@
 #include <imgui_internal.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <DirectXMath.h>
+#include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -17,6 +19,32 @@ void require(bool value, const std::string& error) { if (!value) throw std::runt
 std::string contents(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
+}
+// Compare only the actual scene image: a slider value, activity text, or hover
+// highlight changing elsewhere in the editor is not evidence of GPU feedback.
+std::string scenePixels(const std::filesystem::path& path, const rae::renderer::SceneSettings& settings) {
+    const auto bmp = contents(path);
+    require(bmp.size() >= 54 && bmp[0] == 'B' && bmp[1] == 'M', "Invalid material-preview screenshot.");
+    std::uint32_t offset = 0;
+    std::int32_t width = 0, signedHeight = 0;
+    std::memcpy(&offset, bmp.data() + 10, sizeof(offset));
+    std::memcpy(&width, bmp.data() + 18, sizeof(width));
+    std::memcpy(&signedHeight, bmp.data() + 22, sizeof(signedHeight));
+    const auto height = std::abs(signedHeight);
+    require(width > 0 && height > 0 && offset + static_cast<std::size_t>(width) * height * 4 <= bmp.size(),
+        "Invalid material-preview screenshot dimensions.");
+    const int left = std::clamp(settings.viewportX, 0, width);
+    const int right = std::clamp(settings.viewportX + settings.viewportWidth, left, width);
+    const int top = std::clamp(settings.viewportY, 0, height);
+    const int bottom = std::clamp(settings.viewportY + settings.viewportHeight, top, height);
+    require(right > left && bottom > top, "Material preview has no visible scene pixels.");
+    std::string pixels;
+    for (int y = top; y < bottom; ++y) {
+        const auto row = signedHeight < 0 ? y : height - y - 1;
+        pixels.append(bmp.data() + offset + (static_cast<std::size_t>(row) * width + left) * 4,
+            static_cast<std::size_t>(right - left) * 4);
+    }
+    return pixels;
 }
 struct ImGuiContextScope {
     ImGuiContext* previous = ImGui::GetCurrentContext();
@@ -98,7 +126,8 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     std::string error;
     ImGuiContext* context = nullptr;
     std::string renderedUiText;
-    const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false) {
+    const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false,
+                             bool useMaterialPreview = true) {
         ui.beginFrame(1.0f / 60.0f);
         context = ImGui::GetCurrentContext();
         settings.viewportWidth = settings.viewportHeight = 0;
@@ -123,7 +152,8 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
                     "Scene renderer rectangle differs from this frame's dock content rectangle.");
             }
         }
-        require(renderer.render(settings, world, assets, error), error);
+        require(renderer.render(settings, world, assets, error,
+            useMaterialPreview ? editor.materialPreview() : nullptr), error);
         ui.endFrame();
         require(renderer.saveScreenshot((output / (std::string(name) + ".bmp")).c_str(), error), error);
         require(renderer.present(false, error), error);
@@ -550,6 +580,19 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     };
     const auto selectTab = [&](const char* name) {
         auto* bar = tabBar();
+        // Locating a low material control can scroll the tab row out of view.
+        // Reveal the real row before calculating its mouse target; clicking a
+        // clipped BarRect would otherwise hit a different panel or control.
+        if (bar->BarRect.Min.y < bar->Window->InnerRect.Min.y ||
+            bar->BarRect.Max.y > bar->Window->InnerRect.Max.y) {
+            ImGuiContextScope active(context);
+            ImGui::ScrollToRectEx(bar->Window, bar->BarRect, ImGuiScrollFlags_KeepVisibleEdgeY);
+            capture("ui_tab_reveal", true);
+            bar = tabBar();
+        }
+        require(bar->BarRect.Min.y >= bar->Window->InnerRect.Min.y - 1 &&
+            bar->BarRect.Max.y <= bar->Window->InnerRect.Max.y + 1,
+            "Editor tab row is clipped after scrolling it into view.");
         for (auto& tab : bar->Tabs) {
             if (std::strcmp(ImGui::TabBarGetTabName(bar, &tab), name) != 0) continue;
             const auto id = tab.ID;
@@ -562,6 +605,137 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     };
     selectTab("Material Editor");
     capture("material_editor", true);
+    {
+        ImGuiContextScope active(context);
+        // Locate existing widgets, then exercise their normal mouse input path.
+        const auto itemRect = [&](ImGuiWindow* window, ImGuiID id) {
+            require(window != nullptr, "Material-preview control window is missing.");
+            ImGui::FocusWindow(window);
+            ImGui::SetNavID(id, ImGuiNavLayer_Main, window->NavRootFocusScopeId, ImRect());
+            capture("material_locate", true);
+            require(context->NavId == id && context->NavIdIsAlive,
+                "Material-preview control could not be located.");
+            auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+            ImGui::ScrollToRectEx(window, rect, ImGuiScrollFlags_KeepVisibleEdgeY);
+            capture("material_locate", true);
+            return ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+        };
+        const auto materialRect = [&](const char* label) {
+            const auto* bar = tabBar();
+            return itemRect(bar->Window, ImHashStr(label, 0, bar->SelectedTabId));
+        };
+        auto* detailsWindow = findWindow("Details");
+        require(detailsWindow != nullptr, "Material-preview Details panel is missing.");
+        click(itemRect(detailsWindow, detailsWindow->GetID("Edit assigned material")).GetCenter());
+        selectTab("Material Editor");
+        const auto* materialActor = world.findActor(editor.selectedActor());
+        require(materialActor != nullptr && materialActor->mesh.materialId == 1 && assets.findMaterial(2),
+            "Material preview requires the default copper sphere and ground.");
+        const auto materialId = materialActor->mesh.materialId;
+        const auto committed = *assets.findMaterial(materialId);
+        const auto sceneOnDisk = contents(project.defaultScene);
+        const auto materialPath = project.contentRoot / "Materials" / (std::to_string(materialId) + ".ramat");
+        const auto materialOnDisk = contents(materialPath);
+        const auto shaderVersion = renderer.shaderRevision();
+        settings.path = renderer::RenderPath::Deferred;
+        settings.rayTracing = false;
+        capture("material_preview_before", true);
+        const auto before = scenePixels(output / "material_preview_before.bmp", settings);
+        const auto dragParameter = [&](const char* label, float first, float last, const char* prefix) {
+            const auto rect = materialRect(label);
+            const auto point = [&](float fraction) {
+                return ImVec2(rect.Min.x + 4 + (rect.GetWidth() - 8) * fraction, rect.GetCenter().y);
+            };
+            input.mouse = point(first);
+            capture("material_hover", true);
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+            capture("material_pressed", true);
+            std::string previous;
+            for (int step = 1; step <= 3; ++step) {
+                input.mouse = point(first + (last - first) * step / 3.f);
+                const auto name = std::string(prefix) + "_" + std::to_string(step);
+                capture(name.c_str(), true);
+                require(context->IO.MouseDown[0] && context->ActiveId != 0 && editor.materialPreview(),
+                    "Material preview did not update while the slider was held.");
+                const auto pixels = scenePixels(output / (name + ".bmp"), settings);
+                require(!pixels.empty() && (step == 1 || pixels != previous),
+                    "Dragging a material slider did not continuously change scene pixels.");
+                previous = pixels;
+                require(assets.findMaterial(materialId)->roughness == committed.roughness &&
+                    assets.findMaterial(materialId)->metallic == committed.metallic,
+                    "Live material preview changed committed asset parameters.");
+                require(renderer.shaderRevision() == shaderVersion,
+                    "A numeric material parameter change recompiled the shader.");
+            }
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+            capture("material_released", true);
+        };
+        dragParameter("Roughness", .15f, .85f, "material_roughness_drag");
+        require(scenePixels(output / "material_roughness_drag_3.bmp", settings) != before,
+            "Unapplied material roughness did not change the viewport.");
+        const auto previewScene = output / "MaterialPreviewSandbox/preview.rascene";
+        std::filesystem::create_directories(previewScene.parent_path());
+        require(world.save(previewScene, assets, error), error);
+        scene::World restoredWorld;
+        assets::AssetLibrary restoredAssets;
+        require(restoredWorld.load(previewScene, restoredAssets, error), error);
+        require(restoredAssets.findMaterial(materialId)->roughness == committed.roughness,
+            "Saving a scene serialized the unapplied live material preview.");
+        click(materialRect("Discard draft").GetCenter());
+        require(editor.materialPreview() == nullptr, "Discard kept an active material preview.");
+        capture("material_preview_discarded", true);
+        require(scenePixels(output / "material_preview_discarded.bmp", settings) == before,
+            "Discard did not restore the committed material's scene pixels.");
+
+        dragParameter("Metallic", .1f, .9f, "material_metallic_drag");
+        const auto desired = *editor.materialPreview();
+        // An override and the same values committed in memory must render
+        // identically, including reflected analytic and triangle materials.
+        const auto groundBefore = *assets.findMaterial(2);
+        assets.findMaterial(2)->roughness = .08f;
+        assets.findMaterial(2)->metallic = 1.f;
+        const auto spherePrimitive = assets.findMesh(1)->primitive;
+        for (int mode = 0; mode < 5; ++mode) {
+            settings.path = mode == 0 || mode == 2 ? renderer::RenderPath::Forward : renderer::RenderPath::Deferred;
+            settings.rayTracing = mode >= 2;
+            if (mode == 4) assets.findMesh(1)->primitive = assets::MeshPrimitive::Imported;
+            const auto suffix = std::to_string(mode);
+            capture(("material_override_" + suffix).c_str(), true);
+            const auto overridden = scenePixels(output / ("material_override_" + suffix + ".bmp"), settings);
+            *assets.findMaterial(materialId) = desired;
+            capture(("material_equivalent_" + suffix).c_str(), true, false, false);
+            require(scenePixels(output / ("material_equivalent_" + suffix + ".bmp"), settings) == overridden,
+                "Material preview differs from equivalent committed raster/ray parameters.");
+            *assets.findMaterial(materialId) = committed;
+        }
+        assets.findMesh(1)->primitive = spherePrimitive;
+        *assets.findMaterial(2) = groundBefore;
+        settings.path = renderer::RenderPath::Deferred;
+        settings.rayTracing = false;
+        capture("material_before_apply", true);
+        const auto unapplied = scenePixels(output / "material_before_apply.bmp", settings);
+        click(materialRect("Apply material").GetCenter());
+        require(editor.materialPreview() == nullptr && assets.findMaterial(materialId)->metallic == desired.metallic,
+            "Apply did not commit the preview or clear its temporary override.");
+        capture("material_after_apply", true);
+        require(scenePixels(output / "material_after_apply.bmp", settings) == unapplied,
+            "Apply changed the already-previewed scene appearance.");
+        const auto savedFolder = previewScene.parent_path() / "Materials";
+        require(assets.saveMaterials(savedFolder, error), error);
+        require(restoredAssets.loadMaterials(savedFolder, error), error);
+        require(restoredAssets.findMaterial(materialId)->metallic == desired.metallic,
+            "Applied material parameters did not survive an isolated save/reload.");
+        require(contents(project.defaultScene) == sceneOnDisk && contents(materialPath) == materialOnDisk,
+            "Material preview/Apply changed the real project's saved files.");
+        require(renderer.shaderRevision() == shaderVersion, "Material preview/Apply unexpectedly recompiled shaders.");
+        *assets.findMaterial(materialId) = committed;
+        // Refresh the editor draft from the restored asset using normal UI.
+        dragParameter("Roughness", .2f, .75f, "material_restore_drag");
+        click(materialRect("Discard draft").GetCenter());
+        capture("material_editor", true);
+        std::cout << "PASS: Material slider feedback while held, scene-only pixel changes, temporary asset overrides, "
+            "Discard/Apply, isolated persistence, Forward/Deferred, analytic/triangle rays, and no shader recompilation.\n";
+    }
     selectTab("Shader Editor");
     capture("shader_editor", true);
     const auto buttonRow = [&]() {

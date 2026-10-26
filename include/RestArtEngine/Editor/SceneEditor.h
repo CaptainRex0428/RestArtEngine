@@ -22,6 +22,9 @@ public:
     bool drawCloseDialog(renderer::SceneRenderer&); // true only after explicit exit or a clean close
     scene::World& world() { return world_; }
     assets::AssetLibrary& assets() { return assets_; }
+    // Current parameter draft for rendering only; Apply and Save keep their
+    // existing commit/persistence boundaries. Valid until the next editor edit.
+    [[nodiscard]] const assets::MaterialAsset* materialPreview() const;
     scene::ActorId selectedActor() const { return selectedActor_; }
     // Full selection; the primary Actor (gizmo pivot / Details target) is selectedActor().
     [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
@@ -61,6 +64,7 @@ private:
     void selectMaterial(assets::AssetId);
     void importMesh();
     bool applyMaterial();
+    void discardMaterial();
     bool saveScene();
     bool saveAll(renderer::SceneRenderer&);
     bool dirty(const renderer::SceneRenderer&) const;

@@ -744,7 +744,7 @@ int wmain(int argc, wchar_t** argv) {
             if (windowState.closeRequested) { editor.requestClose(); windowState.closeRequested = false; }
             if (editor.drawCloseDialog(renderer)) running = false;
             const bool rendered = selfTest ? renderer.render(settings, error)
-                : renderer.render(settings, editor.world(), editor.assets(), error);
+                : renderer.render(settings, editor.world(), editor.assets(), error, editor.materialPreview());
             if (!rendered) throw std::runtime_error(error);
             ui.endFrame();
             if (selfTest || capture || (frameLimit > 0 && frame == frameLimit - 1)) {

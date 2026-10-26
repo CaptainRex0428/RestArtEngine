@@ -273,6 +273,11 @@ bool compile(const std::filesystem::path& root, const std::filesystem::path& mat
     }
     return validateShader(bytecode.Get(), entry, error);
 }
+const assets::MaterialAsset* resolveMaterial(const assets::AssetLibrary& assets, assets::AssetId id,
+                                            const assets::MaterialAsset* materialOverride) {
+    const auto* material = assets.findMaterial(id);
+    return material && materialOverride && materialOverride->id == id ? materialOverride : material;
+}
 } // namespace
 
 struct SceneRenderer::Impl {
@@ -481,7 +486,7 @@ struct SceneRenderer::Impl {
     }
 
     bool prepareRayTriangles(const scene::World& world, const assets::AssetLibrary& assets,
-                             std::string& error) {
+                             std::string& error, const assets::MaterialAsset* materialPreview) {
         std::vector<RayTriangle> triangles;
         // Grow with the scene. The count check below only protects D3D11
         // structured-buffer addressability; no scene triangle budget drops
@@ -497,7 +502,7 @@ struct SceneRenderer::Impl {
         for (const auto& actor : world.actors) {
             if (!actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = assets.findMaterial(actor.mesh.materialId);
+            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialPreview);
             if (!mesh || !material) continue;
             ++raySceneActorCount;
             // Built-in primitives retain their exact analytic intersections
@@ -596,7 +601,8 @@ struct SceneRenderer::Impl {
     }
 
     bool drawGeometry(ID3D11PixelShader* pixelShader, const scene::World& world,
-                      const assets::AssetLibrary& assets, std::string& error) {
+                      const assets::AssetLibrary& assets, std::string& error,
+                      const assets::MaterialAsset* materialPreview) {
         const UINT stride = sizeof(assets::MeshVertex), offset = 0;
         context->IASetInputLayout(inputLayout.Get());
         context->VSSetShader(geometryVS.Get(), nullptr, 0);
@@ -609,7 +615,7 @@ struct SceneRenderer::Impl {
         for (const auto& actor : world.actors) {
             if (!actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = assets.findMaterial(actor.mesh.materialId);
+            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialPreview);
             if (!mesh || !material) continue;
             if (preparedMeshes.insert(mesh->id).second && !prepareMesh(*mesh, error)) return false;
             auto& gpu = meshes.at(mesh->id);
@@ -771,7 +777,8 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
 }
 
 bool SceneRenderer::render(const SceneSettings& settings, const scene::World& world,
-                           const assets::AssetLibrary& assets, std::string& error) {
+                           const assets::AssetLibrary& assets, std::string& error,
+                           const assets::MaterialAsset* materialOverride) {
     error.clear();
     auto& state = *impl_;
     if (!state.device || !state.backbuffer) { error = "Renderer has no render target."; return false; }
@@ -794,7 +801,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const XMMATRIX projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.0f),
         static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight), 0.05f, 100.0f);
     const bool wantsRayScene = settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay;
-    if (wantsRayScene && !state.prepareRayTriangles(world, assets, error)) return false;
+    if (wantsRayScene && !state.prepareRayTriangles(world, assets, error, materialOverride)) return false;
     SceneConstants data{};
     XMStoreFloat4x4(&data.viewProjection, view * projection);
     XMStoreFloat4(&data.cameraPosition, eye);
@@ -878,7 +885,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         for (const auto& actor : world.actors) {
             if (!actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = assets.findMaterial(actor.mesh.materialId);
+            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialOverride);
             if (!mesh || !material) continue;
             // Analytic tracing has exact intersections for built-in spheres,
             // planes, and cubes. Other actors are represented by rayTriangles.
@@ -929,7 +936,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.context->ClearDepthStencilView(cascadeDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
             shadowScene.viewProjection = cascade == 0 ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
             state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &shadowScene, 0, 0);
-            if (!state.drawGeometry(nullptr, world, assets, error)) return false;
+            if (!state.drawGeometry(nullptr, world, assets, error, materialOverride)) return false;
         }
         // Explicitly release the shadow DSV before binding the same resource as
         // a pixel shader SRV; relying on D3D11's automatic hazard resolution
@@ -953,7 +960,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.context->ClearRenderTargetView(targets[i], clear);
         }
         state.context->OMSetRenderTargets(3, targets, state.depth.Get());
-        if (!state.drawGeometry(state.gbufferPS.Get(), world, assets, error)) return false;
+        if (!state.drawGeometry(state.gbufferPS.Get(), world, assets, error, materialOverride)) return false;
         state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
         ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(), state.gbufferViews[1].Get(), state.gbufferViews[2].Get(), state.shadowView.Get(), state.rayTriangleView.Get()};
         state.context->PSSetShaderResources(0, 5, views);
@@ -962,7 +969,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     } else {
         state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
         state.drawFullscreen(state.backgroundPS.Get());
-        if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error)) return false;
+        if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
     if (settings.editorViewport) {
