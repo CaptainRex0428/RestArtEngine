@@ -147,7 +147,7 @@ DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置�
 
 `ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
 
-Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotGuiStudy.md)。本轮使用 ImGui 实现停靠体系，没有将 Godot 的 GUI 运行时引入引擎。
+GUI 职责、交互和验收约定见 [GuiDevelopment.md](GuiDevelopment.md)。停靠体系使用 ImGui，没有将 Godot 的 GUI 运行时引入引擎。
 
 工具栏由 `SceneEditor` 绘制为两行：窗口带 `ImGuiWindowFlags_MenuBar`，第一行通过 `BeginMenuBar / EndMenuBar` 绘制 Layout / Edit / UI 和场景操作，第二行在正常内容区绘制渲染控件。高度为两倍 `GetFrameHeight()` 加上下窗口内边距与边框，并传入 `EditorDockManager::beginFrame`。不得用普通内容区的 `BeginMenu + SameLine` 模拟菜单栏：`SameLine` 不改变菜单的纵向布局模式，菜单项会占用剩余宽度，挤出后续控件；`EditorDockManager::drawLayoutMenu` 也必须在菜单栏内调用。
 
@@ -155,7 +155,7 @@ Godot 编辑器的职责划分和后续扩展方向见 [GodotGuiStudy.md](GodotG
 
 标题栏左上角复用 `assets/icons/RAEngine.png`：通过 `RestArtEngine.rc` 嵌入程序，由 `ImGuiLayer` 解码并持有 DX11 纹理，在关闭 UI 时释放，不依赖启动目录；图片区域保留原生系统菜单命中。
 
-自绘窗口的 `WM_NCACTIVATE` 在非最小化时直接返回 `TRUE`，允许激活状态切换并由客户端继续负责标题绘制；最小化时保留默认处理，遵循微软的 [WM_NCACTIVATE 返回值与最小化约定](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-ncactivate)。2026-10-26 的实际 Capture 回归确认，原来调用 `DefWindowProc(..., -1)` 仍会在模态保存框打开时覆盖出经典浅色系统标题栏；仅拦截 `WM_NCPAINT` 不足以避免该路径。修复位于共用 `WindowChrome`，保留 `WM_ACTIVATE`、系统模态 owner 禁用／恢复和原生保存框归属，不改窗口样式或对话框主题。
+自绘窗口的 `WM_NCACTIVATE` 在非最小化时直接返回 `TRUE`，允许激活状态切换并由客户端继续负责标题绘制；最小化时保留默认处理，遵循微软的 [WM_NCACTIVATE 返回值与最小化约定](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-ncactivate)。调用 `DefWindowProc(..., -1)` 仍会在模态保存框打开时覆盖出经典浅色系统标题栏；仅拦截 `WM_NCPAINT` 不足以避免该路径。该处理位于共用 `WindowChrome`，保留 `WM_ACTIVATE`、系统模态 owner 禁用／恢复和原生保存框归属，不改窗口样式或对话框主题。
 
 标题栏作为 viewport 顶部保留区域，`WindowChrome` 同帧更新 `WorkPos / WorkSize`，工具栏、DockSpace 和 Project Manager 从工作区开始布局；场景拾取与 Gizmo 继续使用图像本帧屏幕矩形。最小窗口为 480×360 逻辑像素以允许常见吸附分区，窄窗口中的面板内容仍可能需要滚动。当前应用仍使用系统 DPI 感知，标题按钮与边缘命中按窗口 DPI 计算；未将此功能宣称为全编辑器跨屏 DPI 缩放支持。
 
@@ -244,7 +244,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 新增警告先查原因与影响，不以全局降级警告等级、`/IGNORE:4006` 或 `/FORCE:MULTIPLE` 代替修复。第三方代码确需局部豁免时限定到具体文件／告警编号并解释原因。微软的 [LNK4006 文档](https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-warning-lnk4006?view=msvc-170) 明确指出合并导入库可能导致重复符号；CMake 链接接口语义见 [target_link_libraries](https://cmake.org/cmake/help/latest/command/target_link_libraries.html)。
 
-涉及归档／链接依赖的改动，应重新生成并执行实际 Rebuild，检查最终程序也能完成链接，不能仅凭增量构建“无任务”判断警告已修复。验证配置和结果写入开发状态页。
+涉及归档／链接依赖的改动，应重新生成并执行实际 Rebuild，检查最终程序也能完成链接，不能仅凭增量构建“无任务”判断警告已修复。验证时注明构建配置与覆盖范围。
 
 ### 必须守住的约定
 
@@ -267,9 +267,7 @@ cmake --build --preset windows-debug
 
 窗口外框回归：`powershell -ExecutionPolicy Bypass -File scripts/Test-WindowChrome.ps1`（可通过 `-Executable` 指定构建）。脚本复制 Sandbox 到独立输出目录，隔离布局、主题与场景修改，仅控制自己启动的测试进程；验证场景编辑器与 Project Manager 的标题 / 边角 / 系统菜单命中、最小化、最大化工作区、还原、双击标题以及干净关闭的明确零退出码。场景编辑器另测 F11 / Esc、缩放、实际 F9 截图，以及脏场景点击关闭后保留进程和场景文件。脏关闭用例最后只终止测试进程，不保存测试编辑。
 
-2026-10-23 外框验证：上述原生测试及编辑器自测通过，D3D11 debug layer 错误数为 0；截图和输出分别在本机 `artifacts/window-chrome-native/`、`artifacts/window-chrome-editor/`。编辑器自测还覆盖两套主题、标题栏 / 工具栏 / DockSpace 不重叠、停靠、多选 Alt 拖动与 Shader 编辑。原生脚本验证了 `HTMAXBUTTON` 接入及缩放边角命中，未模拟操作系统吸附弹窗悬停或跨显示器拖动；这两项仍需交互验收。
 
-2026-10-26 Capture 外框回归：`Test-Capture.ps1` 从桌面合成画面读取测试窗口，保存弹框前／弹框中／取消后的 PNG 并检查标题背景像素，而非只读取不会包含系统覆绘的 DX11 截图。Black 与 Dark Blue 均覆盖 F9、实际点击 Capture、嵌套覆盖确认、owner 禁用及取消恢复，另保留 Unicode 保存／覆盖语义检查；修复前同一断言失败，修复后两主题通过。`Test-WindowChrome.ps1` 的编辑器／Project Manager 窗口操作也通过；本机证据见 `artifacts/capture-chrome/`，具体构建与覆盖记录见 DevelopmentStatus。
+Capture 外框回归使用 `scripts/Test-Capture.ps1`：从桌面合成画面读取测试窗口，保存弹框前／弹框中／取消后的 PNG 并检查标题背景像素；仅使用 DX11 截图无法检测系统覆绘。覆盖 Black / Dark Blue、F9、点击 Capture、嵌套覆盖确认、owner 禁用与取消恢复，以及 Unicode 保存／覆盖语义。
 
-2026-10-23 顶部菜单重叠修复：CMake Debug 构建及 `--editor-self-test --capture-dir artifacts/toolbar-menu-validation` 通过，D3D11 debug layer 开启且错误数为 0。新增自测注入鼠标点击 Layout / Edit / UI，检查菜单内容可达、弹出位置在标题下方、菜单行 / 渲染行 / DockSpace 垂直边界分离；覆盖 Black / Dark Blue、980px 常规尺寸及 1440px 下 150% 字体与样式缩放，截图已人工检查。该缩放测试不等于操作系统跨显示器 DPI 测试；输出目录属于本机验证产物，不提交。
-
+编辑器自测检查 Layout / Edit / UI 菜单可达、弹出位置、标题栏／工具栏／DockSpace 边界、主题和字体／样式缩放。系统吸附弹窗、跨显示器拖动与 DPI 变化需另做实际交互验收，不能由命中值或字体缩放测试推断通过。

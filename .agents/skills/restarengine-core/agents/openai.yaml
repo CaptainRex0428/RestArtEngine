@@ -1,4 +1,0 @@
-interface:
-  display_name: "RestArtEngine Core"
-  short_description: "Coordinate engine tasks, specialists, and verified delivery"
-  default_prompt: "使用 $restarengine-core 接手当前引擎任务，核对进度后拆解、分派并完成集成验收。"

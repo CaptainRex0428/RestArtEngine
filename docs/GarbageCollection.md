@@ -50,7 +50,7 @@ RestArtEngine.exe --project Projects/Sandbox/Sandbox.raproject --no-gc
 
 活跃场景目标、G-buffer、阴影图、Shader、常量缓冲、Logo、GPU 字体和当前画面使用的缓存不由周期回收。最小化时调度仍运行，但保留最近场景帧的活资源。旧版本 ImGui 自带的压缩计时由适配层关闭，统一走引擎调度；不修改 vendor 源码。
 
-实际调度在 Project Manager 和编辑器的 `present` 之后，以及编辑器最小化的帧间；不只接入尚未承载真实场景的 `Engine::endFrame()` 骨架。UI 只能请求回收，不能在构造 draw list 时释放资源。DX11 由运行时管理尚未完成 GPU 命令的资源生命周期，回收解除相应绑定引用，不做阻塞等待或每轮 Flush。其他后端需要各自完成 fence／延迟销毁契约，本轮没有实现多后端 GC。
+实际调度在 Project Manager 和编辑器的 `present` 之后，以及编辑器最小化的帧间；不只接入尚未承载真实场景的 `Engine::endFrame()` 骨架。UI 只能请求回收，不能在构造 draw list 时释放资源。DX11 由运行时管理尚未完成 GPU 命令的资源生命周期，回收解除相应绑定引用，不做阻塞等待或每轮 Flush。其他后端需要各自完成 fence／延迟销毁契约，当前没有多后端 GC 实现。
 
 ## 临时与永久截图
 
@@ -86,8 +86,6 @@ ctest --test-dir build/cmake-vs2022 -C Debug --output-on-failure
 build/cmake-vs2022/Debug/RestArtEngine.exe --project <测试工程> --gc-self-test --capture-dir artifacts/gc-validation
 ```
 
-2026-10-24 已使用独立 `build/gc-vs2022` Debug 构建完成 CPU 回归（1/1）、GC GPU／UI 自测、完整编辑器自测、渲染回归和实际跨进程临时截图回收。D3D11 验证错误为 0；GC 自测确认回收后重建的场景截图一致，并验证设置保存／重载和关闭自动后的手动请求。CLI 回归确认到期受管截图删除，永久截图及同目录未登记文件保留。目录锁与原子发布最终修正后重跑了受影响的 CPU、GC GPU／UI 和 CLI 流程。
+文件保护测试包含 symlink、junction、硬链接、正在写入的文件、目录可写句柄拒绝及原子发布失败保旧；symlink 用例需具备创建权限，跳过时不能记作通过。崩溃或内存分配异常留下的未发布 `.rae_gc_*.tmp` 不自动删除，不将其当作已登记截图。
 
-本机没有创建 symlink 的权限，目录、截图、登记文件的 3 项 symlink 用例跳过；junction、硬链接、正在写入的文件、目录可写句柄拒绝及原子发布失败保旧用例实际通过。崩溃或内存分配异常留下的未发布 `.rae_gc_*.tmp` 不自动删除，不将其当作已登记截图。
-
-Windows 原子发布在持续持有源文件句柄和目录保护时执行同目录重命名，接口依据为 Microsoft 的 [FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information) 和 [NtSetInformationFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)。具体日志入口与未验证范围见 [开发状态索引](DevelopmentStatus.md)。Windows 句柄保护不代表其他平台已具备同等级文件竞争防护；当前项目仍只构建 Windows/DX11。
+Windows 原子发布在持续持有源文件句柄和目录保护时执行同目录重命名，接口依据为 Microsoft 的 [FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information) 和 [NtSetInformationFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)。Windows 句柄保护不代表其他平台已具备同等级文件竞争防护；当前项目仍只构建 Windows/DX11。

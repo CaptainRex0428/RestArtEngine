@@ -1,6 +1,6 @@
-# 编辑事务研究：Godot UndoRedo 与 UE FScopedTransaction
+# 编辑事务与命令系统
 
-本文记录对 Godot `UndoRedo` 和 Unreal Engine 事务系统的源码研究，以及 RestArtEngine 已落地的编辑撤销 / 重做、合并模式、命令注册表与多选。结论先行：**借鉴两者的模型，不复制任何代码**。
+本文说明 RestArtEngine 的编辑撤销／重做、合并模式、命令注册表与多选契约。设计参考 Godot `UndoRedo` 的显式操作模型和 Unreal Engine 的作用域语义，实现不包含上游事务代码。
 
 ## 结论
 
@@ -19,7 +19,7 @@ RestArtEngine 没有反射和对象序列化，无法自动捕获「中间发生
 | Godot | [`core/object/undo_redo.cpp`](https://github.com/godotengine/godot/blob/master/core/object/undo_redo.cpp) | 提交时截断重做尾巴、`_process_operation_list` 执行顺序、合并窗口、`action_level` 嵌套 |
 | UE | `Engine/Source/Editor/UnrealEd/Public/ScopedTransaction.h` | `FScopedTransaction` 构造开始事务、析构结束、`Cancel()`、`IsOutstanding()` |
 
-UE 仓库需要 Epic 账号授权；本次通过公开镜像阅读了 `ScopedTransaction.h`（UE 4.x），只取作用域语义，未复制代码。
+UE 对照以 `ScopedTransaction.h`（UE 4.x）的作用域语义为参考，不引入其对象序列化或代码。
 
 ## 采纳与不采纳
 
@@ -86,11 +86,11 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 
 `ViewportInteraction` 在 Gizmo 接管鼠标时锁定 Alt 状态，超过拖动阈值且变换确实变化后才调用 `SceneEditor::duplicateForDrag`。复制在应用第一份变换增量之前进行；追加 Actor 后重新按 ID 查找指针，避免容器扩容造成悬空引用。`SceneEditor::trackTransformEdit` 在结束时记录副本最终快照，不再另记一条变换历史。相机的 Alt＋左键手势在本帧 Gizmo 命中判断之后才取得输入，因此拖动手柄不会同时环绕相机。
 
-2026-10-23，CMake Debug 构建及编辑器自测通过，输出位于本机 `artifacts/alt-drag-validation/`。真实鼠标 / 键盘注入覆盖单选与多选平移复制、单击不复制、多帧只复制一次、中途释放 Alt、原件不变、无固定位置偏移以及整次撤销 / 重做和选中集合恢复；既有相机环绕、平移、Gizmo、停靠与 Shader 测试同时通过，D3D11 debug layer 错误数为 0。复制回归使用平移手柄，未单独覆盖 Alt＋旋转 / 缩放组合。
+验证 Alt 拖动复制时，应覆盖单选／多选、单击不复制、多帧只复制一次、中途释放 Alt、原件不变、无固定位置偏移，以及整次撤销／重做与选中集合恢复。平移、旋转、缩放手势需分别确认输入归属。
 
 ## 许可证边界
 
-- Godot Engine 使用 MIT 许可证；本轮只阅读源码，未复制代码、注释或资源。
+- Godot Engine 使用 MIT 许可证；本实现未复制其代码、注释或资源。
 - UE 源码受 Epic 许可约束，**未复制任何代码**；`FScopedTransaction` 只作为「作用域内聚合为一条记录」的设计参考。
 - 已落地的 `UndoStack` 与 `EditorCommandRegistry` 为本项目自行实现，不含上游代码。
 

@@ -377,13 +377,12 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 
 ## 文档
 
-- [开发状态索引](docs/DevelopmentStatus.md)：需求、进度、源码与验证证据的统一入口
+- [仓库内容与提交约定](docs/RepositoryPolicy.md)：公开内容范围、文档白名单及本地资料边界
 - [资源 GC](docs/GarbageCollection.md)：回收范围、配置、临时截图保护及验证入口
-- [agent 与 skills 协作](docs/AgentDevelopment.md)：`$restarengine-core` 主引擎协调、专项分派与集成验收
 - [渲染开发要求](docs/RenderingDevelopment.md)：热编译、实时参数、跨平台目标与现状缺口
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
-- [GUI 设计与进度](docs/GodotGuiStudy.md)：Godot 职责划分参考、已提交功能、工作区实现与验证范围
+- [GUI 设计规范](docs/GuiDevelopment.md)：面板职责、视觉规则、交互契约与验收方法
 - [工程管理](docs/ProjectManagement.md)：引擎身份、工程链接、Project Manager 流程
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节

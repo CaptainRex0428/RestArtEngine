@@ -56,7 +56,7 @@
 
 ## 当前源码基线与缺口
 
-以下为 2026-10-23 的源码基线；运行验证的具体结果在下方记录，不能仅据接口设计外推平台支持：
+以下列出当前实现与限制；不能仅据接口设计外推平台支持：
 
 | 项目 | 源码现状 | 后续缺口 |
 | --- | --- | --- |
@@ -68,21 +68,15 @@
 
 现有验证入口是 `--editor-self-test` 与 `scripts/Validate-Render.ps1`。后者默认寻找 Premake 输出；验证 CMake 构建时显式传入 `-Executable`，避免测到旧二进制。
 
-### 2026-10-23 材质实时预览验证
+### 材质实时预览验收
 
-使用独立 `build/material-preview-vs2022` 的 MSVC Debug 构建，在 Windows／D3D11／NVIDIA GeForce RTX 5060 上通过编辑器自测和 `Validate-Render.ps1`，D3D11 debug layer 开启且错误数为 0。自测复制 Sandbox 到输出目录，未修改用户工程资产。
-
-新增用例注入真实 Roughness／Metallic 滑块拖动，在鼠标按住期间逐帧比较场景视口像素，并检查已提交资产和磁盘不变、Shader revision 不变、Discard 恢复、Apply 不改变已预览外观、隔离保存／重载。预览结果与关闭覆盖后的等价提交结果在 Forward、Deferred、解析光追和三角形光追路径一致；既有 Shader 成功编译、错误回滚、资源契约及 include 保存／重载检查继续通过。材质编辑器截图已检查，草稿状态提示保留固定行，拖动不会因此挤动参数控件。
-
-编辑器日志／截图位于本机 `artifacts/material-preview-editor/`，渲染回归位于 `artifacts/material-preview-render/`。本次定向 UI 自动化操作的是 Roughness／Metallic；Base color／Grid 与切材质确认分支已检查接线，未单独注入交互测试。Linux、macOS 及其他图形后端尚未运行验证。
+参数预览测试使用隔离工程，验证拖动期间画面逐帧变化、已提交资产与磁盘不变、Shader revision 不变，以及 Discard 恢复和 Apply 前后画面一致。还需比较 Forward、Deferred、解析光追和三角形光追的预览结果与等价提交结果，检查保存／重载及切换材质时的草稿确认。使用 `--editor-self-test` 与 `scripts/Validate-Render.ps1` 获取当前构建的结果，其他平台／后端需分别验证。
 
 ### 材质 Two-sided
 
 所有材质统一具备独立的 `twoSided` 开关，不增加场景全局覆盖。新材质默认单面，旧文件缺字段时按双面兼容；实时预览、提交、丢弃和保存沿用已有材质流程。渲染实现将此选项统一用于光栅剔除、背面法线、阴影和解析／三角形光追，并处理镜像缩放。拾取遵循有效预览材质的面规则，单面背面不挡住后方对象。GPU 数据布局保持不变；具体编码与阴影方向约定见 Architecture。
 
-2026-10-23 使用独立 `build/material-preview-vs2022` 的 MSVC Debug 构建，在 Windows／D3D11／NVIDIA GeForce RTX 5060 上通过隔离 Sandbox 的完整编辑器自测及渲染回归，D3D11 debug layer 错误数为 0。新增 GPU 对照覆盖平面正反面、X／Y 镜像、背面 World normals、Forward／Deferred、解析／三角形反射及阴影，以及单面 Sphere／Cube 的远交点阴影。真实 UI 点击 Two-sided 立即改变背面像素，Apply／Discard、预览资产隔离、背面拾取、持久化及 Shader revision 不变检查通过；旧文件缺字段兼容及非布尔字段的事务性拒绝通过。既有参数拖动、Shader 热编译／错误回滚和资源契约检查继续通过。
-
-本机证据为 `artifacts/two-sided-editor/stdout.txt`、同目录的 `two_sided_*` 截图，以及 `artifacts/two-sided-render/validation-results.json`、`artifacts/two-sided-render-validation.txt`。截图已检查，宽面板中 Grid 与 Two-sided 并排，空间不足时换行。其他平台／后端未运行验证，材质属性仍未新增通用撤销能力。
+Two-sided 的验收应覆盖平面正反面、镜像缩放、背面法线、Forward／Deferred、解析／三角形反射与阴影，以及 UI 实时预览、Apply／Discard、拾取、持久化和旧文件兼容。材质属性尚未提供通用撤销。
 
 ## 平台与图形后端矩阵
 
@@ -134,7 +128,7 @@ Shader 作者语言与后端编译目标分开设计。当前 HLSL/SM5 是 DX11 
 
 显示用户请求值和实际状态的差别；因设备不支持而禁用不能覆盖用户原偏好，切回支持的后端后可重新计算。对比后端时先比基础场景与共享参数，在声明差异的特性外使用合适的图像容差，不强求跨 API 位级相同。现有 Forward／Deferred 的一致性契约仍按 `Architecture.md` 维护。
 
-## 下一轮设计讨论
+## 尚未确定的设计
 
 已确认的是三类 OS、四类 API 和可选特性机制；以下仍需设计：
 
