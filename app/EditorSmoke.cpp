@@ -172,13 +172,13 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         preferences.outlineColor[0] = 0.1f;
         preferences.outlineColor[1] = 0.2f;
         preferences.outlineColor[2] = 0.3f;
-        preferences.outlineSolidIntersection = true;
+        preferences.outlineFrontObjects = true;
         rae::imgui::saveUiPreferences(path, preferences);
         const auto reloaded = rae::imgui::loadUiPreferences(path);
         require(reloaded.theme == EditorTheme::DarkBlue && !reloaded.selectionOutline &&
             std::abs(reloaded.outlineThickness - 4.5f) < 0.001f && !reloaded.outlineThemeColor &&
             std::abs(reloaded.outlineColor[0] - 0.1f) < 0.001f &&
-            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f && reloaded.outlineSolidIntersection,
+            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f && reloaded.outlineFrontObjects,
             "Selection outline preferences did not round-trip.");
         std::filesystem::remove(path);
     }
@@ -679,13 +679,13 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         preferences.outlineColor[0] = 0.1f;
         preferences.outlineColor[1] = 0.2f;
         preferences.outlineColor[2] = 0.3f;
-        preferences.outlineSolidIntersection = true;
+        preferences.outlineFrontObjects = true;
         rae::imgui::saveUiPreferences(path, preferences);
         const auto reloaded = rae::imgui::loadUiPreferences(path);
         require(reloaded.theme == EditorTheme::DarkBlue && !reloaded.selectionOutline &&
             std::abs(reloaded.outlineThickness - 4.5f) < 0.001f && !reloaded.outlineThemeColor &&
             std::abs(reloaded.outlineColor[0] - 0.1f) < 0.001f &&
-            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f && reloaded.outlineSolidIntersection,
+            std::abs(reloaded.outlineColor[2] - 0.3f) < 0.001f && reloaded.outlineFrontObjects,
             "Selection outline preferences did not round-trip.");
         std::filesystem::remove(path);
     }

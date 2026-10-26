@@ -31,8 +31,8 @@ struct UiPreferences {
     // Reuse the active theme accent instead of a fixed colour.
     bool outlineThemeColor = true;
     float outlineColor[3] = {1.0f, 0.70f, 0.25f};
-    // Draw the occluder/selection intersection ring solid instead of dashed.
-    bool outlineSolidIntersection = false;
+    // Also outline geometry in front of the selection (symmetric depth test).
+    bool outlineFrontObjects = false;
 };
 
 [[nodiscard]] UiPreferences& uiPreferences();
