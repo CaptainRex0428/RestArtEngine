@@ -1096,7 +1096,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
         state.outline->composite(state.context.Get(), backbuffer, state.depthView.Get(), sceneViewport,
             state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
-            settings.outlineColor, settings.outlineThickness, settings.outlineOccludedStyle);
+            settings.outlineColor, settings.outlineThickness);
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
     if (settings.editorViewport) {

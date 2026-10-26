@@ -79,8 +79,7 @@ struct SceneSettings {
     float outlineColor[4] = {1.0f, 0.70f, 0.25f, 1.0f};
     // Ring radius in scene-texture pixels.
     float outlineThickness = 2.0f;
-    // Occluded geometry: 0 = dashed contour (default), 1 = translucent fill.
-    int outlineOccludedStyle = 0;
+
 };
 
 // Native D3D11 preview renderer. The broader RHI remains separate until its
