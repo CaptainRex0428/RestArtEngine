@@ -117,7 +117,8 @@
       "id": 1,
       "metallic": 0.8669999837875366,
       "name": "Copper",
-      "roughness": 0.7440000176429749
+      "roughness": 0.7440000176429749,
+      "twoSided": true
     },
     {
       "baseColor": [
@@ -129,7 +130,8 @@
       "id": 2,
       "metallic": 0.5059999823570251,
       "name": "Ground",
-      "roughness": 0.5289999842643738
+      "roughness": 0.5289999842643738,
+      "twoSided": false
     },
     {
       "baseColor": [
@@ -141,7 +143,8 @@
       "id": 3,
       "metallic": 0.8550000190734863,
       "name": "Yellow",
-      "roughness": 0.1550000011920929
+      "roughness": 0.1550000011920929,
+      "twoSided": true
     },
     {
       "baseColor": [
@@ -153,7 +156,8 @@
       "id": 4,
       "metallic": 0.31299999356269836,
       "name": "Red",
-      "roughness": 0.6380000114440918
+      "roughness": 0.6380000114440918,
+      "twoSided": true
     }
   ],
   "meshes": [

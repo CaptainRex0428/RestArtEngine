@@ -10,7 +10,8 @@
     "id": 3,
     "metallic": 0.8550000190734863,
     "name": "Yellow",
-    "roughness": 0.1550000011920929
+    "roughness": 0.1550000011920929,
+    "twoSided": true
   },
   "version": 1
 }

@@ -10,7 +10,8 @@
     "id": 1,
     "metallic": 0.8669999837875366,
     "name": "Copper",
-    "roughness": 0.7440000176429749
+    "roughness": 0.7440000176429749,
+    "twoSided": true
   },
   "version": 1
 }

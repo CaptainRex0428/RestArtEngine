@@ -10,7 +10,8 @@
     "id": 4,
     "metallic": 0.31299999356269836,
     "name": "Red",
-    "roughness": 0.6380000114440918
+    "roughness": 0.6380000114440918,
+    "twoSided": true
   },
   "version": 1
 }
