@@ -239,6 +239,30 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
             "The editor did not load a scene v2 with its GUID materials.");
         // Mesh assets: import an OBJ, persist it as a .raasset, then reload both
+        // Built-in primitives are generated as .raasset files the first time a
+        // project opens; later runs reuse them and never duplicate the files.
+        {
+            const auto builtinDir = v2Root / "Meshes" / "Builtin";
+            assets::AssetLibrary builtinAssets;
+            builtinAssets.createDefaults();
+            require(builtinAssets.ensureBuiltinMeshes(builtinDir, v2Error), v2Error);
+            const auto countBuiltins = [&]() {
+                std::size_t count = 0;
+                for (const auto& entry : std::filesystem::directory_iterator(builtinDir))
+                    if (entry.path().extension() == ".raasset") ++count;
+                return count;
+            };
+            require(countBuiltins() == 3, "Built-in primitive assets were not generated.");
+            require(builtinAssets.ensureBuiltinMeshes(builtinDir, v2Error), v2Error);
+            require(countBuiltins() == 3, "Regenerating the built-in primitives duplicated files.");
+            assets::AssetLibrary builtinReloaded;
+            builtinReloaded.createDefaults();
+            require(builtinReloaded.loadMeshes(v2Root / "Meshes", v2Error), v2Error);
+            const auto* sphere = builtinReloaded.findMesh(1);
+            require(sphere != nullptr && sphere->vertices.size() == builtinAssets.findMesh(1)->vertices.size() &&
+                sphere->indices.size() == builtinAssets.findMesh(1)->indices.size(),
+                "A built-in primitive did not round-trip through its generated asset.");
+        }
         // the geometry and a scene that only references the mesh GUID.
         {
             const auto objPath = v2Root / "Meshes" / "tri.obj";

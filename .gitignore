@@ -147,3 +147,6 @@ Desktop.ini
 
 # Temporary files
 *.tmp
+
+# Generated built-in primitive assets (recreated when a project opens).
+Projects/*/Content/Meshes/Builtin/

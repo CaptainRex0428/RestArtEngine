@@ -46,6 +46,9 @@ public:
     bool saveMeshes(const std::filesystem::path& folder, std::string& error) const;
     bool loadMeshes(const std::filesystem::path& folder, std::string& error);
     [[nodiscard]] static std::string meshAssetFileName(const MeshAsset& mesh);
+    // Writes the procedural primitives as .raasset files when they are missing.
+    // Existing files win, so editing or deleting one is respected.
+    bool ensureBuiltinMeshes(const std::filesystem::path& folder, std::string& error) const;
     // File name used when persisting a material as a .raasset container.
     [[nodiscard]] static std::string materialAssetFileName(const MaterialAsset& material);
 private:

@@ -130,7 +130,13 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     {
         std::string meshError;
         const auto meshFolder = project_.contentRoot / "Meshes";
-        if (std::filesystem::is_directory(meshFolder)) (void)assets_.loadMeshes(meshFolder, meshError);
+        const auto builtinFolder = meshFolder / "Builtin";
+        std::filesystem::create_directories(builtinFolder);
+        // Built-in primitives become real assets so the Content browser lists
+        // them alongside imported meshes; existing files win. They live in their
+        // own generated folder so user mesh assets stay easy to tell apart.
+        (void)assets_.ensureBuiltinMeshes(builtinFolder, meshError);
+        (void)assets_.loadMeshes(meshFolder, meshError);
     }
     registry_.setContentRoot(project_.contentRoot);
     registry_.scan(contentError_);

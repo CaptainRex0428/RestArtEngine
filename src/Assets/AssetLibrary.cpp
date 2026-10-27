@@ -303,7 +303,7 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
         std::vector<MeshAsset> loaded;
         std::unordered_set<AssetId> ids;
         for (const auto& mesh : meshes) ids.insert(mesh.id);
-        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
             if (!entry.is_regular_file() || entry.path().extension() != ".raasset") continue;
             AssetFile file;
             if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
@@ -311,11 +311,47 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
             if (!readAssetFile(entry.path(), file, error)) throw std::runtime_error(error);
             MeshAsset mesh;
             if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+            const auto existing = std::find_if(meshes.begin(), meshes.end(),
+                [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
+            if (existing != meshes.end()) {
+                // A file for a built-in primitive replaces the procedural copy; a
+                // second file for an imported mesh is a duplicate.
+                if (existing->primitive == MeshPrimitive::Imported)
+                    throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(entry.path()));
+                *existing = std::move(mesh);
+                continue;
+            }
             if (!ids.insert(mesh.id).second)
                 throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(entry.path()));
             loaded.push_back(std::move(mesh));
         }
         meshes.insert(meshes.end(), std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+bool AssetLibrary::ensureBuiltinMeshes(const std::filesystem::path& folder, std::string& error) const {
+    try {
+        std::unordered_set<AssetId> present;
+        std::error_code code;
+        if (std::filesystem::is_directory(folder, code)) {
+            for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
+                if (code || !entry.is_regular_file(code) || entry.path().extension() != ".raasset") continue;
+                AssetFile file;
+                std::string readError;
+                if (!readAssetFileHeader(entry.path(), file, readError)) continue;
+                if (file.type == AssetFileType::StaticMesh) present.insert(file.id);
+            }
+        }
+        for (const auto& mesh : meshes) {
+            if (mesh.primitive == MeshPrimitive::Imported) continue;
+            if (present.contains(mesh.id)) continue;
+            if (!writeAssetFile(folder / meshAssetFileName(mesh), makeMeshAssetFile(mesh), error)) return false;
+        }
         error.clear();
         return true;
     } catch (const std::exception& e) {

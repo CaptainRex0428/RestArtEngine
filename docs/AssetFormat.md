@@ -4,7 +4,7 @@
 >
 > 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.raasset`**，旧 `.ramat` 只读兼容。
 >
-> 已实现：容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.raasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
+> 已实现：内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.raasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.raasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
 
 ## 目标
 
