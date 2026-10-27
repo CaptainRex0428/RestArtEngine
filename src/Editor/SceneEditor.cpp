@@ -37,6 +37,29 @@ const char* meshType(assets::MeshPrimitive type) {
     default: return "Imported OBJ";
     }
 }
+
+namespace {
+
+std::filesystem::path pickSceneFile(bool save, const std::filesystem::path& folder, const wchar_t* title) {
+    wchar_t path[32768]{};
+    if (!folder.empty()) {
+        const auto text = folder.wstring();
+        wcsncpy_s(path, text.c_str(), std::size(path) - 2);
+    }
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner = GetActiveWindow();
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+    dialog.lpstrFilter = L"RestArt scene (*.rascene)\0*.rascene\0All files (*.*)\0*.*\0\0";
+    dialog.lpstrTitle = title;
+    dialog.lpstrDefExt = L"rascene";
+    dialog.Flags = OFN_NOCHANGEDIR |
+        (save ? (OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST) : (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST));
+    const BOOL accepted = save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
+    return accepted ? std::filesystem::path(path) : std::filesystem::path();
+}
+
+} // namespace
 void message(const std::string& text) {
     if (!text.empty()) ImGui::TextWrapped("%s", text.c_str());
 }
@@ -757,6 +780,65 @@ void drawEyeIcon(ImDrawList* list, ImVec2 center, float size, bool visible, bool
     }
 }
 
+std::filesystem::path utf8Path(std::string_view text) {
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text.data()),
+        reinterpret_cast<const char8_t*>(text.data()) + text.size()));
+}
+
+std::string parentFolder(std::string_view folder) {
+    const auto slash = folder.rfind('/');
+    return slash == std::string_view::npos ? std::string() : std::string(folder.substr(0, slash));
+}
+
+std::string leafName(std::string_view folder) {
+    const auto slash = folder.rfind('/');
+    return slash == std::string_view::npos ? std::string(folder) : std::string(folder.substr(slash + 1));
+}
+
+const char* sizeLabel(std::uint64_t bytes, char* buffer, std::size_t size) {
+    if (bytes >= 1024ull * 1024ull) std::snprintf(buffer, size, "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    else if (bytes >= 1024ull) std::snprintf(buffer, size, "%.1f KB", static_cast<double>(bytes) / 1024.0);
+    else std::snprintf(buffer, size, "%llu B", static_cast<unsigned long long>(bytes));
+    return buffer;
+}
+
+// Content browser icons are drawn, not sampled, so they stay crisp at any DPI.
+void drawAssetIcon(ImDrawList* list, ImVec2 center, float size, assets::AssetType type, ImU32 color) {
+    const float thickness = std::max(1.2f, size * 0.09f);
+    const float half = size * 0.42f;
+    switch (type) {
+    case assets::AssetType::Scene: {
+        const ImVec2 a{center.x - half, center.y - half};
+        const ImVec2 b{center.x + half * 0.55f, center.y + half * 0.15f};
+        list->AddRect(a, b, color, 1.5f, 0, thickness);
+        list->AddRect(ImVec2(a.x + half * 0.35f, a.y + half * 0.35f),
+            ImVec2(b.x + half * 0.35f, b.y + half * 0.35f), color, 1.5f, 0, thickness);
+        break;
+    }
+    case assets::AssetType::Material:
+        list->AddCircle(center, half * 0.85f, color, 20, thickness);
+        list->AddCircleFilled(ImVec2(center.x - half * 0.25f, center.y - half * 0.25f), half * 0.16f, color, 10);
+        break;
+    case assets::AssetType::Mesh:
+        list->PathClear();
+        list->PathLineTo(ImVec2(center.x, center.y - half));
+        list->PathLineTo(ImVec2(center.x + half, center.y + half * 0.75f));
+        list->PathLineTo(ImVec2(center.x - half, center.y + half * 0.75f));
+        list->PathStroke(color, ImDrawFlags_Closed, thickness);
+        break;
+    case assets::AssetType::Shader:
+        list->AddLine(ImVec2(center.x - half * 0.2f, center.y - half), ImVec2(center.x - half, center.y), color, thickness);
+        list->AddLine(ImVec2(center.x - half, center.y), ImVec2(center.x - half * 0.2f, center.y + half), color, thickness);
+        list->AddLine(ImVec2(center.x + half * 0.2f, center.y - half), ImVec2(center.x + half, center.y), color, thickness);
+        list->AddLine(ImVec2(center.x + half, center.y), ImVec2(center.x + half * 0.2f, center.y + half), color, thickness);
+        break;
+    default:
+        list->AddRect(ImVec2(center.x - half, center.y - half), ImVec2(center.x + half, center.y + half),
+            color, 2.0f, 0, thickness);
+        break;
+    }
+}
+
 } // namespace
 
 void SceneEditor::drawOutliner() {
@@ -887,7 +969,34 @@ void SceneEditor::drawScene() {
     ImGui::SameLine();
     if (ImGui::RadioButton("Black", background == 1)) setSceneBackground(true);
     ImGui::TextDisabled("Background applies to the whole scene and is saved in the scene file.");
+    ImGui::SeparatorText("Scene asset");
+    ImGui::TextDisabled("Current scene");
+    ImGui::TextWrapped("%s", pathText(scenePath_.filename()).c_str());
+    if (ImGui::Button("Open...")) {
+        const auto picked = pickSceneFile(false, project_.contentRoot / "Scenes", L"Open scene");
+        if (!picked.empty()) requestSceneOpen(picked);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save as...")) {
+        const auto picked = pickSceneFile(true, project_.contentRoot / "Scenes", L"Save scene as");
+        if (!picked.empty()) {
+            std::string error;
+            if (!saveSceneAs(picked, error)) status_ = error;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("New")) {
+        const auto folder = project_.contentRoot / "Scenes";
+        std::error_code code;
+        std::filesystem::create_directories(folder, code);
+        auto path = folder / "Scene.rascene";
+        for (int suffix = 1; std::filesystem::exists(path, code) && suffix < 1000; ++suffix)
+            path = folder / ("Scene_" + std::to_string(suffix) + ".rascene");
+        std::string error;
+        if (!createScene(path, error)) status_ = error;
+    }
 }
+
 
 void SceneEditor::setSceneBackground(bool black) {
     if (world_.blackBackground == black) return;
@@ -932,33 +1041,367 @@ void SceneEditor::importMesh() {
     } catch (const std::exception& error) { status_ = error.what(); }
 }
 
-void SceneEditor::drawAssets() {
-    if (ImGui::Button("Import OBJ...")) importMesh();
-    continueButtonRow("Add Actor from mesh");
-    ImGui::BeginDisabled(!assets_.findMesh(selectedMesh_) || !assets_.findMaterial(selectedMaterial_));
-    if (ImGui::Button("Add Actor from mesh")) {
-        if (const auto* mesh = assets_.findMesh(selectedMesh_)) {
-            selectedActor_ = world_.createActor(mesh->name, mesh->id, selectedMaterial_);
-            selection_.assign(1, selectedActor_);
-            pushActorCreated(*world_.findActor(selectedActor_), "Add " + mesh->name);
-            sceneDirty_ = true;
-        }
+
+bool SceneEditor::openScene(const std::filesystem::path& path, std::string& error) {
+    error.clear();
+    std::error_code code;
+    if (!std::filesystem::exists(path, code)) {
+        error = "Scene not found: " + pathText(path);
+        return false;
     }
-    ImGui::EndDisabled();
-    continueButtonRow("Open material editor");
-    ImGui::BeginDisabled(assets_.materials.empty());
-    if (ImGui::Button("Open material editor"))
-        selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
-    ImGui::EndDisabled();
-    ImGui::BeginChild("Mesh library", {0, 0}, ImGuiChildFlags_Borders);
-    for (const auto& mesh : assets_.meshes) {
-        const auto label = mesh.name + "##" + std::to_string(mesh.id);
-        if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) {
-            selectedMesh_ = mesh.id;
-        }
+    // Parse into isolated objects: a failed load must not disturb the open scene.
+    scene::World stagedWorld;
+    assets::AssetLibrary stagedAssets;
+    if (!stagedWorld.load(path, stagedAssets, error)) return false;
+    world_ = std::move(stagedWorld);
+    assets_ = std::move(stagedAssets);
+    scenePath_ = path;
+    sceneDirty_ = false;
+    materialsDirty_ = false;
+    materialDraftDirty_ = false;
+    undo_.clear();
+    selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
+    sceneInspectorActor_ = selectedActor_;
+    selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
+    selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
+    selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
+    if (auto* actor = world_.findActor(selectedActor_)) {
+        selectedMesh_ = actor->mesh.meshId;
+        selectedMaterial_ = actor->mesh.materialId;
     }
-    ImGui::EndChild();
+    if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
+    refreshContent();
+    status_ = "Opened " + pathText(path) + ".";
+    return true;
 }
+
+bool SceneEditor::createScene(const std::filesystem::path& path, std::string& error) {
+    error.clear();
+    scene::World fresh;
+    fresh.createDefaultScene();
+    assets::AssetLibrary library = assets_;
+    std::error_code code;
+    std::filesystem::create_directories(path.parent_path(), code);
+    if (code) { error = "Cannot create the scene folder: " + code.message(); return false; }
+    if (!fresh.save(path, library, error)) return false;
+    return openScene(path, error);
+}
+
+bool SceneEditor::saveSceneAs(const std::filesystem::path& path, std::string& error) {
+    error.clear();
+    std::error_code code;
+    std::filesystem::create_directories(path.parent_path(), code);
+    if (code) { error = "Cannot create the scene folder: " + code.message(); return false; }
+    if (!world_.save(path, assets_, error)) return false;
+    scenePath_ = path;
+    sceneDirty_ = false;
+    refreshContent();
+    status_ = "Saved " + pathText(path) + ".";
+    return true;
+}
+
+void SceneEditor::refreshContent() {
+    registry_.setContentRoot(project_.contentRoot);
+    registry_.scan(contentError_);
+}
+
+void SceneEditor::openAsset(const assets::AssetEntry& entry) {
+    switch (entry.type) {
+    case assets::AssetType::Scene:
+        requestSceneOpen(entry.path);
+        break;
+    case assets::AssetType::Material:
+        if (assets_.findMaterial(entry.id)) selectMaterial(entry.id);
+        else status_ = "Material '" + entry.name + "' belongs to a scene that is not open.";
+        break;
+    case assets::AssetType::Mesh:
+        status_ = "Imported meshes are loaded by the scene that references them.";
+        break;
+    default:
+        status_ = entry.name + " is consumed by scenes and shader parameters.";
+        break;
+    }
+}
+
+void SceneEditor::requestSceneOpen(const std::filesystem::path& path) {
+    if (sceneDirty_ || materialsDirty_ || materialDraftDirty_) {
+        pendingScenePath_ = path;
+        sceneSwitchPrompt_ = true;
+        return;
+    }
+    std::string error;
+    if (!openScene(path, error)) status_ = error;
+}
+
+void SceneEditor::drawAssets() {
+    if (registry_.contentRoot() != project_.contentRoot) refreshContent();
+    if (ImGui::Button("Import OBJ...")) importMesh();
+    ImGui::SameLine();
+    if (ImGui::Button("New folder")) { newFolderBuffer_.clear(); newFolderOpen_ = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) refreshContent();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu assets", registry_.entries().size());
+    if (!contentError_.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.35f, 1.0f), "%s", contentError_.c_str());
+
+    ImGui::Separator();
+    if (ImGui::SmallButton("Content")) { contentFolder_.clear(); selectedAsset_.clear(); }
+    {
+        std::string accumulated;
+        std::string_view rest = contentFolder_;
+        while (!rest.empty()) {
+            const auto slash = rest.find('/');
+            const auto piece = rest.substr(0, slash);
+            accumulated = accumulated.empty() ? std::string(piece) : accumulated + "/" + std::string(piece);
+            ImGui::SameLine(0.0f, 4.0f);
+            ImGui::TextDisabled("/");
+            ImGui::SameLine(0.0f, 4.0f);
+            const auto label = std::string(piece) + "##crumb-" + accumulated;
+            if (ImGui::SmallButton(label.c_str())) { contentFolder_ = accumulated; selectedAsset_.clear(); }
+            if (slash == std::string_view::npos) break;
+            rest.remove_prefix(slash + 1);
+        }
+    }
+
+    const float browserHeight = std::max(90.0f, ImGui::GetContentRegionAvail().y - 132.0f);
+    ImGui::BeginChild("##content-folders", ImVec2(190.0f, browserHeight), ImGuiChildFlags_Borders);
+    drawFolderTreeNode(std::string());
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("##content-assets", ImVec2(0.0f, browserHeight), ImGuiChildFlags_Borders);
+    drawAssetRows();
+    ImGui::EndChild();
+    // In-memory meshes are scene data, not files yet: keep them visible so
+    // "Add Actor from mesh" keeps working until the asset format lands.
+    if (ImGui::CollapsingHeader("Scene mesh library", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild("Mesh library", ImVec2(0.0f, 96.0f), ImGuiChildFlags_Borders);
+        for (const auto& mesh : assets_.meshes) {
+            const auto label = mesh.name + "##" + std::to_string(mesh.id);
+            if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) selectedMesh_ = mesh.id;
+        }
+        ImGui::EndChild();
+    }
+    drawContentDialogs();
+}
+
+void SceneEditor::drawFolderTreeNode(const std::string& folder) {
+    std::vector<std::string> children;
+    for (const auto& candidate : registry_.folders())
+        if (candidate != folder && parentFolder(candidate) == folder) children.push_back(candidate);
+
+    const bool root = folder.empty();
+    const auto label = root ? std::string("Content") : leafName(folder);
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (contentFolder_ == folder) flags |= ImGuiTreeNodeFlags_Selected;
+    if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (root) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+    const auto id = root ? std::string("Content###content-root") : label + "###folder-" + folder;
+    const bool open = ImGui::TreeNodeEx(id.c_str(), flags, "%s", label.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        contentFolder_ = folder;
+        selectedAsset_.clear();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("RAE_ASSET")) {
+            const std::string source(static_cast<const char*>(payload->Data),
+                static_cast<std::size_t>(payload->DataSize));
+            std::string error;
+            if (assets::moveContentEntry(project_.contentRoot, source, folder, error)) {
+                refreshContent();
+                contentFolder_ = folder;
+                selectedAsset_.clear();
+                status_ = "Moved '" + source + "'.";
+            } else {
+                status_ = error;
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+    if (open && !(flags & ImGuiTreeNodeFlags_NoTreePushOnOpen)) {
+        for (const auto& child : children) drawFolderTreeNode(child);
+        ImGui::TreePop();
+    }
+}
+
+void SceneEditor::drawAssetRows() {
+    const auto entries = registry_.inFolder(contentFolder_);
+    if (entries.empty()) {
+        ImGui::TextDisabled("No assets in this folder. Use Import OBJ or New folder.");
+        return;
+    }
+    for (const auto* entry : entries) {
+        ImGui::PushID(entry->relativePath.c_str());
+        const float rowHeight = ImGui::GetTextLineHeight() + 10.0f;
+        const bool selected = selectedAsset_ == entry->relativePath;
+        if (ImGui::Selectable("##asset-row", selected, ImGuiSelectableFlags_AllowDoubleClick,
+            ImVec2(0.0f, rowHeight))) {
+            selectedAsset_ = entry->relativePath;
+            if (ImGui::IsMouseDoubleClicked(0)) openAsset(*entry);
+        }
+        if (ImGui::BeginDragDropSource()) {
+            ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
+            ImGui::TextUnformatted(entry->name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginPopupContextItem("##asset-menu")) {
+            if (ImGui::MenuItem("Open")) openAsset(*entry);
+            if (ImGui::MenuItem("Rename")) {
+                renameTarget_ = entry->relativePath;
+                renameBuffer_ = entry->name;
+                renameOpen_ = true;
+            }
+            if (ImGui::MenuItem("Delete")) {
+                deleteTarget_ = entry->relativePath;
+                deleteOpen_ = true;
+            }
+            ImGui::EndPopup();
+        }
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        const ImVec2 rowMax = ImGui::GetItemRectMax();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImU32 color = ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+        drawAssetIcon(draw, ImVec2(rowMin.x + 14.0f, rowMin.y + rowHeight * 0.5f), rowHeight * 0.55f,
+            entry->type, color);
+        const float textY = rowMin.y + (rowHeight - ImGui::GetTextLineHeight()) * 0.5f;
+        ImGui::SetCursorScreenPos(ImVec2(rowMin.x + 30.0f, textY));
+        ImGui::TextUnformatted(entry->name.c_str());
+        char buffer[32]{};
+        const auto meta = std::string(assets::assetTypeName(entry->type)) + "   " +
+            sizeLabel(entry->sizeBytes, buffer, sizeof(buffer));
+        const float metaWidth = ImGui::CalcTextSize(meta.c_str()).x;
+        ImGui::SetCursorScreenPos(ImVec2(rowMax.x - metaWidth - 6.0f, textY));
+        ImGui::TextDisabled("%s", meta.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(rowMin.x, rowMax.y));
+        ImGui::PopID();
+    }
+}
+
+void SceneEditor::drawContentDialogs() {
+    if (newFolderOpen_) { ImGui::OpenPopup("New folder"); newFolderOpen_ = false; }
+    if (ImGui::BeginPopupModal("New folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Create a folder inside the current one.");
+        ImGui::SetNextItemWidth(240.0f);
+        textInput("##new-folder-name", newFolderBuffer_);
+        const bool create = ImGui::Button("Create", ImVec2(90.0f, 0.0f));
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+            newFolderOpen_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (create) {
+            const bool valid = !newFolderBuffer_.empty() &&
+                newFolderBuffer_.find_first_of(std::string_view("/\\:*?\"<>|")) == std::string::npos;
+            if (!valid) {
+                status_ = "Folder names cannot be empty or contain path characters.";
+            } else {
+                std::error_code code;
+                const auto target = project_.contentRoot / utf8Path(contentFolder_) / utf8Path(newFolderBuffer_);
+                std::filesystem::create_directories(target, code);
+                if (code) {
+                    status_ = "Cannot create the folder: " + code.message();
+                } else {
+                    refreshContent();
+                    contentFolder_ = contentFolder_.empty() ? newFolderBuffer_
+                        : contentFolder_ + "/" + newFolderBuffer_;
+                    status_ = "Created folder '" + newFolderBuffer_ + "'.";
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    if (renameOpen_) {
+        ImGui::OpenPopup("Rename asset");
+        renameOpen_ = false;
+    }
+    if (ImGui::BeginPopupModal("Rename asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextItemWidth(240.0f);
+        textInput("##rename-asset", renameBuffer_);
+        const bool rename = ImGui::Button("Rename", ImVec2(90.0f, 0.0f));
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+            renameTarget_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        if (rename && !renameTarget_.empty()) {
+            const auto source = project_.contentRoot / utf8Path(renameTarget_);
+            std::string extension = pathText(source.extension());
+            const bool valid = !renameBuffer_.empty() &&
+                renameBuffer_.find_first_of(std::string_view("/\\:*?\"<>|")) == std::string::npos;
+            const auto destination = source.parent_path() / utf8Path(renameBuffer_ + extension);
+            std::error_code code;
+            if (!valid) {
+                status_ = "Asset names cannot be empty or contain path characters.";
+            } else if (std::filesystem::exists(destination, code)) {
+                status_ = "An asset with that name already exists.";
+            } else {
+                std::filesystem::rename(source, destination, code);
+                if (code) {
+                    status_ = "Cannot rename the asset: " + code.message();
+                } else {
+                    const auto folder = pathText(source.parent_path().lexically_relative(project_.contentRoot));
+                    refreshContent();
+                    selectedAsset_ = folder.empty() ? renameBuffer_ + extension : folder + "/" + renameBuffer_ + extension;
+                    status_ = "Renamed to '" + renameBuffer_ + extension + "'.";
+                    renameTarget_.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    if (deleteOpen_) {
+        ImGui::OpenPopup("Delete asset");
+        deleteOpen_ = false;
+    }
+    if (ImGui::BeginPopupModal("Delete asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Delete '%s' from disk?", deleteTarget_.c_str());
+        if (ImGui::Button("Delete", ImVec2(90.0f, 0.0f))) {
+            std::error_code code;
+            std::filesystem::remove(project_.contentRoot / utf8Path(deleteTarget_), code);
+            if (code) {
+                status_ = "Cannot delete the asset: " + code.message();
+            } else {
+                status_ = "Deleted '" + deleteTarget_ + "'.";
+                if (selectedAsset_ == deleteTarget_) selectedAsset_.clear();
+                deleteTarget_.clear();
+                refreshContent();
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+            deleteTarget_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (sceneSwitchPrompt_) {
+        ImGui::OpenPopup("Open another scene?");
+        sceneSwitchPrompt_ = false;
+    }
+    if (ImGui::BeginPopupModal("Open another scene?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("'%s' has unsaved changes.", pathText(scenePath_.filename()).c_str());
+        ImGui::TextUnformatted("Open the selected scene and discard them?");
+        if (ImGui::Button("Discard & open", ImVec2(130.0f, 0.0f))) {
+            std::string error;
+            if (!openScene(pendingScenePath_, error)) status_ = error;
+            pendingScenePath_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+            pendingScenePath_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 
 void SceneEditor::drawInstanceDetails() {
     // Details owns everything about the selected Actor instance: identity,
@@ -1364,7 +1807,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             ImGui::TextUnformatted("Replace current Actors and materials with the saved scene?\nUnapplied material edits will be discarded.");
             if (ImGui::Button("Load & replace")) {
                 std::string error;
-                if (world_.load(project_.defaultScene, assets_, error)) {
+                if (world_.load(scenePath_, assets_, error)) {
                     // History entries reference Actors from the replaced scene.
                     undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;

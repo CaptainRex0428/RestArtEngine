@@ -10,6 +10,7 @@
 #include <RestArtEngine/Editor/EditorDockManager.h>
 #include <RestArtEngine/Editor/UndoStack.h>
 #include <RestArtEngine/Editor/EditorCommands.h>
+#include <RestArtEngine/Assets/AssetRegistry.h>
 
 namespace rae::editor {
 
@@ -31,6 +32,13 @@ public:
     // Current parameter draft for rendering only; Apply and Save keep their
     // existing commit/persistence boundaries. Valid until the next editor edit.
     [[nodiscard]] const assets::MaterialAsset* materialPreview() const;
+    // Content tree cache; the editor rescans it after every file operation.
+    [[nodiscard]] const assets::AssetRegistry& assetRegistry() const noexcept { return registry_; }
+    // Scene currently bound to the editor. Starts at the project default scene and
+    // changes when the Content browser opens another one.
+    [[nodiscard]] const std::filesystem::path& scenePath() const noexcept { return scenePath_; }
+    bool openScene(const std::filesystem::path& path, std::string& error);
+    bool createScene(const std::filesystem::path& path, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }
     // Full selection; the primary Actor (gizmo pivot / Scene and Details target) is selectedActor().
     [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
@@ -75,6 +83,13 @@ private:
     void eraseActor(scene::ActorId id);
     void insertActor(std::size_t index, const scene::Actor& actor);
     void drawAssets();
+    void drawFolderTreeNode(const std::string& folder);
+    void drawAssetRows();
+    void drawContentDialogs();
+    void openAsset(const assets::AssetEntry& entry);
+    void requestSceneOpen(const std::filesystem::path& path);
+    void refreshContent();
+    bool saveSceneAs(const std::filesystem::path& path, std::string& error);
     void drawMaterial();
     void drawShader(renderer::SceneRenderer&);
     void selectMaterial(assets::AssetId);
@@ -86,6 +101,16 @@ private:
     bool dirty(const renderer::SceneRenderer&) const;
 
     project::ProjectPaths project_;
+    assets::AssetRegistry registry_;
+    std::filesystem::path scenePath_;
+    std::string contentFolder_;    // selected folder, relative to the content root
+    std::string selectedAsset_;    // selected entry, relative to the content root
+    std::string renameBuffer_, newFolderBuffer_;
+    std::string renameTarget_, deleteTarget_;
+    bool renameOpen_ = false, newFolderOpen_ = false, deleteOpen_ = false;
+    bool sceneSwitchPrompt_ = false;
+    std::filesystem::path pendingScenePath_;
+    std::string contentError_;
     scene::World world_;
     ViewportInteraction viewport_;
     bool actorPanelFocused_ = false;

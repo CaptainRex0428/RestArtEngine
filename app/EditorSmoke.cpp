@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 #include <imgui_internal.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
+#include <RestArtEngine/Assets/AssetRegistry.h>
 #include <nlohmann/json.hpp>
 #include <DirectXMath.h>
 #include <algorithm>
@@ -146,6 +147,60 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         "Editor command registry is missing core commands.");
     require(editor.commands().enabled("actor.delete") == (editor.selectedActor() != 0),
         "Delete command enablement does not follow the Actor selection.");
+    {
+        // Asset registry + content moves. Everything happens in a temporary
+        // content root so the project files are never touched.
+        const auto root = std::filesystem::temp_directory_path() / "rae-content-registry-test";
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root / "Materials");
+        std::filesystem::create_directories(root / "Meshes");
+        std::filesystem::create_directories(root / "Scenes");
+        {
+            std::ofstream material(root / "Materials" / "1.ramat", std::ios::binary);
+            material << R"({"format":"RAEngine.Material","version":1,"material":{"id":7,"name":"RegistryMat","baseColor":[1.0,0.0,0.0],"roughness":0.5,"metallic":0.0,"grid":false,"twoSided":true}})";
+        }
+        {
+            std::ofstream obj(root / "Meshes" / "tri.obj", std::ios::binary);
+            obj << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        }
+        scene::World testWorld;
+        assets::AssetLibrary testAssets;
+        testAssets.createDefaults();
+        assets::AssetId importedId = 0;
+        std::string testError;
+        require(testAssets.importObj(root / "Meshes" / "tri.obj", importedId, testError), testError);
+        testWorld.createActor("Tri", importedId, 1);
+        require(testWorld.save(root / "Scenes" / "Test.rascene", testAssets, testError), testError);
+
+        assets::AssetRegistry registry;
+        registry.setContentRoot(root);
+        require(registry.scan(testError), testError);
+        require(registry.count(assets::AssetType::Material) == 1 &&
+            registry.count(assets::AssetType::Scene) == 1 &&
+            registry.count(assets::AssetType::Mesh) == 1,
+            "The asset registry did not classify the test content.");
+        const auto& folders = registry.folders();
+        require(std::find(folders.begin(), folders.end(), "Materials") != folders.end() &&
+            std::find(folders.begin(), folders.end(), "Scenes") != folders.end(),
+            "The asset registry did not list content folders.");
+        const auto* materialEntry = registry.find("Materials/1.ramat");
+        require(materialEntry && materialEntry->id == 7 && materialEntry->name == "RegistryMat",
+            "The registry did not read the material header.");
+
+        // Moving a scene re-bases its relative OBJ reference so the imported mesh
+        // still resolves from the new folder.
+        require(assets::moveContentEntry(root, "Scenes/Test.rascene", "Scenes/Sub", testError), testError);
+        scene::World movedWorld;
+        assets::AssetLibrary movedAssets;
+        require(movedWorld.load(root / "Scenes" / "Sub" / "Test.rascene", movedAssets, testError), testError);
+        require(!movedWorld.actors.empty() && movedAssets.findMesh(movedWorld.actors.front().mesh.meshId) != nullptr,
+            "A moved scene lost its imported mesh reference.");
+        require(registry.scan(testError), testError);
+        require(registry.count(assets::AssetType::Scene) == 1 && registry.folders().size() >= 4,
+            "The registry did not refresh after the move.");
+        std::filesystem::remove_all(root);
+    }
+
     {
         // Theme preference round-trips through the per-user file the app reads
         // before creating the ImGui context (palette itself is covered by the
