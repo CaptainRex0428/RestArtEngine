@@ -111,6 +111,8 @@ git submodule update --init
 2. 选择 `Debug | x64` 或 `Release | x64`
 3. 构建并运行目标 `RestArtEngine`
 
+生成的工程同时列出 `Shaders/` 下的 HLSL 文件（`.hlsl` / `.hlsli`，标记为 `None`），用于在 Rider / Visual Studio 里直接编辑；它们不参与构建，运行时由引擎编译。改动 shader 后无需重新生成 solution。
+
 输出（`bin/<system>-<arch>/<config>/`）：
 
 ```text

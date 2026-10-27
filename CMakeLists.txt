@@ -50,6 +50,13 @@ add_executable(RestArtEngine
     src/Editor/LoadingScreen.cpp
     vendor/ImGuizmo/src/ImGuizmo.cpp
     RestArtEngine.rc)
+# HLSL sources are listed for editing in IDEs; the build never compiles them.
+file(GLOB_RECURSE RENDER_SHADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/*.hlsl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/*.hlsli")
+target_sources(RestArtEngine PRIVATE ${RENDER_SHADERS})
+set_source_files_properties(${RENDER_SHADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/Shaders" PREFIX "Shaders" FILES ${RENDER_SHADERS})
 target_include_directories(RestArtEngine PRIVATE
     include
     vendor/nlohmann/single_include

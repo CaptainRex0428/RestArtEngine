@@ -10,6 +10,10 @@ project "RestArtEngine"
 		"src/**.cpp",
 		"src/**.h",
 		"include/RestArtEngine/**.h",
+		-- HLSL sources are listed so they can be edited from the solution; the
+		-- build does not compile them (they are loaded and compiled at runtime).
+		"Shaders/**.hlsl",
+		"Shaders/**.hlsli",
 		"vendor/ImGuizmo/src/ImGuizmo.cpp",
 		"vendor/ImGuizmo/src/ImGuizmo.h",
 		"RestArtEngine.rc"
@@ -45,6 +49,13 @@ project "RestArtEngine"
 	warnings "Extra"
 	buildoptions { "/permissive-" }
 	flags { "MultiProcessorCompile" }
+
+	-- HLSL is edited from the solution but compiled at runtime by the engine.
+	-- Without this premake maps .hlsl to FxCompile and the build tries to
+	-- compile it with no shader settings.
+	filter "files:Shaders/**.hlsl or files:Shaders/**.hlsli"
+		buildaction "None"
+	filter {}
 
 	-- ImGuizmo is compiled under /W4; silence its signed/unsigned noise.
 	filter "files:**/ImGuizmo.cpp"
