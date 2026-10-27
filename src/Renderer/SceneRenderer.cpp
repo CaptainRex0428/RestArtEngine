@@ -312,6 +312,13 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11InfoQueue> infoQueue;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
+        ComPtr<ID3D11Texture2D> sceneTexture;
+        ComPtr<ID3D11Texture2D> previewTexture;
+        ComPtr<ID3D11ShaderResourceView> previewView;
+        std::uint32_t previewSize = 0;
+        bool previewSceneReady = false;
+        scene::World previewWorld;
+        assets::AssetLibrary previewAssets;
     ComPtr<ID3D11ShaderResourceView> sceneView;
     ComPtr<ID3D11DepthStencilView> depth;
     ComPtr<ID3D11ShaderResourceView> depthView;
@@ -420,6 +427,7 @@ struct SceneRenderer::Impl {
         if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create scene color", error)) return false;
         if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &sceneTarget), "Create scene color target", error)) return false;
         if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &sceneView), "Create scene color SRV", error)) return false;
+        sceneTexture = texture;
 
         // A persistent directional shadow map. Keep this independent from the
         // camera depth buffer so it can be sampled by both forward and deferred
@@ -924,6 +932,104 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
     return true;
 }
 
+bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error) {
+    error.clear();
+    auto& state = *impl_;
+    if (!state.device || !state.sceneTexture || !state.backbuffer) {
+        error = "Renderer is not initialized.";
+        return false;
+    }
+    if (size < 16) size = 16;
+    if (!state.previewSceneReady) {
+        state.previewAssets = state.defaultAssets;
+        state.previewWorld.createActor("Preview", 1, 1);
+        state.previewSceneReady = true;
+    }
+    if (!state.previewTexture || state.previewSize != size) {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = size;
+        description.Height = size;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        state.previewTexture.Reset();
+        state.previewView.Reset();
+        if (failed(state.device->CreateTexture2D(&description, nullptr, &state.previewTexture),
+                   "Create material preview texture", error)) return false;
+        if (failed(state.device->CreateShaderResourceView(state.previewTexture.Get(), nullptr, &state.previewView),
+                   "Create material preview view", error)) return false;
+        state.previewSize = size;
+    }
+
+    SceneSettings settings;
+    settings.editorViewport = false;
+    settings.offscreenTarget = true;
+    settings.viewportVisible = true;
+    settings.viewportX = 0;
+    settings.viewportY = 0;
+    settings.viewportWidth = static_cast<int>(size);
+    settings.viewportHeight = static_cast<int>(size);
+    settings.path = RenderPath::Forward;
+    settings.rayTracing = false;
+    settings.shadowMethod = ShadowMethod::Disabled;
+    settings.cameraYaw = 0.65f;
+    settings.cameraPitch = 0.18f;
+    settings.cameraDistance = 3.0f;
+    settings.cameraTarget[0] = 0.0f;
+    settings.cameraTarget[1] = 0.0f;
+    settings.cameraTarget[2] = 0.0f;
+    std::cerr << "[preview] actors=" << state.previewWorld.actors.size() << " size=" << size
+              << " vp=" << settings.viewportWidth << "x" << settings.viewportHeight << " path=" << static_cast<int>(settings.path) << "\n";
+    if (!render(settings, state.previewWorld, state.previewAssets, error, &material)) return false;
+
+    // Keep only the preview corner; the main frame render overwrites the rest.
+    const D3D11_BOX region{0, 0, 0, size, size, 1};
+    state.context->CopySubresourceRegion(state.previewTexture.Get(), 0, 0, 0, 0,
+        state.sceneTexture.Get(), 0, &region);
+    return true;
+}
+
+void* SceneRenderer::materialPreviewTexture() const {
+    return impl_->previewView.Get();
+}
+
+bool SceneRenderer::readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
+                                              std::uint32_t& height, std::string& error) const {
+    error.clear();
+    auto& state = *impl_;
+    if (!state.device || !state.context || !state.previewTexture) {
+        error = "No material preview has been rendered yet.";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC description{};
+    state.previewTexture->GetDesc(&description);
+    D3D11_TEXTURE2D_DESC stagingDescription = description;
+    stagingDescription.Usage = D3D11_USAGE_STAGING;
+    stagingDescription.BindFlags = 0;
+    stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDescription.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (failed(state.device->CreateTexture2D(&stagingDescription, nullptr, &staging),
+               "Create preview staging texture", error)) return false;
+    state.context->CopyResource(staging.Get(), state.previewTexture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (failed(state.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped),
+               "Map preview staging texture", error)) return false;
+    width = description.Width;
+    height = description.Height;
+    pixels.resize(static_cast<std::size_t>(width) * height * 4);
+    for (std::uint32_t row = 0; row < height; ++row) {
+        std::memcpy(pixels.data() + static_cast<std::size_t>(row) * width * 4,
+            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(row) * mapped.RowPitch,
+            static_cast<std::size_t>(width) * 4);
+    }
+    state.context->Unmap(staging.Get(), 0);
+    return true;
+}
+
 bool SceneRenderer::render(const SceneSettings& settings, const scene::World& world,
                            const assets::AssetLibrary& assets, std::string& error,
                            const assets::MaterialAsset* materialOverride) {
@@ -1101,7 +1207,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
     state.context->PSSetShaderResources(0, 5, shadowResources);
     state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-    ID3D11RenderTargetView* backbuffer = settings.editorViewport ? state.sceneTarget.Get() : state.backbuffer.Get();
+    ID3D11RenderTargetView* backbuffer = (settings.editorViewport || settings.offscreenTarget)
+        ? state.sceneTarget.Get() : state.backbuffer.Get();
     const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
     if (settings.path == RenderPath::Deferred) {

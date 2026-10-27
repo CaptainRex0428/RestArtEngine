@@ -69,6 +69,9 @@ struct SceneSettings {
     // Editor panels composite the scene texture through their own window draw
     // list. An inactive dock tab must not fall back to fullscreen rendering.
     bool editorViewport = false;
+    // Render into the offscreen scene target while keeping editor-only branches
+    // (outline, viewport rect tracking) disabled. Used by tool previews.
+    bool offscreenTarget = false;
     bool viewportVisible = true;
     // Editor-only selection outline. `outlineActors` is borrowed for the render
     // call only; runtime callers leave it null, so the outline pass is never
@@ -108,6 +111,14 @@ public:
     // Releases the swap chain and window-sized targets while the HWND is alive.
     void detachWindow();
     bool render(const SceneSettings& settings, std::string& error);
+    // Renders a single lit sphere with the given material parameters into an
+    // offscreen texture and returns it for UI display. The main scene targets are
+    // reused and then overwritten by the frame's regular render call.
+    bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error);
+    [[nodiscard]] void* materialPreviewTexture() const;
+    // Copies the last preview image back to CPU memory (RGBA8) for tests.
+    bool readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
+                                   std::uint32_t& height, std::string& error) const;
     // Optional per-frame material override, matched by asset ID across raster
     // and ray paths. Borrowed only for this call; the asset library is unchanged.
     bool render(const SceneSettings& settings, const scene::World& world,

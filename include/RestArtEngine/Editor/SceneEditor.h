@@ -117,6 +117,11 @@ private:
     bool sceneSwitchPrompt_ = false;
     std::filesystem::path pendingScenePath_;
     bool contentGridView_ = false;
+    // Offscreen material preview: throttled re-render of the draft parameters.
+    float materialPreviewAge_ = 1.0f;
+    assets::MaterialAsset materialPreviewParams_{};
+    bool materialPreviewParamsValid_ = false;
+    std::string materialPreviewError_;
     std::string contentError_;
     scene::World world_;
     ViewportInteraction viewport_;

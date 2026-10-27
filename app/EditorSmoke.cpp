@@ -839,6 +839,42 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "and transactional rejection of non-boolean values.\n";
     }
 
+    {
+        // GPU material preview: the offscreen sphere must be lit by the draft color
+        // and change when the draft changes.
+        assets::MaterialAsset previewMaterial = *assets.findMaterial(1);
+        previewMaterial.baseColor[0] = 0.9f;
+        previewMaterial.baseColor[1] = 0.1f;
+        previewMaterial.baseColor[2] = 0.1f;
+        previewMaterial.roughness = 0.4f;
+        previewMaterial.metallic = 0.0f;
+        require(renderer.renderMaterialPreview(previewMaterial, 64, error), error);
+        require(renderer.materialPreviewTexture() != nullptr,
+            "The GPU material preview did not expose a texture.");
+        std::vector<std::uint8_t> redPixels;
+        std::uint32_t previewWidth = 0, previewHeight = 0;
+        require(renderer.readMaterialPreviewPixels(redPixels, previewWidth, previewHeight, error), error);
+        require(previewWidth == 64 && previewHeight == 64 && redPixels.size() == 64u * 64u * 4u,
+            "The GPU material preview did not produce a 64x64 image.");
+        const auto centerPixel = [](const std::vector<std::uint8_t>& pixels) {
+            const auto index = (static_cast<std::size_t>(32) * 64 + 32) * 4;
+            return std::array<int, 3>{pixels[index], pixels[index + 1], pixels[index + 2]};
+        };
+        const auto red = centerPixel(redPixels);
+        require(red[0] > 30 && red[0] > red[1],
+            std::string("The GPU material preview is not lit by the draft base color. rgb=") +
+                std::to_string(red[0]) + "," + std::to_string(red[1]) + "," + std::to_string(red[2]));
+        previewMaterial.baseColor[0] = 0.1f;
+        previewMaterial.baseColor[1] = 0.9f;
+        previewMaterial.baseColor[2] = 0.1f;
+        require(renderer.renderMaterialPreview(previewMaterial, 64, error), error);
+        std::vector<std::uint8_t> greenPixels;
+        require(renderer.readMaterialPreviewPixels(greenPixels, previewWidth, previewHeight, error), error);
+        const auto green = centerPixel(greenPixels);
+        require(green[1] > green[0] + 20 && green[1] > red[1] + 20,
+            "Changing the draft base color did not change the GPU preview.");
+    }
+
     auto* sphere = world.findActor(1);
     require(sphere != nullptr, "Default sphere missing.");
     sphere->transform.position[0] = -1.2f;

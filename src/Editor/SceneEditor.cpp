@@ -1805,6 +1805,36 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
         materialWindowFocusRequested_ = false;
     }
     if (visible && materialWindowOpen_) {
+        // Live GPU preview sphere: rendered offscreen when the draft changes or a
+        // short interval passes, then displayed as a texture.
+        if (const auto* draft = materialPreview()) {
+            materialPreviewAge_ += ImGui::GetIO().DeltaTime;
+            const bool changed = !materialPreviewParamsValid_ ||
+                draft->baseColor[0] != materialPreviewParams_.baseColor[0] ||
+                draft->baseColor[1] != materialPreviewParams_.baseColor[1] ||
+                draft->baseColor[2] != materialPreviewParams_.baseColor[2] ||
+                draft->roughness != materialPreviewParams_.roughness ||
+                draft->metallic != materialPreviewParams_.metallic ||
+                draft->grid != materialPreviewParams_.grid ||
+                draft->twoSided != materialPreviewParams_.twoSided;
+            if (changed || materialPreviewAge_ > 0.15f) {
+                if (!renderer.renderMaterialPreview(*draft, 160, materialPreviewError_))
+                    status_ = materialPreviewError_;
+                else {
+                    materialPreviewParams_ = *draft;
+                    materialPreviewParamsValid_ = true;
+                }
+                materialPreviewAge_ = 0.0f;
+            }
+            if (auto* texture = renderer.materialPreviewTexture()) {
+                ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)), ImVec2(160.0f, 160.0f));
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                ImGui::TextDisabled("Live preview");
+                ImGui::TextWrapped("Rendered offscreen from the current draft.");
+                ImGui::EndGroup();
+            }
+        }
         ImGui::TextWrapped("Closing this window keeps your drafts and live preview. Reopen it to continue; use Save to persist changes.");
         if (materialsDirty_) ImGui::TextDisabled("Material assets have unsaved changes.");
         message(status_);
