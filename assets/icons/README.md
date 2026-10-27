@@ -23,14 +23,14 @@ assets/icons/
 | 项 | 约定 |
 |---|---|
 | 画布 | 24×24 viewBox，四周留 2px 视觉内边距 |
-| 线条 | 圆头圆角端点，默认线宽 1.7（细线变体 1.3） |
+| 线条 | 圆头圆角端点，默认线宽 `0.09 × 图标尺寸`（24 网格上约 2.16） |
 | 颜色 | 描边 `#E6E6E6`，透明背景；不填彩色 |
 | 状态 | 同一图标必须提供可见 / 隐藏两个语义状态，形状本身可区分 |
-| 最小尺寸 | 16px 下仍能辨认；小于 16px 的图标另行简化 |
+| 最小尺寸 | 20px 起用；16px 以下去掉细节（例如瞳孔改实心、去掉内圈） |
 
 ## 当前资源
 
-- `outliner-eye/eye_visible.*`、`outliner-eye/eye_hidden.*`：World Outliner 每行的可见性小眼睛，方案 B（空心瞳孔 + 隐藏斜线）。隐藏状态的描边不透明度降到约 60%，另外运行时还会配合 `TextDisabled` 名称颜色。
+- `outliner-eye/eye_visible.*`、`outliner-eye/eye_hidden.*`：World Outliner 每行的可见性小眼睛。几何为 24 网格上的杏仁眼形（halfWidth 0.44、bend 0.32、线宽 0.09×size）+ 实心瞳孔（半径 0.145×size），隐藏状态叠加一条斜线。图标按 20px 渲染；16px 以下空心瞳孔无法成像，因此瞳孔为实心。
 - `outliner-eye/variants/`：A–F 六版方案与对比图 `contact_sheet.png`，供后续改版参考。
 
 ## 代码中的使用

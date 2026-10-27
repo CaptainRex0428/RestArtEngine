@@ -729,24 +729,30 @@ namespace {
 // Small hand-drawn eye used by the Outliner rows. A glyph would depend on the
 // loaded font, so the lens and pupil are drawn with the window draw list.
 void drawEyeIcon(ImDrawList* list, ImVec2 center, float size, bool visible, bool highlighted) {
-    // Line-art eye: almond outline plus a hollow pupil. It is drawn from
-    // geometry rather than a glyph or texture, so it stays crisp at any DPI.
-    const float radius = size * 0.5f;
-    const ImU32 color = ImGui::GetColorU32(highlighted ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-    const float thickness = std::max(1.0f, size * 0.075f);
+    // Line-art eye: almond outline plus a hollow pupil. Cubic beziers are used
+    // because the quadratic form only reaches half of its control offset, which
+    // flattens the lens enough that the pupil ring no longer fits inside it.
+    // Keep the eye legible on the dark theme: the disabled text colour alone is
+    // too faint for a 1px-stroke shape at 20px.
+    ImVec4 tint = ImGui::GetStyleColorVec4(highlighted ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    if (!highlighted) tint.w = std::max(tint.w, visible ? 0.85f : 0.55f);
+    const ImU32 color = ImGui::GetColorU32(tint);
+    const float stroke = std::max(1.4f, size * 0.09f);
+    const float halfWidth = size * 0.44f;
     const float bend = size * 0.32f;
-    const ImVec2 left{center.x - radius, center.y};
-    const ImVec2 right{center.x + radius, center.y};
+    const ImVec2 left{center.x - halfWidth, center.y};
+    const ImVec2 right{center.x + halfWidth, center.y};
     list->PathClear();
     list->PathLineTo(left);
-    list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y - bend), right, 10);
-    list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y + bend), left, 10);
-    list->PathStroke(color, ImDrawFlags_Closed, thickness);
-    list->AddCircle(center, size * 0.12f, color, 12, thickness);
+    list->PathBezierCubicCurveTo(ImVec2(left.x + halfWidth * 0.38f, center.y - bend),
+        ImVec2(right.x - halfWidth * 0.38f, center.y - bend), right, 14);
+    list->PathBezierCubicCurveTo(ImVec2(right.x - halfWidth * 0.38f, center.y + bend),
+        ImVec2(left.x + halfWidth * 0.38f, center.y + bend), left, 14);
+    list->PathStroke(color, ImDrawFlags_Closed, stroke);
+    list->AddCircleFilled(center, size * 0.145f, color, 16);
     if (!visible) {
-        // Slashed eye: the actor is hidden in the viewport.
-        list->AddLine(ImVec2(center.x - size * 0.34f, center.y + size * 0.30f),
-            ImVec2(center.x + size * 0.34f, center.y - size * 0.30f), color, thickness);
+        list->AddLine(ImVec2(center.x - size * 0.37f, center.y + size * 0.30f),
+            ImVec2(center.x + size * 0.37f, center.y - size * 0.30f), color, stroke);
     }
 }
 
@@ -769,7 +775,7 @@ void SceneEditor::drawOutliner() {
     ImGui::BeginChild("Actor list", {0, 0});
     bool deleteRequested = false;
     for (auto& actor : world_.actors) {
-        const float eyeSize = ImGui::GetTextLineHeight();
+        const float eyeSize = std::max(18.0f, ImGui::GetTextLineHeight() + 4.0f);
         // Fixed icon column: the eye is horizontally centred in it so all rows
         // share one visual axis regardless of the glyph width.
         const float eyeColumn = eyeSize + 14.0f;
@@ -792,7 +798,7 @@ void SceneEditor::drawOutliner() {
         ImGui::SameLine(0.0f, 8.0f);
         const auto label = actor.name + "##" + std::to_string(actor.id);
         if (!actor.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        if (ImGui::Selectable(label.c_str(), isSelected(actor.id)))
+        if (ImGui::Selectable(label.c_str(), isSelected(actor.id), ImGuiSelectableFlags_None, ImVec2(0.0f, eyeSize)))
             selectActor(actor.id, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift);
         if (!actor.visible) ImGui::PopStyleColor();
         if (ImGui::BeginPopupContextItem()) {
