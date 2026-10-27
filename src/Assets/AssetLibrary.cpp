@@ -189,21 +189,12 @@ bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::strin
             if (code) break;
             if (!entry.is_regular_file(code)) continue;
             const auto extension = entry.path().extension();
-            if (!isAssetContainerFile(entry.path()) && extension != ".ramat") continue;
+            if (!isAssetContainerFile(entry.path())) continue;
             if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
             AssetFile stale;
             std::string readError;
-            if (isAssetContainerFile(entry.path())) {
-                if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
-                if (stale.type != AssetFileType::Material || !ids.contains(stale.id)) continue;
-            } else {
-                try {
-                    const auto value = detail::readJson(entry.path());
-                    if (value.at("format") != "RAEngine.Material") continue;
-                    const auto material = detail::readMaterial(value.at("material"));
-                    if (!ids.contains(material.id)) continue;
-                } catch (const std::exception&) { continue; }
-            }
+            if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
+            if (stale.type != AssetFileType::Material || !ids.contains(stale.id)) continue;
             std::filesystem::remove(entry.path(), code);
         }
         error.clear();
