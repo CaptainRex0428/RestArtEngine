@@ -755,6 +755,40 @@ void SceneEditor::drawOutliner() {
     actorPanelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 }
 
+void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
+    ImGui::SeparatorText("Lighting");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12.0f, "Key light %.1f");
+    ImGui::TextDisabled("Temporary scene-level key light; it moves into a direct-light Actor component later.");
+    ImGui::SeparatorText("Direct-light shadows");
+    ImGui::TextDisabled("Ray tracing: all mesh actors");
+    ImGui::Text("Shadow method");
+    int shadowMethod = static_cast<int>(settings.shadowMethod);
+    shadowMethod = std::clamp(shadowMethod, 0, 8);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("##shadowMethod", &shadowMethod,
+        "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
+        settings.shadowMethod = static_cast<renderer::ShadowMethod>(shadowMethod);
+    }
+    if (settings.shadowMethod == renderer::ShadowMethod::ShadowMap)
+        ImGui::TextWrapped("Raster shadow map with a 2x2 PCF filter for stable deferred and forward shadows.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapHard)
+        ImGui::TextWrapped("Raster shadow map with one comparison sample for the sharpest edge.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF9)
+        ImGui::TextWrapped("Raster shadow map with a 3x3 PCF filter for softer edges.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCSS)
+        ImGui::TextWrapped("Raster shadow map with blocker search and percentage-closer soft shadows.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapCSM2)
+        ImGui::TextWrapped("Two cascaded directional shadow maps: a tight near cascade plus a wider far cascade.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::GTAO)
+        ImGui::TextWrapped("GTAO adds screen-space ambient occlusion to deferred lighting and keeps the raster shadow map for direct light.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ContactShadow)
+        ImGui::TextWrapped("Contact shadows ray-march the deferred position buffer near the receiver; forward rendering falls back to the raster shadow map.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::AnalyticRay)
+        ImGui::TextWrapped("Analytic rays: contact shadows for every visible mesh actor; built-in primitives use exact intersections and other meshes use triangle data.");
+    else
+        ImGui::TextWrapped("Direct-light shadows are disabled; ambient and reflection lighting remain active.");
+}
 void SceneEditor::drawScene() {
     // Scene-level parameters only. Actor instance properties live in Details.
     ImGui::TextDisabled("Project");
@@ -1204,6 +1238,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
     dockManager_.drawPanel(EditorPanel::Scene, [&] {
         drawScene();
+        drawSceneLighting(settings);
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
     dockManager_.drawPanel(EditorPanel::Details, [&] {
@@ -1211,40 +1246,9 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
     dockManager_.drawPanel(EditorPanel::Settings, [&] {
-        ImGui::TextDisabled("Scene");
-        ImGui::Text("Actors: %zu", world_.actors.size());
-        ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12, "Key light %.1f");
+        ImGui::SeparatorText("View");
         ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Exposure", &settings.exposure, .25f, 3, "Exposure %.2f");
-        ImGui::TextDisabled("Direct-light shadows");
-        ImGui::TextDisabled("Ray tracing: all mesh actors");
-        ImGui::Text("Shadow method");
-        int shadowMethod = static_cast<int>(settings.shadowMethod);
-        shadowMethod = std::clamp(shadowMethod, 0, 8);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##shadowMethod", &shadowMethod,
-            "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
-            settings.shadowMethod = static_cast<renderer::ShadowMethod>(shadowMethod);
-        }
-        if (settings.shadowMethod == renderer::ShadowMethod::ShadowMap)
-            ImGui::TextWrapped("Raster shadow map with a 2x2 PCF filter for stable deferred and forward shadows.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapHard)
-            ImGui::TextWrapped("Raster shadow map with one comparison sample for the sharpest edge.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF9)
-            ImGui::TextWrapped("Raster shadow map with a 3x3 PCF filter for softer edges.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCSS)
-            ImGui::TextWrapped("Raster shadow map with blocker search and percentage-closer soft shadows.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapCSM2)
-            ImGui::TextWrapped("Two cascaded directional shadow maps: a tight near cascade plus a wider far cascade.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::GTAO)
-            ImGui::TextWrapped("GTAO adds screen-space ambient occlusion to deferred lighting and keeps the raster shadow map for direct light.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::ContactShadow)
-            ImGui::TextWrapped("Contact shadows ray-march the deferred position buffer near the receiver; forward rendering falls back to the raster shadow map.");
-        else if (settings.shadowMethod == renderer::ShadowMethod::AnalyticRay)
-            ImGui::TextWrapped("Analytic rays: contact shadows for every visible mesh actor; built-in primitives use exact intersections and other meshes use triangle data.");
-        else
-            ImGui::TextWrapped("Direct-light shadows are disabled; ambient and reflection lighting remain active.");
+        ImGui::TextDisabled("Final exposure applied after lighting and post processing.");
         ImGui::Checkbox("VSync", &vsync);
         if (ImGui::Button("Reset camera")) {
             settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;

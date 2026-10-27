@@ -46,6 +46,7 @@ public:
 private:
     void drawOutliner();
     void drawScene();
+    void drawSceneLighting(renderer::SceneSettings& settings);
     void setSceneBackground(bool black);
     void drawInstanceDetails();
     void selectActor(scene::ActorId id, bool additive);
