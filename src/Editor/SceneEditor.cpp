@@ -756,57 +756,33 @@ void SceneEditor::drawOutliner() {
 }
 
 void SceneEditor::drawScene() {
-    auto* actor = world_.findActor(selectedActor_);
-    if (!actor) { ImGui::TextDisabled("Select an Actor in the Outliner."); return; }
-    ImGui::TextDisabled("Actor #%llu", static_cast<unsigned long long>(actor->id));
-    ImGui::SetNextItemWidth(-1);
-    sceneDirty_ |= textInput("##actorName", actor->name);
-    sceneDirty_ |= ImGui::Checkbox("Visible", &actor->visible);
-    ImGui::SeparatorText("Transform");
-    ImGui::SetNextItemWidth(-1);
-    sceneDirty_ |= ImGui::DragFloat3("##position", actor->transform.position, .03f, -1000, 1000, "%.2f");
-    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
-    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Position");
-    ImGui::TextDisabled("Position X / Y / Z");
-    ImGui::SetNextItemWidth(-1);
-    sceneDirty_ |= ImGui::DragFloat3("##rotation", actor->transform.rotation, .5f, -360, 360, "%.1f");
-    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
-    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Rotation");
-    ImGui::TextDisabled("Rotation X / Y / Z (degrees)");
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::DragFloat3("##scale", actor->transform.scale, .02f, .01f, 100, "%.2f")) {
-        for (auto& value : actor->transform.scale) value = std::clamp(value, .01f, 100.0f);
-        sceneDirty_ = true;
-    }
-    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
-    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Scale");
-    ImGui::TextDisabled("Scale X / Y / Z");
-    ImGui::SeparatorText("Static Mesh Component");
-    const auto* mesh = assets_.findMesh(actor->mesh.meshId);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##Mesh", mesh ? mesh->name.c_str() : "<missing>")) {
-        for (const auto& candidate : assets_.meshes) {
-            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
-            if (ImGui::Selectable(label.c_str(), actor->mesh.meshId == candidate.id)) {
-                actor->mesh.meshId = candidate.id; sceneDirty_ = true;
-            }
-        }
-        ImGui::EndCombo();
-    }
-    const auto* material = assets_.findMaterial(actor->mesh.materialId);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##Material", material ? material->name.c_str() : "<missing>")) {
-        for (const auto& candidate : assets_.materials) {
-            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
-            if (ImGui::Selectable(label.c_str(), actor->mesh.materialId == candidate.id)) {
-                actor->mesh.materialId = candidate.id; sceneDirty_ = true;
-            }
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::BeginDisabled(!material);
-    if (ImGui::Button("Edit assigned material")) selectMaterial(actor->mesh.materialId);
-    ImGui::EndDisabled();
+    // Scene-level parameters only. Actor instance properties live in Details.
+    ImGui::TextDisabled("Project");
+    ImGui::TextWrapped("%s", project_.name.c_str());
+    ImGui::TextDisabled("Content");
+    ImGui::TextWrapped("%s", pathText(project_.contentRoot).c_str());
+    ImGui::SeparatorText("Overview");
+    ImGui::Text("Actors: %zu", world_.actors.size());
+    ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
+    if (sceneDirty_) ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.25f, 1.0f), "Unsaved changes");
+    else ImGui::TextDisabled("Saved");
+    ImGui::SeparatorText("Environment");
+    int background = world_.blackBackground ? 1 : 0;
+    if (ImGui::RadioButton("Sky", background == 0)) setSceneBackground(false);
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Black", background == 1)) setSceneBackground(true);
+    ImGui::TextDisabled("Background applies to the whole scene and is saved in the scene file.");
+}
+
+void SceneEditor::setSceneBackground(bool black) {
+    if (world_.blackBackground == black) return;
+    const bool previous = world_.blackBackground;
+    world_.blackBackground = black;
+    sceneDirty_ = true;
+    undo_.push(black ? "Scene Background: Black" : "Scene Background: Sky",
+        [this, previous] { world_.blackBackground = previous; sceneDirty_ = true; },
+        [this, black] { world_.blackBackground = black; sceneDirty_ = true; });
+    status_ = black ? "Scene background: black" : "Scene background: sky";
 }
 
 void SceneEditor::importMesh() {
@@ -870,18 +846,67 @@ void SceneEditor::drawAssets() {
 }
 
 void SceneEditor::drawInstanceDetails() {
-    // Content browsing chooses a resource for insertion, never the inspection
-    // target. Resolve every field through the current scene instance each frame.
-    const auto* actor = world_.findActor(selectedActor_);
+    // Details owns everything about the selected Actor instance: identity,
+    // visibility, transform and its mesh/material assignment. Scene-wide
+    // parameters moved to the Scene panel.
+    auto* actor = world_.findActor(selectedActor_);
     if (!actor) {
         ImGui::TextWrapped("Select an Actor in the viewport or Outliner.");
         return;
     }
-    ImGui::TextWrapped("%s", actor->name.c_str());
     ImGui::TextDisabled("Actor #%llu", static_cast<unsigned long long>(actor->id));
     if (selection_.size() > 1)
         ImGui::TextWrapped("%zu Actors selected; showing primary instance.", selection_.size());
-    ImGui::Text("Visible: %s", actor->visible ? "Yes" : "No");
+    ImGui::SetNextItemWidth(-1);
+    sceneDirty_ |= textInput("##actorName", actor->name);
+    sceneDirty_ |= ImGui::Checkbox("Visible", &actor->visible);
+    ImGui::SeparatorText("Transform");
+    ImGui::SetNextItemWidth(-1);
+    sceneDirty_ |= ImGui::DragFloat3("##position", actor->transform.position, .03f, -1000, 1000, "%.2f");
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Position");
+    ImGui::TextDisabled("Position X / Y / Z");
+    ImGui::SetNextItemWidth(-1);
+    sceneDirty_ |= ImGui::DragFloat3("##rotation", actor->transform.rotation, .5f, -360, 360, "%.1f");
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Rotation");
+    ImGui::TextDisabled("Rotation X / Y / Z (degrees)");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat3("##scale", actor->transform.scale, .02f, .01f, 100, "%.2f")) {
+        for (auto& value : actor->transform.scale) value = std::clamp(value, .01f, 100.0f);
+        sceneDirty_ = true;
+    }
+    if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
+    if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Scale");
+    ImGui::TextDisabled("Scale X / Y / Z");
+    ImGui::SeparatorText("Static Mesh Component");
+    const auto* mesh = assets_.findMesh(actor->mesh.meshId);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##Mesh", mesh ? mesh->name.c_str() : "<missing>")) {
+        for (const auto& candidate : assets_.meshes) {
+            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
+            if (ImGui::Selectable(label.c_str(), actor->mesh.meshId == candidate.id)) {
+                actor->mesh.meshId = candidate.id; sceneDirty_ = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    const auto* assigned = assets_.findMaterial(actor->mesh.materialId);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##Material", assigned ? assigned->name.c_str() : "<missing>")) {
+        for (const auto& candidate : assets_.materials) {
+            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
+            if (ImGui::Selectable(label.c_str(), actor->mesh.materialId == candidate.id)) {
+                actor->mesh.materialId = candidate.id; sceneDirty_ = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::BeginDisabled(!assigned);
+    if (ImGui::Button("Edit assigned material")) selectMaterial(actor->mesh.materialId);
+    ImGui::EndDisabled();
+    // The assigned-material button is the instance's own entry point into the
+    // material workspace; it must follow this Actor, not the shared mesh.
     ImGui::SeparatorText("Assigned material");
     if (const auto* material = assets_.findMaterial(actor->mesh.materialId)) {
         const auto label = material->name + "###InstanceMaterial";
@@ -893,8 +918,7 @@ void SceneEditor::drawInstanceDetails() {
         ImGui::TextWrapped("Missing material #%llu", static_cast<unsigned long long>(actor->mesh.materialId));
     }
     ImGui::SeparatorText("Mesh");
-    if (const auto* mesh = assets_.findMesh(actor->mesh.meshId)) {
-        ImGui::TextWrapped("Mesh: %s", mesh->name.c_str());
+    if (mesh) {
         ImGui::TextWrapped("Type: %s", meshType(mesh->primitive));
         ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
         message(mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);

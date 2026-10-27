@@ -1255,20 +1255,26 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(editor.selectedActor() == 1 &&
             findWindow("Scene")->DockNode->SelectedTabId == findWindow("Scene")->TabId,
             "Content asset selection stole the Scene tab or changed the Actor selection.");
-        auto* sceneInspector = findWindow("Scene");
-        const auto actorName = itemRect(sceneInspector, sceneInspector->GetID("##actorName"));
+        // Actor instance fields live in Details; the Scene page now only holds
+        // scene-level parameters.
+        auto* detailsInspector = findWindow("Details");
+        require(detailsInspector != nullptr, "The editor has no Details panel.");
+        if (detailsInspector->DockNode && detailsInspector->DockNode->SelectedTabId != detailsInspector->TabId)
+            click(dockTabCenter(detailsInspector));
+        const auto actorName = itemRect(detailsInspector, detailsInspector->GetID("##actorName"));
         require(actorName.GetWidth() > 0 && actorName.GetHeight() > 0,
-            "The Scene page does not expose the selected Actor fields.");
+            "The Details page does not expose the selected Actor fields.");
+        captureInspectorThemes("inspector_details");
         captureInspectorThemes("inspector_scene");
         std::cout << "PASS: Actor instance Details, shared-mesh material isolation, Content selection independence, "
             "and stable manual Scene selection.\n";
     }
     const auto openAssignedMaterial = [&] {
-        auto* scene = findWindow("Scene");
-        require(scene != nullptr, "Material entry has no Scene panel.");
-        if (scene->DockNode && scene->DockNode->SelectedTabId != scene->TabId)
-            click(dockTabCenter(scene));
-        click(itemRect(scene, scene->GetID("Edit assigned material")).GetCenter());
+        auto* details = findWindow("Details");
+        require(details != nullptr, "Material entry has no Details panel.");
+        if (details->DockNode && details->DockNode->SelectedTabId != details->TabId)
+            click(dockTabCenter(details));
+        click(itemRect(details, details->GetID("Edit assigned material")).GetCenter());
         capture("material_opened", true);
     };
     auto* materialWindow = findWindow("Material Editor###MaterialWorkspace");
@@ -1458,8 +1464,10 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             const auto* bar = tabBar();
             return itemRect(bar->Window, ImHashStr(label, 0, bar->SelectedTabId));
         };
-        auto* detailsWindow = findWindow("Scene");
-        require(detailsWindow != nullptr, "Material-preview Scene panel is missing.");
+        auto* detailsWindow = findWindow("Details");
+        require(detailsWindow != nullptr, "Material-preview Details panel is missing.");
+        if (detailsWindow->DockNode && detailsWindow->DockNode->SelectedTabId != detailsWindow->TabId)
+            click(dockTabCenter(detailsWindow));
         click(itemRect(detailsWindow, detailsWindow->GetID("Edit assigned material")).GetCenter());
         selectTab("Material Editor");
         const auto* materialActor = world.findActor(editor.selectedActor());

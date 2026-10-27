@@ -13,7 +13,7 @@
 | GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11；未接通跨平台 GUI 后端。 |
 | 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
 | 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮及布局恢复；材质编辑器另用系统独立窗口。 |
-| 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene、Details、Viewport settings、Content & Editors、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 保留 Meshes，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
+| 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数）、Details（Actor 实例属性）、Viewport settings、Content & Editors、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 保留 Meshes，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
 | 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选与 Alt 拖动复制；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，颜色取主题强调色。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
 | 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。`UI` 菜单承载主题子菜单，并以下拉末项 `Selection outline...` 打开独立的小设置窗口（开关、粗细、主题强调色、预设色或自定义颜色）；选择与本机 `RestArtEngine.ui.ini` 同步。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
@@ -28,7 +28,7 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 
 ## Scene / Details 信息分工
 
-Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部仅保留 Meshes 资源列表及导入／创建入口，中央视口和右侧设置延续原布局。Scene 保留实例属性与材质分配编辑；Details 展示主实例名称、ID、可见性、它当前的 Mesh 几何与来源，以及当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
+Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部仅保留 Meshes 资源列表及导入／创建入口，中央视口和右侧设置延续原布局。Scene 只保留场景级参数（工程与场景信息、统计、背景 Sky / Black）；Actor 实例的全部编辑（名称、可见性、变换、Mesh / Material 分配）都在 Details，并附带该实例的 Mesh 几何与来源、当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
 
 选场景／Outliner 的 Actor 显示 Details，浏览／导入 Mesh 资源不改变 Details 目标或强制切页；切页是一次性事件，不按已有选中状态每帧抢焦点。多选标识主实例；无选中、删除后失效选择、缺失 Mesh／Material 均给出明确状态，撤销恢复后重新按 Actor ID 解析。窄 Details 使用纵向信息和换行入口，长来源路径可换行；底部不重复放属性区。
 
