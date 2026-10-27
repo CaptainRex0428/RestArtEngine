@@ -199,6 +199,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在现有 D3D11 深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享同一套资源管理和切换入口。
 
+启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
+
 当前真实场景渲染只接入 DX11，OpenGL、DX12、Vulkan、Null 的 RHI 仍为骨架。后续支持其他 API 时，在 `Renderer` 中落地资源和命令接口，并保持 Scene / Assets 不依赖具体图形 API。
 
 光追开关当前使用 GPU Shader 中的解析求交：内置 Sphere / Plane / Cube 使用精确解析路径，OBJ、未来 MeshAsset 以及超过 32 个内置对象的部分使用 `StructuredBuffer<RayTriangle>` 三角形路径。每帧按 Actor 变换上传全部可见网格三角形，不设置引擎级三角形预算；仅在数量无法用 D3D11 结构化缓冲区的字节数或元素数表示时拒绝分配，避免静默丢弃场景几何。没有 DXR、硬件 RT 管线、通用网格 BVH 或路径追踪。节点材质编辑、纹理资产、加速结构和其他后端是后续扩展。

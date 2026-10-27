@@ -102,6 +102,11 @@ public:
     bool initialize(HWND__* window, std::uint32_t width, std::uint32_t height,
                     std::string& error);
     bool resize(std::uint32_t width, std::uint32_t height, std::string& error);
+    // Binds the renderer to another window, rebuilding only the swap chain and
+    // window-sized targets. The device, shaders and GPU caches are reused.
+    bool attachWindow(HWND__* window, std::uint32_t width, std::uint32_t height, std::string& error);
+    // Releases the swap chain and window-sized targets while the HWND is alive.
+    void detachWindow();
     bool render(const SceneSettings& settings, std::string& error);
     // Optional per-frame material override, matched by asset ID across raster
     // and ray paths. Borrowed only for this call; the asset library is unchanged.

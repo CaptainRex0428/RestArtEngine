@@ -30,8 +30,8 @@ std::string pathText(const std::filesystem::path& path) {
 
 // Decodes the PNG through WIC and uploads it as an immutable shader resource.
 bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
-                 ID3D11ShaderResourceView** result, std::string& error) {
-    if (!device) { error = "A render device is required to load the loading image."; return false; }
+                 ID3D11ShaderResourceView** result, std::uint32_t* outWidth, std::uint32_t* outHeight,
+                 std::string& error) {
     if (!std::filesystem::is_regular_file(image)) {
         error = "Loading image not found: " + pathText(image);
         return false;
@@ -97,6 +97,8 @@ bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
         return false;
     }
     *result = view.Detach();
+    if (outWidth) *outWidth = width;
+    if (outHeight) *outHeight = height;
     return true;
 }
 } // namespace
@@ -107,7 +109,7 @@ bool LoadingScreen::initialize(ID3D11Device* device, const std::filesystem::path
     release();
     error.clear();
     ID3D11ShaderResourceView* view = nullptr;
-    if (!decodeImage(device, image, &view, error)) return false;
+    if (!decodeImage(device, image, &view, &width_, &height_, error)) return false;
     texture_ = view;
     return true;
 }
@@ -116,6 +118,7 @@ void LoadingScreen::release() noexcept {
     if (texture_) {
         texture_->Release();
         texture_ = nullptr;
+        width_ = height_ = 0;
     }
 }
 

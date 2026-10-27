@@ -6,6 +6,7 @@
 #include <d3d11sdklayers.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <DirectXMath.h>
 #include <wrl/client.h>
 
@@ -16,6 +17,7 @@
 #include <d3d11shader.h>
 
 #include <algorithm>
+#include <iostream>
 #include <array>
 #include <cmath>
 #include <chrono>
@@ -306,6 +308,7 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swapChain;
+    ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D11InfoQueue> infoQueue;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
@@ -359,6 +362,24 @@ struct SceneRenderer::Impl {
     static constexpr UINT shadowCascadeCount = 2;
     std::uint32_t width = 0, height = 0;
     std::string adapter;
+
+    bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
+        DXGI_SWAP_CHAIN_DESC1 description{};
+        description.Width = targetWidth;
+        description.Height = targetHeight;
+        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        description.BufferCount = 2;
+        description.Scaling = DXGI_SCALING_STRETCH;
+        description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        description.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+        ComPtr<IDXGISwapChain1> created;
+        if (failed(factory->CreateSwapChainForHwnd(device.Get(), window, &description, nullptr, nullptr, &created),
+                   "Create swap chain", error)) return false;
+        factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
+        return !failed(created.As(&swapChain), "Query swap chain", error);
+    }
 
     bool createTargets(std::string& error) {
         ComPtr<ID3D11Texture2D> texture;
@@ -760,43 +781,33 @@ bool SceneRenderer::initializeDevice(HWND__* window, std::uint32_t width,
     auto& state = *impl_;
     state.width = width;
     state.height = height;
-    ComPtr<IDXGIFactory1> factory;
-    if (failed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Create DXGI factory", error)) return false;
+    if (failed(CreateDXGIFactory2(0, IID_PPV_ARGS(&state.factory)), "Create DXGI factory", error)) return false;
     struct Adapter { ComPtr<IDXGIAdapter1> object; DXGI_ADAPTER_DESC1 description; };
     std::vector<Adapter> adapters;
     for (UINT index = 0;; ++index) {
         Adapter adapter;
-        if (FAILED(factory->EnumAdapters1(index, &adapter.object))) break;
+        if (FAILED(state.factory->EnumAdapters1(index, &adapter.object))) break;
         if (!adapter.object || FAILED(adapter.object->GetDesc1(&adapter.description))) continue;
         if (!(adapter.description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) adapters.push_back(std::move(adapter));
     }
     std::stable_sort(adapters.begin(), adapters.end(), [](const Adapter& a, const Adapter& b) {
         return a.description.DedicatedVideoMemory > b.description.DedicatedVideoMemory;
     });
-    DXGI_SWAP_CHAIN_DESC swap{};
-    swap.BufferDesc.Width = width;
-    swap.BufferDesc.Height = height;
-    swap.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swap.SampleDesc.Count = 1;
-    swap.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swap.BufferCount = 2;
-    swap.OutputWindow = window;
-    swap.Windowed = TRUE;
-    swap.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     const D3D_FEATURE_LEVEL featureLevels[] = {D3D_FEATURE_LEVEL_11_0};
+    // The device is created on its own; every window owns its swap chain. This
+    // keeps boot free to move from the borderless loading window to the editor
+    // window without recreating shaders or GPU caches.
     const auto create = [&](IDXGIAdapter* adapter, D3D_DRIVER_TYPE type) {
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #if defined(_DEBUG)
         flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
-        HRESULT hr = D3D11CreateDeviceAndSwapChain(adapter, type, nullptr, flags,
-            featureLevels, 1, D3D11_SDK_VERSION, &swap, &state.swapChain,
-            &state.device, nullptr, &state.context);
+        HRESULT hr = D3D11CreateDevice(adapter, type, nullptr, flags, featureLevels, 1,
+            D3D11_SDK_VERSION, &state.device, nullptr, &state.context);
         if (FAILED(hr) && (flags & D3D11_CREATE_DEVICE_DEBUG)) {
-            state.swapChain.Reset(); state.device.Reset(); state.context.Reset();
-            hr = D3D11CreateDeviceAndSwapChain(adapter, type, nullptr,
-                flags & ~D3D11_CREATE_DEVICE_DEBUG, featureLevels, 1, D3D11_SDK_VERSION,
-                &swap, &state.swapChain, &state.device, nullptr, &state.context);
+            state.device.Reset(); state.context.Reset();
+            hr = D3D11CreateDevice(adapter, type, nullptr, flags & ~D3D11_CREATE_DEVICE_DEBUG,
+                featureLevels, 1, D3D11_SDK_VERSION, &state.device, nullptr, &state.context);
         }
         return hr;
     };
@@ -809,14 +820,46 @@ bool SceneRenderer::initializeDevice(HWND__* window, std::uint32_t width,
         result = create(nullptr, D3D_DRIVER_TYPE_WARP);
         if (SUCCEEDED(result)) state.adapter = "Microsoft WARP (software rasterizer)";
     }
-    if (failed(result, "Create D3D11 device and swap chain", error)) return false;
-    factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
+    if (failed(result, "Create D3D11 device", error)) return false;
     state.device.As(&state.infoQueue);
     state.defaultAssets.createDefaults(); state.defaultWorld.createDefaultScene();
+    if (!state.createSwapChain(window, width, height, error)) { shutdown(); return false; }
     if (!state.createTargets(error)) { shutdown(); return false; }
     return true;
 }
 
+void SceneRenderer::detachWindow() {
+    // Release the window-bound surface while its HWND is still alive: releasing a
+    // swap chain after its window has been destroyed can block inside DXGI.
+    auto& state = *impl_;
+    if (!state.device) return;
+    if (state.context) { state.context->ClearState(); state.context->Flush(); }
+    state.backbuffer.Reset();
+    state.sceneTarget.Reset();
+    state.sceneView.Reset();
+    state.depth.Reset();
+    state.depthView.Reset();
+    for (auto& target : state.gbufferTargets) target.Reset();
+    for (auto& view : state.gbufferViews) view.Reset();
+    state.swapChain.Reset();
+}
+
+bool SceneRenderer::attachWindow(HWND__* window, std::uint32_t width,
+                                 std::uint32_t height, std::string& error) {
+    error.clear();
+    auto& state = *impl_;
+    if (!window || width == 0 || height == 0) {
+        error = "A valid window and nonzero dimensions are required.";
+        return false;
+    }
+    if (!state.device || !state.factory) { error = "Renderer is not initialized."; return false; }
+    detachWindow();
+    state.width = width;
+    state.height = height;
+    if (!state.createSwapChain(window, width, height, error)) return false;
+    const bool targetsReady = state.createTargets(error);
+    return targetsReady;
+}
 bool SceneRenderer::initializePipeline(std::string& error) {
     error.clear();
     auto& state = *impl_;

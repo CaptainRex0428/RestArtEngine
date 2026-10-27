@@ -134,6 +134,26 @@ void toggleFullscreen(HWND window, WindowState& state) {
     }
 }
 
+RECT primaryMonitorRect() {
+    POINT origin{0, 0};
+    const HMONITOR monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO info{sizeof(MONITORINFO)};
+    if (monitor && GetMonitorInfoW(monitor, &info)) return info.rcMonitor;
+    return RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+}
+
+// Centres a client-size rectangle on the monitor. `frame` adds the standard
+// resizable border so a WS_OVERLAPPEDWINDOW client area matches the request.
+RECT centredWindowRect(const RECT& monitor, int clientWidth, int clientHeight, bool frame) {
+    RECT rect{0, 0, clientWidth, clientHeight};
+    if (frame) AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    const int x = monitor.left + ((monitor.right - monitor.left) - width) / 2;
+    const int y = monitor.top + ((monitor.bottom - monitor.top) - height) / 2;
+    return RECT{x, y, x + width, y + height};
+}
+
 struct WindowOwner {
     HWND handle{};
     ~WindowOwner() { if (IsWindow(handle)) DestroyWindow(handle); }
@@ -714,38 +734,99 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIcon = loadEngineIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
-        WindowState windowState;
-        windowState.chrome.setEnabled(!selfTest);
-        // The editor owns the main loop, so it is the only window allowed to
-        // turn its destruction into a thread-wide quit.
-        windowState.quitOnDestroy = true;
-        RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
-        if (selfTest) AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
-        const auto title = windowTitle(project.name);
-        WindowOwner window{CreateWindowW(wc.lpszClassName, title.c_str(),
-            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right-bounds.left,
-            bounds.bottom-bounds.top, nullptr, nullptr, instance, &windowState)};
-        if (!window.handle) throw std::runtime_error("CreateWindow failed");
         const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest;
+        const auto title = windowTitle(project.name);
+        const RECT monitor = primaryMonitorRect();
         SceneRenderer renderer;
         renderer.setShaderRoot(project.engineRoot / "Shaders");
         renderer.setMaterialShaderPath(project.shaderRoot / "Materials/Standard.hlsli");
-        if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
-            throw std::runtime_error(error);
         rae::imgui::ImGuiLayer ui;
-        if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest && !gcSelfTest))
-            throw std::runtime_error("Dear ImGui initialization failed");
-        ui.setWindowChrome(&windowState.chrome);
-        if (interactive) ui.setIniFilename("RestArtEngine.imgui.ini");
         rae::editor::LoadingScreen loading;
         if (interactive) {
-            std::string loadingError;
-            if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
-                std::cerr << "Loading screen unavailable: " << loadingError << '\n';
-            ShowWindow(window.handle, SW_SHOW);
-            presentLoading(renderer, ui, loading, 0.15f, "Initializing render device");
+            // Phase 1: borderless loading window, 28% of the monitor width at the
+            // artwork aspect, centred. It is destroyed before the editor window
+            // exists, so no runtime window-style switching is involved.
+            WindowState loadingState;
+            loadingState.chrome.setEnabled(false);
+            loadingState.width = static_cast<unsigned>(std::max(320, static_cast<int>((monitor.right - monitor.left) * 0.28f)));
+            loadingState.height = static_cast<unsigned>(std::max(180, static_cast<int>(loadingState.width * 9 / 16)));
+            const RECT placed = centredWindowRect(monitor, static_cast<int>(loadingState.width),
+                static_cast<int>(loadingState.height), false);
+            {
+                WindowOwner loadingWindow{CreateWindowW(wc.lpszClassName, title.c_str(), WS_POPUP,
+                    placed.left, placed.top, placed.right - placed.left, placed.bottom - placed.top,
+                    nullptr, nullptr, instance, &loadingState)};
+                if (!loadingWindow.handle) throw std::runtime_error("CreateWindow failed");
+                ShowWindow(loadingWindow.handle, SW_SHOW);
+                if (!renderer.initializeDevice(loadingWindow.handle, loadingState.width, loadingState.height, error))
+                    throw std::runtime_error(error);
+                if (!ui.initialize(loadingWindow.handle, renderer.device(), renderer.context(), true))
+                    throw std::runtime_error("Dear ImGui initialization failed");
+                std::string loadingError;
+                if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
+                    std::cerr << "Loading screen unavailable: " << loadingError << '\n';
+                if (loading.ready()) {
+                    const int width = std::max(320, static_cast<int>((monitor.right - monitor.left) * 0.28f));
+                    const int height = std::max(180, static_cast<int>(width / loading.aspect()));
+                    if (width != static_cast<int>(loadingState.width) || height != static_cast<int>(loadingState.height)) {
+                        const RECT aspectRect = centredWindowRect(monitor, width, height, false);
+                        SetWindowPos(loadingWindow.handle, nullptr, aspectRect.left, aspectRect.top, width, height,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                        loadingState.width = static_cast<unsigned>(width);
+                        loadingState.height = static_cast<unsigned>(height);
+                        if (!renderer.resize(loadingState.width, loadingState.height, error))
+                            throw std::runtime_error(error);
+                    }
+                }
+                presentLoading(renderer, ui, loading, 0.15f, "Initializing render device");
+                if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
+                presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
+                presentLoading(renderer, ui, loading, 1.0f, "Ready");
+                loading.release();
+                // Release the swap chain while the boot HWND is alive, then tear
+                // down the UI that was bound to it.
+                renderer.detachWindow();
+                ui.shutdown();
+            }
         }
-        if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
+        WindowState windowState;
+        windowState.chrome.setEnabled(!selfTest);
+        windowState.quitOnDestroy = true;
+        RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
+        int windowX = CW_USEDEFAULT, windowY = CW_USEDEFAULT;
+        if (interactive) {
+            // Phase 2: editor window, 80% of the monitor, centred with the native
+            // frame and the custom title bar.
+            const int width = std::max(640, static_cast<int>((monitor.right - monitor.left) * 0.8f));
+            const int height = std::max(480, static_cast<int>((monitor.bottom - monitor.top) * 0.8f));
+            const RECT placed = centredWindowRect(monitor, width, height, true);
+            windowState.width = static_cast<unsigned>(width);
+            windowState.height = static_cast<unsigned>(height);
+            windowX = placed.left;
+            windowY = placed.top;
+            bounds = RECT{0, 0, placed.right - placed.left, placed.bottom - placed.top};
+        } else if (selfTest) {
+            AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
+        }
+        WindowOwner window{CreateWindowW(wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW,
+            windowX, windowY, bounds.right - bounds.left, bounds.bottom - bounds.top,
+            nullptr, nullptr, instance, &windowState)};
+        if (interactive) ShowWindow(window.handle, SW_SHOW);
+        if (!window.handle) throw std::runtime_error("CreateWindow failed");
+        if (interactive) {
+            if (!renderer.attachWindow(window.handle, windowState.width, windowState.height, error))
+                throw std::runtime_error(error);
+            if (!ui.initialize(window.handle, renderer.device(), renderer.context(), true))
+                throw std::runtime_error("Dear ImGui initialization failed");
+            ui.setIniFilename("RestArtEngine.imgui.ini");
+        } else {
+            if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
+                throw std::runtime_error(error);
+            if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest && !gcSelfTest))
+                throw std::runtime_error("Dear ImGui initialization failed");
+            if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
+        }
+        ui.setWindowChrome(&windowState.chrome);
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
@@ -758,8 +839,6 @@ int wmain(int argc, wchar_t** argv) {
             runEditorSmoke(renderer, ui, editor, project, captureDir);
             return 0;
         }
-        if (interactive) presentLoading(renderer, ui, loading, 1.0f, "Ready");
-        loading.release(); // The last loading draw has been submitted; no longer a live UI resource.
         std::cout << "RestArtEngine / D3D11 / " << renderer.adapterName() << '\n';
         std::cout << "Forward + deferred rasterization; directional shadow maps, selectable analytic shadows, and GPU ray reflections.\n";
         bool running = true;
