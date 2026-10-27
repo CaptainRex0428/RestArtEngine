@@ -150,3 +150,6 @@ Desktop.ini
 
 # Generated built-in primitive assets (recreated when a project opens).
 Projects/*/Content/Meshes/Builtin/
+
+# Generated scene thumbnails (recreated when a scene is saved).
+Projects/*/Content/Scenes/*.rthumb

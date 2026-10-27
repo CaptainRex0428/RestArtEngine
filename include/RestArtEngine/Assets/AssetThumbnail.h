@@ -34,4 +34,10 @@ struct ScenePreviewBox {
 [[nodiscard]] Thumbnail renderSceneThumbnail(const std::vector<ScenePreviewBox>& boxes, std::uint32_t size = 64);
 [[nodiscard]] Thumbnail renderMaterialThumbnail(const MaterialAsset& material, std::uint32_t size = 64);
 
+// Scene thumbnails are stored next to the scene as "<scene>.rthumb" because the
+// scene itself is JSON. Layout: magic "RTHB", u32 version, u32 width, u32 height,
+// then RGBA8 pixels.
+bool writeSceneThumbnail(const std::filesystem::path& path, const Thumbnail& thumbnail, std::string& error);
+bool readSceneThumbnail(const std::filesystem::path& path, Thumbnail& thumbnail, std::string& error);
+
 } // namespace rae::assets

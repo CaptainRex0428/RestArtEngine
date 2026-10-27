@@ -932,7 +932,10 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
     return true;
 }
 
-bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error) {
+bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
+                                       const assets::AssetLibrary& assets,
+                                       const assets::MaterialAsset* materialOverride,
+                                       std::uint32_t size, std::string& error) {
     error.clear();
     auto& state = *impl_;
     if (!state.device || !state.sceneTexture || !state.backbuffer) {
@@ -940,11 +943,6 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
         return false;
     }
     if (size < 16) size = 16;
-    if (!state.previewSceneReady) {
-        state.previewAssets = state.defaultAssets;
-        state.previewWorld.createActor("Preview", 1, 1);
-        state.previewSceneReady = true;
-    }
     if (!state.previewTexture || state.previewSize != size) {
         D3D11_TEXTURE2D_DESC description{};
         description.Width = size;
@@ -958,12 +956,31 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
         state.previewTexture.Reset();
         state.previewView.Reset();
         if (failed(state.device->CreateTexture2D(&description, nullptr, &state.previewTexture),
-                   "Create material preview texture", error)) return false;
+                   "Create preview texture", error)) return false;
         if (failed(state.device->CreateShaderResourceView(state.previewTexture.Get(), nullptr, &state.previewView),
-                   "Create material preview view", error)) return false;
+                   "Create preview view", error)) return false;
         state.previewSize = size;
     }
+    if (!render(settings, world, assets, error, materialOverride)) return false;
+    const D3D11_BOX region{0, 0, 0, size, size, 1};
+    state.context->CopySubresourceRegion(state.previewTexture.Get(), 0, 0, 0, 0,
+        state.sceneTexture.Get(), 0, &region);
+    return true;
+}
 
+bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
+                                          std::string& error) {
+    return renderMaterialPreview(material, size, 0.65f, 0.18f, 3.0f, error);
+}
+
+bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
+                                          float yaw, float pitch, float distance, std::string& error) {
+    auto& state = *impl_;
+    if (!state.previewSceneReady) {
+        state.previewAssets = state.defaultAssets;
+        state.previewWorld.createActor("Preview", 1, 1);
+        state.previewSceneReady = true;
+    }
     SceneSettings settings;
     settings.editorViewport = false;
     settings.offscreenTarget = true;
@@ -975,26 +992,65 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
     settings.path = RenderPath::Forward;
     settings.rayTracing = false;
     settings.shadowMethod = ShadowMethod::Disabled;
-    settings.cameraYaw = 0.65f;
-    settings.cameraPitch = 0.18f;
-    settings.cameraDistance = 3.0f;
+    settings.cameraYaw = yaw;
+    settings.cameraPitch = pitch;
+    settings.cameraDistance = distance;
     settings.cameraTarget[0] = 0.0f;
     settings.cameraTarget[1] = 0.0f;
     settings.cameraTarget[2] = 0.0f;
-    std::cerr << "[preview] actors=" << state.previewWorld.actors.size() << " size=" << size
-              << " vp=" << settings.viewportWidth << "x" << settings.viewportHeight << " path=" << static_cast<int>(settings.path) << "\n";
-    if (!render(settings, state.previewWorld, state.previewAssets, error, &material)) return false;
+    return renderPreviewFrame(settings, state.previewWorld, state.previewAssets, &material, size, error);
+}
 
-    // Keep only the preview corner; the main frame render overwrites the rest.
-    const D3D11_BOX region{0, 0, 0, size, size, 1};
-    state.context->CopySubresourceRegion(state.previewTexture.Get(), 0, 0, 0, 0,
-        state.sceneTexture.Get(), 0, &region);
-    return true;
+bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
+                                       std::uint32_t size, std::string& error) {
+    error.clear();
+    float minimum[3] = {1e30f, 1e30f, 1e30f};
+    float maximum[3] = {-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        if (!mesh || mesh->vertices.empty()) continue;
+        const XMMATRIX matrix = actorMatrix(actor);
+        for (const auto& vertex : mesh->vertices) {
+            const XMVECTOR position = XMVector3TransformCoord(
+                XMVectorSet(vertex.position[0], vertex.position[1], vertex.position[2], 1.0f), matrix);
+            minimum[0] = std::min(minimum[0], XMVectorGetX(position));
+            minimum[1] = std::min(minimum[1], XMVectorGetY(position));
+            minimum[2] = std::min(minimum[2], XMVectorGetZ(position));
+            maximum[0] = std::max(maximum[0], XMVectorGetX(position));
+            maximum[1] = std::max(maximum[1], XMVectorGetY(position));
+            maximum[2] = std::max(maximum[2], XMVectorGetZ(position));
+            any = true;
+        }
+    }
+    if (!any) { error = "The scene has no visible geometry to preview."; return false; }
+    const float extent[3] = {maximum[0] - minimum[0], maximum[1] - minimum[1], maximum[2] - minimum[2]};
+    const float radius = std::max(0.5f, 0.5f * std::sqrt(extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]));
+    SceneSettings settings;
+    settings.editorViewport = false;
+    settings.offscreenTarget = true;
+    settings.viewportVisible = true;
+    settings.viewportX = 0;
+    settings.viewportY = 0;
+    settings.viewportWidth = static_cast<int>(size);
+    settings.viewportHeight = static_cast<int>(size);
+    settings.path = RenderPath::Forward;
+    settings.rayTracing = false;
+    settings.shadowMethod = ShadowMethod::Disabled;
+    settings.cameraTarget[0] = (minimum[0] + maximum[0]) * 0.5f;
+    settings.cameraTarget[1] = (minimum[1] + maximum[1]) * 0.5f;
+    settings.cameraTarget[2] = (minimum[2] + maximum[2]) * 0.5f;
+    settings.cameraYaw = 0.65f;
+    settings.cameraPitch = 0.32f;
+    settings.cameraDistance = std::clamp(radius * 2.6f, 1.5f, 80.0f);
+    return renderPreviewFrame(settings, world, assets, nullptr, size, error);
 }
 
 void* SceneRenderer::materialPreviewTexture() const {
     return impl_->previewView.Get();
 }
+
 
 bool SceneRenderer::readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
                                               std::uint32_t& height, std::string& error) const {

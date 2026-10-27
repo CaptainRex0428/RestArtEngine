@@ -102,7 +102,7 @@ private:
     void importMesh();
     bool applyMaterial();
     void discardMaterial();
-    bool saveScene();
+    bool saveScene(renderer::SceneRenderer* renderer = nullptr);
     bool saveAll(renderer::SceneRenderer&);
     bool dirty(const renderer::SceneRenderer&) const;
 
@@ -122,6 +122,7 @@ private:
     assets::MaterialAsset materialPreviewParams_{};
     bool materialPreviewParamsValid_ = false;
     std::string materialPreviewError_;
+    float materialPreviewYaw_ = 0.65f, materialPreviewPitch_ = 0.18f, materialPreviewDistance_ = 3.0f;
     std::string contentError_;
     scene::World world_;
     ViewportInteraction viewport_;

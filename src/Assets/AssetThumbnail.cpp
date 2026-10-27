@@ -1,6 +1,7 @@
 #include "RestArtEngine/Assets/AssetThumbnail.h"
 
 #include <algorithm>
+#include <fstream>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -204,5 +205,41 @@ Thumbnail renderSceneThumbnail(const std::vector<ScenePreviewBox>& boxes, std::u
         }
     }
     return thumbnail;
+}
+
+bool writeSceneThumbnail(const std::filesystem::path& path, const Thumbnail& thumbnail, std::string& error) {
+    error.clear();
+    if (!thumbnail.valid()) { error = "Cannot write an empty scene thumbnail."; return false; }
+    std::error_code code;
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), code);
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) { error = "Cannot write the scene thumbnail: " + path.generic_string(); return false; }
+    const std::uint32_t header[4] = {0x42485452u, 1u, thumbnail.width, thumbnail.height};
+    stream.write(reinterpret_cast<const char*>(header), sizeof(header));
+    stream.write(reinterpret_cast<const char*>(thumbnail.rgba.data()),
+        static_cast<std::streamsize>(thumbnail.rgba.size()));
+    if (!stream) { error = "Writing the scene thumbnail failed."; return false; }
+    return true;
+}
+
+bool readSceneThumbnail(const std::filesystem::path& path, Thumbnail& thumbnail, std::string& error) {
+    error.clear();
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) { error = "Cannot open the scene thumbnail."; return false; }
+    std::uint32_t header[4]{};
+    stream.read(reinterpret_cast<char*>(header), sizeof(header));
+    if (stream.gcount() != static_cast<std::streamsize>(sizeof(header)) || header[0] != 0x42485452u || header[1] != 1u)
+        { error = "Invalid scene thumbnail header."; return false; }
+    Thumbnail loaded;
+    loaded.width = header[2];
+    loaded.height = header[3];
+    if (loaded.width == 0 || loaded.height == 0 || loaded.width > 4096 || loaded.height > 4096)
+        { error = "Invalid scene thumbnail dimensions."; return false; }
+    loaded.rgba.resize(static_cast<std::size_t>(loaded.width) * loaded.height * 4);
+    stream.read(reinterpret_cast<char*>(loaded.rgba.data()), static_cast<std::streamsize>(loaded.rgba.size()));
+    if (stream.gcount() != static_cast<std::streamsize>(loaded.rgba.size()))
+        { error = "Scene thumbnail is truncated."; return false; }
+    thumbnail = std::move(loaded);
+    return true;
 }
 } // namespace rae::assets

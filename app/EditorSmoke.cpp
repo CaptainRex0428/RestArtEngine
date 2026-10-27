@@ -875,6 +875,37 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "Changing the draft base color did not change the GPU preview.");
     }
 
+    {
+        // Orbit camera: rotating the preview must change the rendered image.
+        assets::MaterialAsset orbitMaterial = *assets.findMaterial(1);
+        std::vector<std::uint8_t> orbitA, orbitB;
+        std::uint32_t orbitWidth = 0, orbitHeight = 0;
+        require(renderer.renderMaterialPreview(orbitMaterial, 64, 0.65f, 0.18f, 3.0f, error), error);
+        require(renderer.readMaterialPreviewPixels(orbitA, orbitWidth, orbitHeight, error), error);
+        require(renderer.renderMaterialPreview(orbitMaterial, 64, 1.85f, 0.18f, 3.0f, error), error);
+        require(renderer.readMaterialPreviewPixels(orbitB, orbitWidth, orbitHeight, error), error);
+        require(orbitA != orbitB, "Rotating the material preview camera did not change the image.");
+
+        // Scene preview: a real GPU render of the loaded scene plus its sidecar.
+        require(renderer.renderScenePreview(world, assets, 64, error), error);
+        std::vector<std::uint8_t> scenePixels;
+        std::uint32_t sceneWidth = 0, sceneHeight = 0;
+        require(renderer.readMaterialPreviewPixels(scenePixels, sceneWidth, sceneHeight, error), error);
+        std::size_t brightPixels = 0;
+        for (std::size_t index = 0; index + 3 < scenePixels.size(); index += 4)
+            if (scenePixels[index] + scenePixels[index + 1] + scenePixels[index + 2] > 60) ++brightPixels;
+        require(brightPixels > 100, "The GPU scene preview is empty.");
+        const auto sceneThumbPath = std::filesystem::temp_directory_path() / "rae-scene-thumb.rthumb";
+        assets::Thumbnail sceneThumbnail{sceneWidth, sceneHeight, std::move(scenePixels)};
+        require(assets::writeSceneThumbnail(sceneThumbPath, sceneThumbnail, error), error);
+        assets::Thumbnail reloadedThumbnail;
+        require(assets::readSceneThumbnail(sceneThumbPath, reloadedThumbnail, error), error);
+        require(reloadedThumbnail.width == sceneThumbnail.width &&
+            reloadedThumbnail.rgba == sceneThumbnail.rgba,
+            "The scene thumbnail sidecar did not round-trip.");
+        std::filesystem::remove(sceneThumbPath);
+    }
+
     auto* sphere = world.findActor(1);
     require(sphere != nullptr, "Default sphere missing.");
     sphere->transform.position[0] = -1.2f;

@@ -154,7 +154,15 @@ bool AssetRegistry::scan(std::string& error) {
             entry.type = assetTypeFromPath(path);
             if (entry.type == AssetType::Unknown) continue;
         }
-        if (entry.type == AssetType::Scene) entry.thumbnail = sceneThumbnail(path);
+        if (entry.type == AssetType::Scene) {
+            // A GPU-rendered sidecar wins; the CPU layout stays as a fallback.
+            Thumbnail sidecar;
+            std::string thumbError;
+            auto sidecarPath = path;
+            sidecarPath += ".rthumb";
+            if (!readSceneThumbnail(sidecarPath, sidecar, thumbError)) sidecar = sceneThumbnail(path);
+            entry.thumbnail = std::move(sidecar);
+        }
         std::error_code sizeCode;
         entry.sizeBytes = static_cast<std::uint64_t>(std::filesystem::file_size(path, sizeCode));
         if (sizeCode) entry.sizeBytes = 0;

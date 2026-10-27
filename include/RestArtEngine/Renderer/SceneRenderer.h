@@ -115,6 +115,13 @@ public:
     // offscreen texture and returns it for UI display. The main scene targets are
     // reused and then overwritten by the frame's regular render call.
     bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error);
+    // Same preview target with an explicit orbit camera for the material ball.
+    bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
+                               float yaw, float pitch, float distance, std::string& error);
+    // Renders the given scene into the preview target with a camera framed to the
+    // visible actors; used to produce scene thumbnails.
+    bool renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
+                            std::uint32_t size, std::string& error);
     [[nodiscard]] void* materialPreviewTexture() const;
     // Copies the last preview image back to CPU memory (RGBA8) for tests.
     bool readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
@@ -163,6 +170,10 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+private:
+    bool renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
+                            const assets::AssetLibrary& assets, const assets::MaterialAsset* materialOverride,
+                            std::uint32_t size, std::string& error);
 };
 
 } // namespace rae::renderer

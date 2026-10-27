@@ -284,7 +284,7 @@ bool SceneEditor::applyMaterial() {
     return true;
 }
 
-bool SceneEditor::saveScene() {
+bool SceneEditor::saveScene(renderer::SceneRenderer* renderer) {
     std::string error;
     // Persist materials before the scene so its GUID references always resolve.
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
@@ -297,6 +297,23 @@ bool SceneEditor::saveScene() {
         status_ = "Scene save failed: " + error; return false;
     }
     sceneDirty_ = false;
+    // Produce the GPU scene thumbnail next to the scene so the Content browser can
+    // show a real render; the CPU layout stays as a fallback when it is missing.
+    if (renderer) {
+        std::string previewError;
+        std::vector<std::uint8_t> pixels;
+        std::uint32_t width = 0, height = 0;
+        if (renderer->renderScenePreview(world_, assets_, 128, previewError) &&
+            renderer->readMaterialPreviewPixels(pixels, width, height, previewError) && width > 0 && height > 0) {
+            assets::Thumbnail thumbnail;
+            thumbnail.width = width;
+            thumbnail.height = height;
+            thumbnail.rgba = std::move(pixels);
+            auto sidecarPath = scenePath_;
+            sidecarPath += ".rthumb";
+            (void)assets::writeSceneThumbnail(sidecarPath, thumbnail, previewError);
+        }
+    }
     status_ = "Saved " + pathText(scenePath_) + " (applied materials only).";
     return true;
 }
@@ -311,7 +328,7 @@ bool SceneEditor::saveAll(renderer::SceneRenderer& renderer) {
     shaderSaved_ = renderer.shaderSource();
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) { status_ = error; return false; }
     materialsDirty_ = false;
-    if (!saveScene()) return false;
+    if (!saveScene(&renderer)) return false;
     status_ = "Saved scene, material assets and applied shader source.";
     return true;
 }
@@ -1805,11 +1822,36 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
         materialWindowFocusRequested_ = false;
     }
     if (visible && materialWindowOpen_) {
-        // Live GPU preview sphere: rendered offscreen when the draft changes or a
-        // short interval passes, then displayed as a texture.
+        // Live GPU preview sphere with orbit interaction.
         if (const auto* draft = materialPreview()) {
+            const float previewSize = 160.0f;
+            ImGui::InvisibleButton("##material-preview", ImVec2(previewSize, previewSize),
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+            bool cameraChanged = false;
+            if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                const ImVec2 delta = ImGui::GetIO().MouseDelta;
+                if (delta.x != 0.0f || delta.y != 0.0f) {
+                    materialPreviewYaw_ -= delta.x * 0.01f;
+                    materialPreviewPitch_ = std::clamp(materialPreviewPitch_ + delta.y * 0.01f, -1.4f, 1.4f);
+                    cameraChanged = true;
+                }
+            }
+            if (hovered && ImGui::GetIO().MouseWheel != 0.0f) {
+                materialPreviewDistance_ = std::clamp(
+                    materialPreviewDistance_ * (1.0f - ImGui::GetIO().MouseWheel * 0.1f), 1.6f, 8.0f);
+                cameraChanged = true;
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                materialPreviewYaw_ = 0.65f;
+                materialPreviewPitch_ = 0.18f;
+                materialPreviewDistance_ = 3.0f;
+                cameraChanged = true;
+            }
+            if (hovered) ImGui::SetTooltip("Drag to rotate, wheel to zoom, double-click to reset.");
             materialPreviewAge_ += ImGui::GetIO().DeltaTime;
-            const bool changed = !materialPreviewParamsValid_ ||
+            const bool parametersChanged = !materialPreviewParamsValid_ ||
                 draft->baseColor[0] != materialPreviewParams_.baseColor[0] ||
                 draft->baseColor[1] != materialPreviewParams_.baseColor[1] ||
                 draft->baseColor[2] != materialPreviewParams_.baseColor[2] ||
@@ -1817,8 +1859,9 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
                 draft->metallic != materialPreviewParams_.metallic ||
                 draft->grid != materialPreviewParams_.grid ||
                 draft->twoSided != materialPreviewParams_.twoSided;
-            if (changed || materialPreviewAge_ > 0.15f) {
-                if (!renderer.renderMaterialPreview(*draft, 160, materialPreviewError_))
+            if (cameraChanged || parametersChanged || materialPreviewAge_ > 0.15f) {
+                if (!renderer.renderMaterialPreview(*draft, 160, materialPreviewYaw_, materialPreviewPitch_,
+                        materialPreviewDistance_, materialPreviewError_))
                     status_ = materialPreviewError_;
                 else {
                     materialPreviewParams_ = *draft;
@@ -1827,13 +1870,16 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
                 materialPreviewAge_ = 0.0f;
             }
             if (auto* texture = renderer.materialPreviewTexture()) {
-                ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)), ImVec2(160.0f, 160.0f));
-                ImGui::SameLine();
-                ImGui::BeginGroup();
-                ImGui::TextDisabled("Live preview");
-                ImGui::TextWrapped("Rendered offscreen from the current draft.");
-                ImGui::EndGroup();
+                const ImVec2 min = ImGui::GetItemRectMin();
+                ImGui::GetWindowDrawList()->AddImage(
+                    static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
+                    min, ImVec2(min.x + previewSize, min.y + previewSize));
             }
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            ImGui::TextDisabled("Live preview");
+            ImGui::TextWrapped("Drag to rotate, wheel to zoom, double-click to reset.");
+            ImGui::EndGroup();
         }
         ImGui::TextWrapped("Closing this window keeps your drafts and live preview. Reopen it to continue; use Save to persist changes.");
         if (materialsDirty_) ImGui::TextDisabled("Material assets have unsaved changes.");
