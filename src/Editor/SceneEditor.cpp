@@ -729,9 +729,11 @@ namespace {
 // Small hand-drawn eye used by the Outliner rows. A glyph would depend on the
 // loaded font, so the lens and pupil are drawn with the window draw list.
 void drawEyeIcon(ImDrawList* list, ImVec2 center, float size, bool visible, bool highlighted) {
+    // Line-art eye: almond outline plus a hollow pupil. It is drawn from
+    // geometry rather than a glyph or texture, so it stays crisp at any DPI.
     const float radius = size * 0.5f;
     const ImU32 color = ImGui::GetColorU32(highlighted ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-    const float thickness = 1.4f;
+    const float thickness = std::max(1.0f, size * 0.075f);
     const float bend = size * 0.32f;
     const ImVec2 left{center.x - radius, center.y};
     const ImVec2 right{center.x + radius, center.y};
@@ -740,12 +742,11 @@ void drawEyeIcon(ImDrawList* list, ImVec2 center, float size, bool visible, bool
     list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y - bend), right, 10);
     list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y + bend), left, 10);
     list->PathStroke(color, ImDrawFlags_Closed, thickness);
-    if (visible) {
-        list->AddCircleFilled(center, size * 0.15f, color, 8);
-    } else {
+    list->AddCircle(center, size * 0.12f, color, 12, thickness);
+    if (!visible) {
         // Slashed eye: the actor is hidden in the viewport.
-        list->AddLine(ImVec2(left.x - 1.0f, left.y + bend * 1.2f),
-            ImVec2(right.x + 1.0f, right.y - bend * 1.2f), color, thickness);
+        list->AddLine(ImVec2(center.x - size * 0.34f, center.y + size * 0.30f),
+            ImVec2(center.x + size * 0.34f, center.y - size * 0.30f), color, thickness);
     }
 }
 
