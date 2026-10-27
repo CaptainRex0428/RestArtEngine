@@ -208,6 +208,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         // must fail instead of silently rendering the wrong material.
         std::string v2Error;
         const auto v2Root = output / "SceneV2RoundTrip";
+        std::filesystem::remove_all(v2Root);
         assets::AssetLibrary v2Assets;
         v2Assets.createDefaults();
         v2Assets.findMaterial(1)->roughness = 0.11f;
