@@ -10,7 +10,7 @@
 namespace rae::assets {
 
 // Small RGBA8 preview rendered on the CPU so saving an asset never needs a GPU
-// pass or an image encoder. Stored in the .raasset blob region.
+// pass or an image encoder. Stored in the .rasset blob region.
 struct Thumbnail {
     std::uint32_t width = 0;
     std::uint32_t height = 0;

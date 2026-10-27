@@ -13,11 +13,15 @@
 
 namespace rae::assets {
 
-// Self-contained asset container (".raasset"). Layout:
+// Self-contained asset container (".rasset"). Layout:
 //   0  magic "RAAS" | 4 version u16 | 6 flags u16 | 8 manifestSize u64
 //  16  manifest JSON (UTF-8) | 16 + manifestSize: blob region
 // Integers are little-endian. Blobs are referenced from the manifest.
 inline constexpr std::uint16_t kAssetFileVersion = 1;
+// Current container extension; the pre-rename ".raasset" is still readable.
+inline constexpr std::string_view kAssetExtension = ".rasset";
+inline constexpr std::string_view kLegacyAssetExtension = ".raasset";
+[[nodiscard]] bool isAssetContainerFile(const std::filesystem::path& path) noexcept;
 inline constexpr std::uint64_t kAssetFileHeaderSize = 16;
 inline constexpr std::uint16_t kAssetFlagThumbnail = 1u << 0;
 

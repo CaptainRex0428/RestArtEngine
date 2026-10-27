@@ -1,10 +1,12 @@
-# `.raasset` 统一资产容器（设计提案）
+# `.rasset` 统一资产容器
 
 > 状态：**设计提案，代码尚未实现**。当前提交只落地了 `AssetRegistry`、Content 文件夹树与场景切换；文件格式按本文实现前仍需评审。
 >
-> 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.raasset`**，旧 `.ramat` 只读兼容。
+> 扩展名 `.rasset`（原 `.raasset` 更名，旧文件仍可只读加载）。
 >
-> 已实现缩略图：保存资产时用 CPU 光栅化生成 64×64 rgba8 预览（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入容器清单；Content 面板按需读取并直接绘制，缺缩略图时回退线框图标。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.raasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.raasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
+> 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.rasset`**，旧 `.ramat` 只读兼容。
+>
+> 已实现缩略图：保存资产时用 CPU 光栅化生成 64×64 rgba8 预览（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入容器清单；Content 面板按需读取并直接绘制，缺缩略图时回退线框图标。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.rasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
 
 ## 目标
 
@@ -68,7 +70,7 @@
 
 ### `material` payload
 
-材质作为一个独立的 `.raasset` 文件（例如 `Content/Materials/Copper.raasset`），场景只引用它，不再把参数抄进 `.rascene`。编辑器里的材质草稿、Apply/Discard 语义不变，落到同一个容器格式。
+材质作为一个独立的 `.rasset` 文件（例如 `Content/Materials/Copper.rasset`），场景只引用它，不再把参数抄进 `.rascene`。编辑器里的材质草稿、Apply/Discard 语义不变，落到同一个容器格式。
 
 ```json
 {
@@ -77,7 +79,7 @@
   "metallic": 0.65,
   "grid": false,
   "twoSided": false,
-  "textures": { "baseColor": "textures/copper.raasset" }
+  "textures": { "baseColor": "textures/copper.rasset" }
 }
 ```
 
@@ -87,7 +89,7 @@
 
 ```json
 {
-  "actors": [ { "id": 1, "name": "Sphere", "mesh": "meshes/sphere.raasset", "material": "materials/copper.raasset" } ],
+  "actors": [ { "id": 1, "name": "Sphere", "mesh": "meshes/sphere.rasset", "material": "materials/copper.rasset" } ],
   "background": "black"
 }
 ```
@@ -107,14 +109,14 @@
 ## 迁移步骤
 
 1. ✅ `AssetRegistry` + Content 文件夹树 + 场景切换（本次提交）。
-2. 实现 `.raasset` 读写库与单元测试：magic/版本、清单解析、越界块、损坏文件。
-3. ✅ OBJ 导入生成 `.raasset`（GUID），场景引用资产；保留旧场景 `.obj` 读取兼容。
-4. 材质从 `.ramat` 迁入 `.raasset`：读取旧 `.ramat` 后转存为新容器，材质编辑器改为保存 `.raasset`；旧文件只读兼容一个版本后移除。
+2. 实现 `.rasset` 读写库与单元测试：magic/版本、清单解析、越界块、损坏文件。
+3. ✅ OBJ 导入生成 `.rasset`（GUID），场景引用资产；保留旧场景 `.obj` 读取兼容。
+4. 材质从 `.ramat` 迁入 `.rasset`：读取旧 `.ramat` 后转存为新容器，材质编辑器改为保存 `.rasset`；旧文件只读兼容一个版本后移除。
 5. 删除场景内嵌的 `materials` / `meshes` 几何，只留引用。
 
 ## 未决问题
 
-- 网格仍内嵌在场景（内置描述 + OBJ 相对路径），迁移为 `.raasset` 网格资产是下一步。
+- 网格仍内嵌在场景（内置描述 + OBJ 相对路径），迁移为 `.rasset` 网格资产是下一步。
 - 缩略图生成时机（保存时渲染 vs 编辑器后台）。
 - 是否压缩数据块（deflate）以及 4 字节对齐要求。
 - 二进制与 JSON 混合的调试体验：是否需要 `--dump-asset` 工具输出清单。

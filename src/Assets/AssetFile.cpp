@@ -449,4 +449,8 @@ bool readAssetThumbnail(const std::filesystem::path& path, Thumbnail& thumbnail,
         return false;
     }
 }
+bool isAssetContainerFile(const std::filesystem::path& path) noexcept {
+    const auto extension = path.extension().string();
+    return extension == kAssetExtension || extension == kLegacyAssetExtension;
+}
 } // namespace rae::assets

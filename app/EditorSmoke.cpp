@@ -203,7 +203,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     }
 
     {
-        // Scene v2 round-trip through disk: materials live in .raasset files, the
+        // Scene v2 round-trip through disk: materials live in .rasset files, the
         // scene stores GUID references, and a scene loaded without its materials
         // must fail instead of silently rendering the wrong material.
         std::string v2Error;
@@ -238,7 +238,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         require(v2Editor.world().actors.size() == v2World.actors.size() &&
             v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
             "The editor did not load a scene v2 with its GUID materials.");
-        // Built-in primitives are generated as .raasset files the first time a
+        // Built-in primitives are generated as .rasset files the first time a
         // project opens; later runs reuse them and never duplicate the files.
         {
             const auto builtinDir = v2Root / "Meshes" / "Builtin";
@@ -248,7 +248,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             const auto countBuiltins = [&]() {
                 std::size_t count = 0;
                 for (const auto& entry : std::filesystem::directory_iterator(builtinDir))
-                    if (entry.path().extension() == ".raasset") ++count;
+                    if (entry.path().extension() == ".rasset") ++count;
                 return count;
             };
             require(countBuiltins() == 3, "Built-in primitive assets were not generated.");
@@ -279,8 +279,18 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             require(assets::extractThumbnail(containerFile, extractedThumb, v2Error) &&
                 extractedThumb.rgba == meshThumb.rgba && extractedThumb.width == meshThumb.width,
                 "The container did not round-trip its thumbnail.");
+            // Legacy containers with the old .raasset extension stay readable.
+            const auto legacyDir = v2Root / "LegacyContainers";
+            std::filesystem::create_directories(legacyDir);
+            std::filesystem::copy_file(builtinDir / "Cube.rasset", legacyDir / "Cube.raasset");
+            assets::AssetLibrary legacyLibrary;
+            legacyLibrary.createDefaults();
+            require(legacyLibrary.loadMeshes(legacyDir, v2Error), v2Error);
+            require(legacyLibrary.findMesh(3) != nullptr &&
+                legacyLibrary.findMesh(3)->vertices.size() == builtinAssets.findMesh(3)->vertices.size(),
+                "A legacy .raasset container was not readable after the rename.");
         }
-        // Mesh assets: import an OBJ, persist it as a .raasset, then reload both
+        // Mesh assets: import an OBJ, persist it as a .rasset, then reload both
         // the geometry and a scene that only references the mesh GUID.
         {
             const auto objPath = v2Root / "Meshes" / "tri.obj";
@@ -444,14 +454,14 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         capture("content_thumbnails_preroll", true);
         capture("content_thumbnails", true);
         editor.selectContentFolder(std::string());
-        const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.raasset");
+        const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.rasset");
         require(cubeEntry && cubeEntry->thumbnail.valid(),
             "The generated built-in mesh thumbnail is missing from the registry.");
     }
         {
             assets::Thumbnail directThumb;
             std::string thumbError;
-            require(assets::readAssetThumbnail(project.contentRoot / "Meshes" / "Builtin" / "Cube.raasset",
+            require(assets::readAssetThumbnail(project.contentRoot / "Meshes" / "Builtin" / "Cube.rasset",
                 directThumb, thumbError), thumbError);
         }
 
@@ -701,8 +711,8 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
             "Material assets did not preserve independent Two-sided values.");
         {
-            // .raasset container round-trip and header validation.
-            const auto container = fixtureRoot / "RoundTrip.raasset";
+            // .rasset container round-trip and header validation.
+            const auto container = fixtureRoot / "RoundTrip.rasset";
             const auto* source = fixtureAssets.findMaterial(2);
             require(source != nullptr, "Container fixture material is missing.");
             require(assets::writeAssetFile(container, assets::makeMaterialAssetFile(*source), error), error);
@@ -714,7 +724,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             require(assets::readMaterialAssetFile(readBack, containerMaterial, error), error);
             require(containerMaterial.twoSided == source->twoSided &&
                 containerMaterial.name == source->name, "The material payload did not round-trip.");
-            const auto corrupt = fixtureRoot / "Corrupt.raasset";
+            const auto corrupt = fixtureRoot / "Corrupt.rasset";
             std::filesystem::copy_file(container, corrupt, std::filesystem::copy_options::overwrite_existing);
             {
                 std::fstream stream(corrupt, std::ios::binary | std::ios::in | std::ios::out);
@@ -732,7 +742,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             containerRegistry.setContentRoot(materialFolder);
             require(containerRegistry.scan(error), error);
             require(containerRegistry.count(assets::AssetType::Material) == 2,
-                "The registry did not classify .raasset materials.");
+                "The registry did not classify .rasset materials.");
             const auto* sourceMaterial = fixtureAssets.findMaterial(1);
             const auto* containerEntry = containerRegistry.find(
                 assets::AssetLibrary::materialAssetFileName(*sourceMaterial));
@@ -753,7 +763,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         // Legacy fixtures: remove the new containers so the .ramat path is exercised,
         // then write the old JSON shape without the Two-sided field.
         for (const auto& entry : std::filesystem::directory_iterator(materialFolder))
-            if (entry.path().extension() == ".raasset") std::filesystem::remove(entry.path());
+            if (entry.path().extension() == ".rasset") std::filesystem::remove(entry.path());
         for (const auto id : {1, 2}) {
             const auto* material = fixtureAssets.findMaterial(id);
             require(material != nullptr, "Legacy fixture material is missing.");

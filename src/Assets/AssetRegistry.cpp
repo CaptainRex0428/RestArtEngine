@@ -98,7 +98,7 @@ bool AssetRegistry::scan(std::string& error) {
         entry.relativePath = pathText(path.lexically_relative(contentRoot_));
         entry.folder = pathText(path.parent_path().lexically_relative(contentRoot_));
         entry.name = pathText(path.stem());
-        if (extension == L".raasset") {
+        if (isAssetContainerFile(path)) {
             // The container carries its own type, GUID and display name.
             AssetFile header;
             std::string headerError;

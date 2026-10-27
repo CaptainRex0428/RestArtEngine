@@ -1066,7 +1066,7 @@ void SceneEditor::importMesh() {
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&dialog)) return;
     try {
-        // Validate into an isolated copy, then persist a self-contained .raasset.
+        // Validate into an isolated copy, then persist a self-contained .rasset.
         auto proposed = assets_;
         assets::AssetId imported = 0;
         std::string error;
@@ -1083,7 +1083,7 @@ void SceneEditor::importMesh() {
         selectedMesh_ = imported;
         sceneDirty_ = true;
         refreshContent();
-        status_ = "OBJ imported as a .raasset in Content/Meshes. Add an Actor from this mesh, then save.";
+        status_ = "OBJ imported as a .rasset in Content/Meshes. Add an Actor from this mesh, then save.";
     } catch (const std::exception& error) { status_ = error.what(); }
 }
 

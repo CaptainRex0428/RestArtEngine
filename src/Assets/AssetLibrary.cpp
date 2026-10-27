@@ -189,11 +189,11 @@ bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::strin
             if (code) break;
             if (!entry.is_regular_file(code)) continue;
             const auto extension = entry.path().extension();
-            if (extension != ".raasset" && extension != ".ramat") continue;
+            if (!isAssetContainerFile(entry.path()) && extension != ".ramat") continue;
             if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
             AssetFile stale;
             std::string readError;
-            if (extension == ".raasset") {
+            if (isAssetContainerFile(entry.path())) {
                 if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
                 if (stale.type != AssetFileType::Material || !ids.contains(stale.id)) continue;
             } else {
@@ -215,7 +215,7 @@ bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::strin
 }
 
 std::string AssetLibrary::materialAssetFileName(const MaterialAsset& material) {
-    return sanitizeAssetName(material.name) + ".raasset";
+    return sanitizeAssetName(material.name) + ".rasset";
 }
 
 bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error) {
@@ -228,7 +228,7 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
         for (const auto& entry : std::filesystem::directory_iterator(folder)) {
             if (!entry.is_regular_file()) continue;
             const auto extension = entry.path().extension();
-            if (extension == ".raasset") {
+            if (isAssetContainerFile(entry.path())) {
                 AssetFile file;
                 if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
                 if (file.type != AssetFileType::Material) continue;
@@ -243,7 +243,7 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
             }
         }
         // Legacy .ramat files load only when the same GUID is not already present
-        // as a .raasset; the next save writes the new container.
+        // as a .rasset; the next save writes the new container.
         for (const auto& path : legacy) {
             const auto value = detail::readJson(path);
             if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
@@ -252,7 +252,7 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
             if (!ids.insert(material.id).second) continue;
             loaded.push_back(std::move(material));
         }
-        if (loaded.empty()) throw std::runtime_error("No .raasset or .ramat materials found.");
+        if (loaded.empty()) throw std::runtime_error("No .rasset or .ramat materials found.");
         std::sort(loaded.begin(), loaded.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         materials = std::move(loaded);
         error.clear();
@@ -280,7 +280,7 @@ bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& 
         std::error_code code;
         for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
             if (code) break;
-            if (!entry.is_regular_file(code) || entry.path().extension() != ".raasset") continue;
+            if (!entry.is_regular_file(code) || !isAssetContainerFile(entry.path())) continue;
             if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
             AssetFile stale;
             std::string readError;
@@ -297,7 +297,7 @@ bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& 
 }
 
 std::string AssetLibrary::meshAssetFileName(const MeshAsset& mesh) {
-    return sanitizeAssetName(mesh.name) + ".raasset";
+    return sanitizeAssetName(mesh.name) + ".rasset";
 }
 
 bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& error) {
@@ -307,7 +307,7 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
         std::unordered_set<AssetId> ids;
         for (const auto& mesh : meshes) ids.insert(mesh.id);
         for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".raasset") continue;
+            if (!entry.is_regular_file() || !isAssetContainerFile(entry.path())) continue;
             AssetFile file;
             if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
             if (file.type != AssetFileType::StaticMesh) continue;
@@ -343,7 +343,7 @@ bool AssetLibrary::ensureBuiltinMeshes(const std::filesystem::path& folder, std:
         std::error_code code;
         if (std::filesystem::is_directory(folder, code)) {
             for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
-                if (code || !entry.is_regular_file(code) || entry.path().extension() != ".raasset") continue;
+                if (code || !entry.is_regular_file(code) || !isAssetContainerFile(entry.path())) continue;
                 AssetFile file;
                 std::string readError;
                 if (!readAssetFileHeader(entry.path(), file, readError)) continue;

@@ -15,7 +15,7 @@
 六个面板（World Outliner、Scene、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左上 Outliner、左下同组的 Scene / Details 页签、右侧设置、底部 Content 和中央场景视口。
 
 **Scene** 显示场景级参数（工程与场景信息、Actor / Mesh / Material 数量、背景 Sky / Black、Key light 与阴影方式）；Viewport settings 只保留 View 相关项（Exposure、VSync、Reset camera）；操作状态与射线追踪摘要中的 Activity 段落移入 Details 顶部，编辑后能立刻在属性旁看到结果；**World Outliner** 每行左侧的小眼睛显示该 Actor 的可见性，点击即可切换（隐藏后名称变暗、眼睛加斜线），点名称完成选择；**Details** 提供主选中 Actor 的名称、可见性、变换与 Mesh / Material 分配编辑，并显示该场景实例的名称、Actor ID、网格类型／几何数量／来源以及它当前使用的材质。即使两个实例使用同一个 Sphere 网格，Details 也只显示当前主实例的信息，不汇总其他实例的材质。点击 Outliner 或视口中的 Actor 切到 Details；底部 Mesh 浏览不改变场景选择、Details 内容或强制切页。多选时明确显示主实例，无选中实例时显示空状态。手动切页后不会每帧强制跳回。
-**Content & Editors** 是文件浏览器：左侧文件夹树、右侧当前文件夹的资产行（自绘类型图标、名称、类型与大小；材质以 `.raasset` 容器显示，旧 `.ramat` 仍可读），支持拖拽资产到文件夹完成移动、右键重命名/删除；`Import OBJ...` 会把网格写成 `Content/Meshes/*.raasset`（GUID）；内置图元在 `Content/Meshes/Builtin/` 下自动生成；资产行左侧显示资产缩略图，没有缩略图时回退为线框图标，`New folder` 建目录；双击场景打开它，双击材质打开材质编辑器；下方 `Scene mesh library` 仍列出当前场景网格供 `Add Actor from mesh` 使用。
+**Content & Editors** 是文件浏览器：左侧文件夹树、右侧当前文件夹的资产行（自绘类型图标、名称、类型与大小；材质以 `.rasset` 容器显示，旧 `.ramat` 仍可读），支持拖拽资产到文件夹完成移动、右键重命名/删除；`Import OBJ...` 会把网格写成 `Content/Meshes/*.rasset`（GUID）；内置图元在 `Content/Meshes/Builtin/` 下自动生成；资产行左侧显示资产缩略图，没有缩略图时回退为线框图标，`New folder` 建目录；双击场景打开它，双击材质打开材质编辑器；下方 `Scene mesh library` 仍列出当前场景网格供 `Add Actor from mesh` 使用。
 
 
 - 拖动面板标签，或悬浮窗口的标题栏，在停靠预览出现时松开鼠标。

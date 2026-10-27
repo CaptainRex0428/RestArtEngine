@@ -101,7 +101,7 @@ void World::createDefaultScene(const assets::AssetLibrary& library) {
 bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& library, std::string& error) const {
     try {
         // Version 3 stores asset references only: materials and meshes live in
-        // .raasset containers under Content, the scene keeps Actor data.
+        // .rasset containers under Content, the scene keeps Actor data.
         Json value={{"format","RAEngine.Scene"},{"version",3},{"actors",Json::array()},
             {"materials",Json::array()},{"meshes",Json::array()}};
         // Written only when non-default so existing sky scenes keep their file shape.
@@ -154,7 +154,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
             }
         } else {
             // Version 2+ references materials that were loaded from Content before
-            // the scene: every reference must resolve to an existing .raasset.
+            // the scene: every reference must resolve to an existing .rasset.
             staged.materials=library.materials;
             for (const auto& item:value.at("materials")) {
                 const auto id=readId(item.at("id"));
