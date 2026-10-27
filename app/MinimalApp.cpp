@@ -365,8 +365,12 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) { error = "RegisterClassEx failed for project manager."; return false; }
     RECT bounds{0, 0, 1080, 720};
+    // The launcher keeps its 1080x720 size but opens centred on the primary
+    // monitor, matching the loading and editor window placement.
+    const RECT launchMonitor = primaryMonitorRect();
+    const RECT placed = centredWindowRect(launchMonitor, 1080, 720, false);
     WindowOwner window{CreateWindowW(wc.lpszClassName, L"RestArtEngine | Project Manager", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
+        placed.left, placed.top, placed.right - placed.left, placed.bottom - placed.top,
         nullptr, nullptr, instance, &windowState)};
     if (!window.handle) { error = "CreateWindow failed for project manager."; return false; }
     SceneRenderer renderer;
