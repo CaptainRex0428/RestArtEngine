@@ -199,7 +199,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在现有 D3D11 深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享同一套资源管理和切换入口。
 
-渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染 64–160px 预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，保存场景时写到同目录 `<scene>.rthumb`，Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
+渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染 64–160px 预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，保存场景时写到同目录 `<scene>.rthumb`，Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
 Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格都是 `.rasset`（材质旧 `.ramat` 只读兼容；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`）、场景 `.rascene` v3（只引用材质与网格 GUID）、`.rasset` 内的 64×64 缩略图、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、相对路径与材质 ID，编辑器在每次文件操作后重建；不读取几何数据。统一自包含资产格式 `.rasset` 的设计见 [AssetFormat.md](AssetFormat.md)（尚未实现）。
 

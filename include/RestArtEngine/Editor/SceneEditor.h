@@ -40,6 +40,9 @@ public:
     // Selects a Content folder (relative to the content root, "" = root). Used by
     // the browser breadcrumb and by tests that need a deterministic view.
     void selectContentFolder(std::string folder);
+    // Opens the asset details window for a content-relative path (also used by
+    // tests to verify the inspector without double-clicking).
+    void showAssetDetails(std::string relativePath);
     // Switches the Content browser between the list and the thumbnail grid.
     void setContentGridView(bool grid) { contentGridView_ = grid; }
     bool openScene(const std::filesystem::path& path, std::string& error);
@@ -92,7 +95,11 @@ private:
     void drawAssetRows();
     void drawAssetGrid();
     void drawContentDialogs();
-    void openAsset(const assets::AssetEntry& entry);
+    // Double-click: opens the asset details window. "Open" inside it (or the
+    // context menu) runs the type-specific action.
+    void openAssetDetails(const assets::AssetEntry& entry);
+    void activateAsset(const assets::AssetEntry& entry);
+    void drawAssetDetails(renderer::SceneRenderer& renderer);
     void requestSceneOpen(const std::filesystem::path& path);
     void refreshContent();
     bool saveSceneAs(const std::filesystem::path& path, std::string& error);
@@ -122,6 +129,10 @@ private:
     assets::MaterialAsset materialPreviewParams_{};
     bool materialPreviewParamsValid_ = false;
     std::string materialPreviewError_;
+    bool assetDetailsOpen_ = false, assetDetailsFocusRequested_ = false, assetDetailsFocused_ = false;
+    std::string assetDetailsPath_;
+    float assetDetailsAge_ = 1.0f;
+    std::string assetDetailsError_;
     float materialPreviewYaw_ = 0.65f, materialPreviewPitch_ = 0.18f, materialPreviewDistance_ = 3.0f;
     std::string contentError_;
     scene::World world_;

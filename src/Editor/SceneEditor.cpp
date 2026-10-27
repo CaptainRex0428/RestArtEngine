@@ -1180,7 +1180,7 @@ void SceneEditor::refreshContent() {
     registry_.scan(contentError_);
 }
 
-void SceneEditor::openAsset(const assets::AssetEntry& entry) {
+void SceneEditor::activateAsset(const assets::AssetEntry& entry) {
     switch (entry.type) {
     case assets::AssetType::Scene:
         requestSceneOpen(entry.path);
@@ -1201,6 +1201,134 @@ void SceneEditor::openAsset(const assets::AssetEntry& entry) {
         status_ = entry.name + " is consumed by scenes and shader parameters.";
         break;
     }
+}
+
+void SceneEditor::showAssetDetails(std::string relativePath) {
+    assetDetailsPath_ = std::move(relativePath);
+    assetDetailsOpen_ = true;
+    assetDetailsFocusRequested_ = true;
+    assetDetailsAge_ = 1.0f;
+}
+
+void SceneEditor::openAssetDetails(const assets::AssetEntry& entry) {
+    assetDetailsPath_ = entry.relativePath;
+    assetDetailsOpen_ = true;
+    assetDetailsFocusRequested_ = true;
+    assetDetailsAge_ = 1.0f;
+}
+
+void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
+    assetDetailsFocused_ = false;
+    if (!assetDetailsOpen_) return;
+    const auto* entry = registry_.find(assetDetailsPath_);
+    if (!entry) {
+        assetDetailsOpen_ = false;
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 330.0f), ImGuiCond_FirstUseEver);
+    if (assetDetailsFocusRequested_) {
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + (viewport->WorkSize.x - 560.0f) * 0.5f,
+            viewport->WorkPos.y + (viewport->WorkSize.y - 330.0f) * 0.5f), ImGuiCond_Always);
+        ImGui::SetNextWindowFocus();
+        assetDetailsFocusRequested_ = false;
+    }
+    const auto title = std::string("Asset Details - ") + entry->name + "###AssetDetails";
+    if (!ImGui::Begin(title.c_str(), &assetDetailsOpen_, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+    assetDetailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+    const ImVec2 previewOrigin = ImGui::GetCursorScreenPos();
+    const float previewSize = 190.0f;
+    ImGui::Dummy(ImVec2(previewSize, previewSize));
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRect(previewOrigin, ImVec2(previewOrigin.x + previewSize, previewOrigin.y + previewSize),
+        ImGui::GetColorU32(ImGuiCol_Border));
+
+    // Preview: the material ball and mesh use the GPU preview target; scenes and
+    // unknown files fall back to the stored thumbnail.
+    bool drewPreview = false;
+    if (entry->type == assets::AssetType::Material) {
+        const auto* material = assets_.findMaterial(entry->id);
+        if (material) {
+            assetDetailsAge_ += ImGui::GetIO().DeltaTime;
+            if (assetDetailsAge_ > 0.3f) {
+                (void)renderer.renderMaterialPreview(*material, static_cast<std::uint32_t>(previewSize),
+                    assetDetailsError_);
+                assetDetailsAge_ = 0.0f;
+            }
+            if (auto* texture = renderer.materialPreviewTexture()) {
+                draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
+                    previewOrigin, ImVec2(previewOrigin.x + previewSize, previewOrigin.y + previewSize));
+                drewPreview = true;
+            }
+        }
+    } else if (entry->type == assets::AssetType::Mesh) {
+        const auto* mesh = assets_.findMesh(entry->id);
+        if (mesh) {
+            scene::World previewWorld;
+            previewWorld.createActor(mesh->name, mesh->id, 1);
+            assetDetailsAge_ += ImGui::GetIO().DeltaTime;
+            if (assetDetailsAge_ > 0.3f) {
+                (void)renderer.renderScenePreview(previewWorld, assets_,
+                    static_cast<std::uint32_t>(previewSize), assetDetailsError_);
+                assetDetailsAge_ = 0.0f;
+            }
+            if (auto* texture = renderer.materialPreviewTexture()) {
+                draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
+                    previewOrigin, ImVec2(previewOrigin.x + previewSize, previewOrigin.y + previewSize));
+                drewPreview = true;
+            }
+        }
+    }
+    if (!drewPreview) {
+        if (entry->thumbnail.valid()) {
+            drawThumbnail(draw, ImVec2(previewOrigin.x + 15.0f, previewOrigin.y + 15.0f),
+                previewSize - 30.0f, entry->thumbnail);
+        } else {
+            drawAssetIcon(draw, ImVec2(previewOrigin.x + previewSize * 0.5f, previewOrigin.y + previewSize * 0.5f),
+                previewSize * 0.3f, entry->type, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::Text("Name: %s", entry->name.c_str());
+    ImGui::Text("Type: %s", assets::assetTypeName(entry->type));
+    ImGui::Text("GUID: %s", entry->id ? assets::assetIdText(entry->id).c_str() : "-");
+    ImGui::TextWrapped("Path: %s", entry->relativePath.c_str());
+    char sizeBuffer[32]{};
+    ImGui::Text("Size: %s", sizeLabel(entry->sizeBytes, sizeBuffer, sizeof(sizeBuffer)));
+
+    if (entry->type == assets::AssetType::Mesh) {
+        if (const auto* mesh = assets_.findMesh(entry->id)) {
+            ImGui::TextDisabled("Geometry");
+            ImGui::Text("%zu vertices / %zu triangles", mesh->vertices.size(), mesh->indices.size() / 3);
+        }
+    } else if (entry->type == assets::AssetType::Material) {
+        if (const auto* material = assets_.findMaterial(entry->id)) {
+            ImGui::TextDisabled("Parameters");
+            ImGui::ColorButton("##base-color", ImVec4(material->baseColor[0], material->baseColor[1],
+                material->baseColor[2], 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(26.0f, 16.0f));
+            ImGui::SameLine();
+            ImGui::Text("base color, roughness %.2f, metallic %.2f", material->roughness, material->metallic);
+        }
+    } else if (entry->type == assets::AssetType::Scene) {
+        ImGui::TextDisabled("Scene");
+        ImGui::TextWrapped("Open the scene to edit its Actors. The preview uses the saved thumbnail.");
+    }
+    if (!assetDetailsError_.empty()) ImGui::TextDisabled("%s", assetDetailsError_.c_str());
+    ImGui::Spacing();
+    if (ImGui::Button("Open", ImVec2(90.0f, 0.0f))) {
+        activateAsset(*entry);
+        assetDetailsOpen_ = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) assetDetailsOpen_ = false;
+    ImGui::EndGroup();
+    ImGui::End();
 }
 
 void SceneEditor::requestSceneOpen(const std::filesystem::path& path) {
@@ -1321,7 +1449,7 @@ void SceneEditor::drawAssetRows() {
         if (ImGui::Selectable("##asset-row", selected, ImGuiSelectableFlags_AllowDoubleClick,
             ImVec2(0.0f, rowHeight))) {
             selectedAsset_ = entry->relativePath;
-            if (ImGui::IsMouseDoubleClicked(0)) openAsset(*entry);
+            if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry);
         }
         if (ImGui::BeginDragDropSource()) {
             ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
@@ -1329,7 +1457,8 @@ void SceneEditor::drawAssetRows() {
             ImGui::EndDragDropSource();
         }
         if (ImGui::BeginPopupContextItem("##asset-menu")) {
-            if (ImGui::MenuItem("Open")) openAsset(*entry);
+            if (ImGui::MenuItem("Open")) activateAsset(*entry);
+            if (ImGui::MenuItem("Details...")) openAssetDetails(*entry);
             if (ImGui::MenuItem("Rename")) {
                 renameTarget_ = entry->relativePath;
                 renameBuffer_ = entry->name;
@@ -1390,7 +1519,7 @@ void SceneEditor::drawAssetGrid() {
         const bool selected = selectedAsset_ == entry->relativePath;
         if (ImGui::Selectable("##grid-cell", selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cell, cell))) {
             selectedAsset_ = entry->relativePath;
-            if (ImGui::IsMouseDoubleClicked(0)) openAsset(*entry);
+            if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", entry->name.c_str());
         const float labelY = position.y + cell - ImGui::GetTextLineHeight() - 5.0f;
@@ -1406,7 +1535,8 @@ void SceneEditor::drawAssetGrid() {
             ImGui::EndDragDropSource();
         }
         if (ImGui::BeginPopupContextItem("##grid-menu")) {
-            if (ImGui::MenuItem("Open")) openAsset(*entry);
+            if (ImGui::MenuItem("Open")) activateAsset(*entry);
+            if (ImGui::MenuItem("Details...")) openAssetDetails(*entry);
             if (ImGui::MenuItem("Rename")) {
                 renameTarget_ = entry->relativePath;
                 renameBuffer_ = entry->name;
@@ -2007,12 +2137,13 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         }
     });
     drawMaterialWindow(renderer);
+    drawAssetDetails(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();

@@ -461,6 +461,19 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         capture("content_scenes_preroll", true);
         capture("content_scenes", true);
         editor.setContentGridView(false);
+        {
+            // Double-click equivalent: the asset details window previews the file.
+            editor.showAssetDetails("Meshes/Builtin/Sphere.rasset");
+            capture("asset_details_mesh_preroll", true);
+            capture("asset_details_mesh", true);
+            { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Sphere###AssetDetails") != nullptr,
+                "The asset details window did not open for a mesh asset."); }
+            editor.showAssetDetails("Scenes/Default.rscene");
+            capture("asset_details_scene_preroll", true);
+            capture("asset_details_scene", true);
+            { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Default###AssetDetails") != nullptr,
+                "The asset details window did not open for a scene asset."); }
+        }
         editor.selectContentFolder("Meshes/Builtin");
         {
             const auto* sceneEntry = editor.assetRegistry().find("Scenes/Default.rascene");
