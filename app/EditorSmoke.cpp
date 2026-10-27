@@ -215,11 +215,24 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             bool vsync = false, screenshot = false;
             if (recordUiText) ImGui::LogToBuffer();
             editor.draw(settings, renderer, vsync, screenshot);
+            // A viewport tab that was just floated can report a degenerate image
+            // rectangle for one frame; retry so captures never record the cleared
+            // surface and the pipeline comparison stays deterministic.
+            for (int retry = 0; retry < 3 && settings.viewportVisible && settings.viewportWidth < 1; ++retry) {
+                ui.endFrame();
+                ui.beginFrame(1.0f / 60.0f);
+                context = ImGui::GetCurrentContext();
+                settings.viewportWidth = settings.viewportHeight = 0;
+                settings.editorViewport = false;
+                settings.viewportVisible = true;
+                editor.draw(settings, renderer, vsync, screenshot);
+            }
             if (recordUiText) {
                 renderedUiText = context->LogBuffer.c_str();
                 ImGui::LogFinish();
             }
-            if (settings.viewportVisible) {
+    
+        if (settings.viewportVisible) {
                 const auto* viewport = ImGui::FindWindowByName("Scene Viewport##Interaction");
                 require(viewport != nullptr, "Visible renderer viewport has no ImGui window.");
                 const auto& rect = viewport->WorkRect;
@@ -998,6 +1011,10 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     // The editor now composites an SRV instead of revealing the swapchain.
     // Verify both render paths still produce equivalent scene pixels through
     // that surface, including when the Scene Viewport is a floating window.
+    // Warm-up frame: the viewport tab was just dragged out, so the floating
+    // window needs one frame to report its image rectangle before the captures
+    // used by the pipeline comparison.
+    capture("editor_surface_warmup", true);
     settings.path = renderer::RenderPath::Forward;
     capture("editor_surface_forward", true);
     settings.path = renderer::RenderPath::Deferred;
@@ -1207,6 +1224,19 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 findWindow("Details")->DockNode->SelectedTabId == findWindow("Details")->TabId,
                 "Selecting an Actor did not reveal its instance Details.");
         };
+    {
+        // Outliner eye toggle: the row control hides the Actor and one undo
+        // restores it, matching the Details visibility checkbox.
+        auto* actors = findChild("World Outliner", "Actor list");
+        auto* eyeActor = world.findActor(1);
+        require(actors && eyeActor && eyeActor->visible, "Outliner eye test needs a visible Actor.");
+        const std::string eyeLabel = "##visible" + std::to_string(eyeActor->id);
+        click(itemRect(actors, actors->GetID(eyeLabel.c_str())).GetCenter());
+        require(!world.findActor(1)->visible, "Outliner eye did not hide the Actor.");
+        capture("outliner_eye_hidden", true, true);
+        editor.undo();
+        require(world.findActor(1)->visible, "Undo did not restore Actor visibility from the Outliner eye.");
+    }
         clickActor(1);
         clickMesh(3);
         capture("instance_details_content_independent", true, true);
@@ -1229,15 +1259,26 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         // buttons, not bare names: "Ground" is also an Outliner Actor name.
         const auto copperButton = "[ " + assets.findMaterial(1)->name + " ]";
         const auto groundButton = "[ " + assets.findMaterial(2)->name + " ]";
+        // Only inspect the Details "Assigned material" section: the Outliner and
+        // other panels may legitimately contain the same words.
+        const auto assignedSection = [&]() {
+            const auto assignedStart = renderedUiText.find("--- Assigned material");
+            const auto meshStart = renderedUiText.find("--- Mesh");
+            require(assignedStart != std::string::npos && meshStart != std::string::npos && assignedStart < meshStart,
+                "Details did not render the Assigned material section.");
+            return renderedUiText.substr(assignedStart, meshStart - assignedStart);
+        };
         clickActor(2);
+        const auto actor2Assigned = assignedSection();
         require(renderedUiText.find("Actor #2") != std::string::npos &&
-            renderedUiText.find(groundButton) != std::string::npos &&
-            renderedUiText.find(copperButton) == std::string::npos,
+            actor2Assigned.find(groundButton) != std::string::npos &&
+            actor2Assigned.find(copperButton) == std::string::npos,
             "Shared geometry made Details show another instance's material. UI log:\n" + renderedUiText);
         clickActor(1);
+        const auto actor1Assigned = assignedSection();
         require(renderedUiText.find("Actor #1") != std::string::npos &&
-            renderedUiText.find(copperButton) != std::string::npos &&
-            renderedUiText.find(groundButton) == std::string::npos,
+            actor1Assigned.find(copperButton) != std::string::npos &&
+            actor1Assigned.find(groundButton) == std::string::npos,
             "Switching instances did not refresh the assigned material. UI log:\n" + renderedUiText);
         world.findActor(2)->mesh.meshId = originalGroundMesh;
 

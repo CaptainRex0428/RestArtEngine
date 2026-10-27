@@ -48,6 +48,8 @@ private:
     void drawScene();
     void drawSceneLighting(renderer::SceneSettings& settings);
     void setSceneBackground(bool black);
+    // Toggles one Actor's visibility as a single undoable edit.
+    void setActorVisible(scene::ActorId id, bool visible);
     void drawInstanceDetails();
     void selectActor(scene::ActorId id, bool additive);
     void deleteSelectedActor();

@@ -724,6 +724,33 @@ void SceneEditor::deleteSelectedActor() {
     status_ = "Deleted " + std::to_string(removed.size()) + " Actor(s). Save Scene to persist.";
 }
 
+namespace {
+
+// Small hand-drawn eye used by the Outliner rows. A glyph would depend on the
+// loaded font, so the lens and pupil are drawn with the window draw list.
+void drawEyeIcon(ImDrawList* list, ImVec2 center, float size, bool visible, bool highlighted) {
+    const float radius = size * 0.5f;
+    const ImU32 color = ImGui::GetColorU32(highlighted ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    const float thickness = 1.4f;
+    const float bend = size * 0.32f;
+    const ImVec2 left{center.x - radius, center.y};
+    const ImVec2 right{center.x + radius, center.y};
+    list->PathClear();
+    list->PathLineTo(left);
+    list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y - bend), right, 10);
+    list->PathBezierQuadraticCurveTo(ImVec2(center.x, center.y + bend), left, 10);
+    list->PathStroke(color, ImDrawFlags_Closed, thickness);
+    if (visible) {
+        list->AddCircleFilled(center, size * 0.15f, color, 8);
+    } else {
+        // Slashed eye: the actor is hidden in the viewport.
+        list->AddLine(ImVec2(left.x - 1.0f, left.y + bend * 1.2f),
+            ImVec2(right.x + 1.0f, right.y - bend * 1.2f), color, thickness);
+    }
+}
+
+} // namespace
+
 void SceneEditor::drawOutliner() {
     ImGui::BeginDisabled(!assets_.findMesh(1) || !assets_.findMaterial(selectedMaterial_));
     commandButton("actor.addSphere");
@@ -740,10 +767,30 @@ void SceneEditor::drawOutliner() {
     ImGui::Separator();
     ImGui::BeginChild("Actor list", {0, 0});
     bool deleteRequested = false;
-    for (const auto& actor : world_.actors) {
-        const auto label = actor.name + (actor.visible ? "" : " (hidden)") + "##" + std::to_string(actor.id);
+    for (auto& actor : world_.actors) {
+        const float eyeSize = ImGui::GetTextLineHeight();
+        const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+        const ImVec2 eyeCenter{rowStart.x + eyeSize * 0.5f + 2.0f, rowStart.y + eyeSize * 0.5f};
+        const std::string eyeId = "##visible" + std::to_string(actor.id);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+        const bool eyeClicked = ImGui::Button(eyeId.c_str(), ImVec2(eyeSize + 6.0f, eyeSize));
+        ImGui::PopStyleColor(3);
+        const bool eyeHovered = ImGui::IsItemHovered();
+        if (eyeHovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip(actor.visible ? "Hide actor" : "Show actor");
+        }
+        drawEyeIcon(ImGui::GetWindowDrawList(), eyeCenter, eyeSize * 0.92f, actor.visible,
+            eyeHovered || ImGui::IsItemActive());
+        if (eyeClicked) setActorVisible(actor.id, !actor.visible);
+        ImGui::SameLine(0.0f, 6.0f);
+        const auto label = actor.name + "##" + std::to_string(actor.id);
+        if (!actor.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         if (ImGui::Selectable(label.c_str(), isSelected(actor.id)))
             selectActor(actor.id, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift);
+        if (!actor.visible) ImGui::PopStyleColor();
         if (ImGui::BeginPopupContextItem()) {
             selectedActor_ = actor.id;
             if (ImGui::MenuItem("Delete Actor", "Delete")) deleteRequested = true;
@@ -753,6 +800,18 @@ void SceneEditor::drawOutliner() {
     ImGui::EndChild();
     if (deleteRequested) deleteSelectedActor();
     actorPanelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+}
+
+void SceneEditor::setActorVisible(scene::ActorId id, bool visible) {
+    auto* actor = world_.findActor(id);
+    if (!actor || actor->visible == visible) return;
+    const bool previous = actor->visible;
+    actor->visible = visible;
+    sceneDirty_ = true;
+    undo_.push(visible ? "Show Actor" : "Hide Actor",
+        [this, id, previous] { if (auto* target = world_.findActor(id)) { target->visible = previous; sceneDirty_ = true; } },
+        [this, id, visible] { if (auto* target = world_.findActor(id)) { target->visible = visible; sceneDirty_ = true; } });
+    status_ = visible ? "Actor visible." : "Actor hidden.";
 }
 
 void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
@@ -893,7 +952,8 @@ void SceneEditor::drawInstanceDetails() {
         ImGui::TextWrapped("%zu Actors selected; showing primary instance.", selection_.size());
     ImGui::SetNextItemWidth(-1);
     sceneDirty_ |= textInput("##actorName", actor->name);
-    sceneDirty_ |= ImGui::Checkbox("Visible", &actor->visible);
+    bool actorVisible = actor->visible;
+    if (ImGui::Checkbox("Visible", &actorVisible)) setActorVisible(actor->id, actorVisible);
     ImGui::SeparatorText("Transform");
     ImGui::SetNextItemWidth(-1);
     sceneDirty_ |= ImGui::DragFloat3("##position", actor->transform.position, .03f, -1000, 1000, "%.2f");
