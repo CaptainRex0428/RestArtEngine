@@ -1374,7 +1374,7 @@ void SceneEditor::drawAssetGrid() {
     }
     // Manual placement: Selectable ignores its size hint, so cells are laid out
     // from a fixed origin instead of relying on ImGui cursor advance.
-    const float cell = 84.0f;
+    const float cell = std::clamp(ImGui::GetContentRegionAvail().y - 8.0f, 64.0f, 96.0f);
     const float spacing = 8.0f;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float available = std::max(cell, ImGui::GetContentRegionAvail().x);
@@ -1393,6 +1393,13 @@ void SceneEditor::drawAssetGrid() {
             if (ImGui::IsMouseDoubleClicked(0)) openAsset(*entry);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", entry->name.c_str());
+        const float labelY = position.y + cell - ImGui::GetTextLineHeight() - 5.0f;
+        const float textWidth = std::min(ImGui::CalcTextSize(entry->name.c_str()).x, cell - 8.0f);
+        const float labelX = position.x + std::max(4.0f, (cell - textWidth) * 0.5f);
+        draw->PushClipRect(ImVec2(position.x + 2.0f, labelY - 1.0f),
+            ImVec2(position.x + cell - 2.0f, position.y + cell), true);
+        draw->AddText(ImVec2(labelX, labelY), ImGui::GetColorU32(ImGuiCol_Text), entry->name.c_str());
+        draw->PopClipRect();
         if (ImGui::BeginDragDropSource()) {
             ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
             ImGui::TextUnformatted(entry->name.c_str());
@@ -1411,12 +1418,12 @@ void SceneEditor::drawAssetGrid() {
             }
             ImGui::EndPopup();
         }
-        const float thumbSize = cell - 34.0f;
-        const ImVec2 thumbPos{position.x + (cell - thumbSize) * 0.5f, position.y + 4.0f};
+        const float thumbSize = cell - 36.0f;
+        const ImVec2 thumbPos{position.x + (cell - thumbSize) * 0.5f, position.y + 6.0f};
         if (entry->thumbnail.valid()) {
             drawThumbnail(draw, thumbPos, thumbSize, entry->thumbnail);
         } else {
-            drawAssetIcon(draw, ImVec2(position.x + cell * 0.5f, position.y + 4.0f + thumbSize * 0.5f),
+            drawAssetIcon(draw, ImVec2(position.x + cell * 0.5f, position.y + 6.0f + thumbSize * 0.5f),
                 thumbSize * 0.4f, entry->type,
                 ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled));
         }
