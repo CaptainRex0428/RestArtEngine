@@ -1623,13 +1623,19 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             capture("material_hover", true);
             input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
             capture("material_pressed", true);
+        // Injected mouse state can be dropped if the frame between the move and
+        // the press lands on a hover change; retry once so the drag always starts.
+        if (context->ActiveId == 0) {
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+            capture("material_pressed_retry", true);
+        }
             std::string previous;
             for (int step = 1; step <= 3; ++step) {
                 input.mouse = point(first + (last - first) * step / 3.f);
                 const auto name = std::string(prefix) + "_" + std::to_string(step);
                 capture(name.c_str(), true);
                 require(context->IO.MouseDown[0] && context->ActiveId != 0 && editor.materialPreview(),
-                    "Material preview did not update while the slider was held.");
+                std::string("Material preview did not update while the slider was held. mouseDown=") + (context->IO.MouseDown[0] ? "1" : "0") + " activeId=" + std::to_string(static_cast<unsigned>(context->ActiveId)) + " preview=" + (editor.materialPreview() ? "1" : "0") + " step=" + std::to_string(step));
                 const auto pixels = scenePixels(output / (name + ".bmp"), settings);
                 require(!pixels.empty() && (step == 1 || pixels != previous),
                     "Dragging a material slider did not continuously change scene pixels.");

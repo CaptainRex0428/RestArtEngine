@@ -1324,6 +1324,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
     dockManager_.drawPanel(EditorPanel::Details, [&] {
+        // Actor and scene status live with the inspector so the effect of an
+        // edit is visible next to the properties that produced it.
+        ImGui::SeparatorText("Activity");
+        message(status_);
         drawInstanceDetails();
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });
@@ -1336,9 +1340,6 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;
             settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
         }
-        message(renderer.rayTracingStatus(world_, assets_));
-        ImGui::SeparatorText("Activity");
-        message(status_);
     });
 
     dockManager_.drawPanel(EditorPanel::Content, [&] {
