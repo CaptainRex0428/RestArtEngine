@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "RestArtEngine/Assets/AssetLibrary.h"
+#include "RestArtEngine/Assets/AssetThumbnail.h"
 
 namespace rae::assets {
 
@@ -29,6 +30,8 @@ struct AssetEntry {
     std::string relativePath;
     std::filesystem::path path;
     std::uint64_t sizeBytes = 0;
+    // Preview decoded from the container, when the asset carries one.
+    Thumbnail thumbnail;
     // Material files carry their own AssetId; other types report 0 until the
     // asset format lands.
     AssetId id = 0;

@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "RestArtEngine/Assets/AssetLibrary.h"
+#include "RestArtEngine/Assets/AssetThumbnail.h"
 
 namespace rae::assets {
 
@@ -46,6 +47,12 @@ bool readAssetFileHeader(const std::filesystem::path& path, AssetFile& file, std
 // Reads the header, manifest and blob region.
 bool readAssetFile(const std::filesystem::path& path, AssetFile& file, std::string& error);
 bool writeAssetFile(const std::filesystem::path& path, const AssetFile& file, std::string& error);
+
+// Thumbnails are stored as an rgba8 blob referenced from the manifest.
+void attachThumbnail(AssetFile& file, const Thumbnail& thumbnail);
+bool extractThumbnail(const AssetFile& file, Thumbnail& thumbnail, std::string& error);
+// Streams only the thumbnail slice, skipping mesh geometry or other blobs.
+bool readAssetThumbnail(const std::filesystem::path& path, Thumbnail& thumbnail, std::string& error);
 
 // Material payload helpers: a material asset stores its parameters in the
 // manifest, so browsers never need the blob region.

@@ -92,7 +92,6 @@ bool AssetRegistry::scan(std::string& error) {
             continue;
         }
         if (!iterator->is_regular_file(code)) continue;
-        if (!iterator->is_regular_file(code)) continue;
         const auto extension = path.extension();
         AssetEntry entry;
         entry.path = path;
@@ -105,6 +104,7 @@ bool AssetRegistry::scan(std::string& error) {
             std::string headerError;
             if (readAssetFileHeader(path, header, headerError)) {
                 entry.id = header.id;
+                (void)readAssetThumbnail(path, entry.thumbnail, headerError);
                 if (!header.name.empty()) entry.name = header.name;
                 switch (header.type) {
                 case AssetFileType::Material: entry.type = AssetType::Material; break;

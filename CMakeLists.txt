@@ -39,6 +39,7 @@ add_executable(RestArtEngine
     src/Assets/AssetLibrary.cpp
     src/Assets/AssetRegistry.cpp
     src/Assets/AssetFile.cpp
+    src/Assets/AssetThumbnail.cpp
     src/Scene/World.cpp
     src/Project/Project.cpp
     src/ImGui/ImGuiLayer.cpp

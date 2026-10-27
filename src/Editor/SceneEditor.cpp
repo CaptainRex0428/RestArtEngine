@@ -867,6 +867,25 @@ void drawAssetIcon(ImDrawList* list, ImVec2 center, float size, assets::AssetTyp
     }
 }
 
+// Draws a decoded thumbnail as a small block grid. Avoids a texture cache while
+// keeping the asset rows readable at 16-24px.
+void drawThumbnail(ImDrawList* list, ImVec2 topLeft, float size, const assets::Thumbnail& thumbnail) {
+    if (!thumbnail.valid()) return;
+    const int steps = std::max(8, static_cast<int>(size));
+    for (int y = 0; y < steps; ++y) {
+        const int sy = y * static_cast<int>(thumbnail.height) / steps;
+        for (int x = 0; x < steps; ++x) {
+            const int sx = x * static_cast<int>(thumbnail.width) / steps;
+            const auto* pixel = thumbnail.rgba.data() +
+                (static_cast<std::size_t>(sy) * thumbnail.width + static_cast<std::size_t>(sx)) * 4;
+            if (pixel[3] == 0) continue;
+            const ImVec2 a{topLeft.x + size * x / steps, topLeft.y + size * y / steps};
+            const ImVec2 b{topLeft.x + size * (x + 1) / steps, topLeft.y + size * (y + 1) / steps};
+            list->AddRectFilled(a, b, IM_COL32(pixel[0], pixel[1], pixel[2], 255));
+        }
+    }
+}
+
 } // namespace
 
 void SceneEditor::drawOutliner() {
@@ -1134,6 +1153,11 @@ bool SceneEditor::saveSceneAs(const std::filesystem::path& path, std::string& er
     return true;
 }
 
+void SceneEditor::selectContentFolder(std::string folder) {
+    contentFolder_ = std::move(folder);
+    selectedAsset_.clear();
+}
+
 void SceneEditor::refreshContent() {
     registry_.setContentRoot(project_.contentRoot);
     registry_.scan(contentError_);
@@ -1300,8 +1324,13 @@ void SceneEditor::drawAssetRows() {
         const ImVec2 rowMax = ImGui::GetItemRectMax();
         ImDrawList* draw = ImGui::GetWindowDrawList();
         const ImU32 color = ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        drawAssetIcon(draw, ImVec2(rowMin.x + 14.0f, rowMin.y + rowHeight * 0.5f), rowHeight * 0.55f,
-            entry->type, color);
+        if (entry->thumbnail.valid()) {
+            const float thumbSize = rowHeight - 4.0f;
+            drawThumbnail(draw, ImVec2(rowMin.x + 3.0f, rowMin.y + 2.0f), thumbSize, entry->thumbnail);
+        } else {
+            drawAssetIcon(draw, ImVec2(rowMin.x + 14.0f, rowMin.y + rowHeight * 0.5f), rowHeight * 0.55f,
+                entry->type, color);
+        }
         const float textY = rowMin.y + (rowHeight - ImGui::GetTextLineHeight()) * 0.5f;
         ImGui::SetCursorScreenPos(ImVec2(rowMin.x + 30.0f, textY));
         ImGui::TextUnformatted(entry->name.c_str());

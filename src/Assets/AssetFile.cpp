@@ -371,4 +371,82 @@ bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& erro
         return false;
     }
 }
+
+void attachThumbnail(AssetFile& file, const Thumbnail& thumbnail) {
+    if (!thumbnail.valid()) return;
+    const auto offset = file.blobs.size();
+    file.blobs.insert(file.blobs.end(), thumbnail.rgba.begin(), thumbnail.rgba.end());
+    file.manifest["thumbnail"] = Json{
+        {"offset", offset},
+        {"size", thumbnail.rgba.size()},
+        {"width", thumbnail.width},
+        {"height", thumbnail.height},
+        {"format", "rgba8"},
+    };
+}
+
+bool extractThumbnail(const AssetFile& file, Thumbnail& thumbnail, std::string& error) {
+    error.clear();
+    if (!file.manifest.contains("thumbnail")) { error = "The asset has no thumbnail."; return false; }
+    try {
+        const auto& entry = file.manifest.at("thumbnail");
+        const auto offset = entry.at("offset").get<std::size_t>();
+        const auto size = entry.at("size").get<std::size_t>();
+        const auto width = entry.at("width").get<std::uint32_t>();
+        const auto height = entry.at("height").get<std::uint32_t>();
+        if (entry.value("format", std::string()) != "rgba8") { error = "Unsupported thumbnail format."; return false; }
+        if (offset > file.blobs.size() || size > file.blobs.size() - offset ||
+            size != static_cast<std::size_t>(width) * height * 4) {
+            error = "Thumbnail blob range is invalid.";
+            return false;
+        }
+        Thumbnail loaded;
+        loaded.width = width;
+        loaded.height = height;
+        loaded.rgba.assign(file.blobs.begin() + static_cast<std::ptrdiff_t>(offset),
+            file.blobs.begin() + static_cast<std::ptrdiff_t>(offset + size));
+        thumbnail = std::move(loaded);
+        return true;
+    } catch (const std::exception& exception) {
+        error = std::string("Thumbnail metadata is invalid: ") + exception.what();
+        return false;
+    }
+}
+
+bool readAssetThumbnail(const std::filesystem::path& path, Thumbnail& thumbnail, std::string& error) {
+    AssetFile header;
+    if (!readAssetFileHeader(path, header, error)) return false;
+    if (!header.manifest.contains("thumbnail")) { error = "The asset has no thumbnail."; return false; }
+    try {
+        const auto& entry = header.manifest.at("thumbnail");
+        const auto offset = entry.at("offset").get<std::uint64_t>();
+        const auto size = entry.at("size").get<std::uint64_t>();
+        const auto width = entry.at("width").get<std::uint32_t>();
+        const auto height = entry.at("height").get<std::uint32_t>();
+        if (entry.value("format", std::string()) != "rgba8") { error = "Unsupported thumbnail format."; return false; }
+        if (size != static_cast<std::uint64_t>(width) * height * 4) { error = "Thumbnail size is invalid."; return false; }
+        std::ifstream stream(path, std::ios::binary | std::ios::ate);
+        if (!stream) { error = "Cannot open the asset file: " + path.generic_string(); return false; }
+        const auto fileSize = static_cast<std::uint64_t>(stream.tellg());
+        std::array<std::uint8_t, 8> sizeBytes{};
+        stream.seekg(8);
+        stream.read(reinterpret_cast<char*>(sizeBytes.data()), 8);
+        const std::uint64_t manifestSize = readU64(sizeBytes.data());
+        const std::uint64_t absolute = kAssetFileHeaderSize + manifestSize + offset;
+        if (absolute > fileSize || size > fileSize - absolute) { error = "Thumbnail is outside the file."; return false; }
+        Thumbnail loaded;
+        loaded.width = width;
+        loaded.height = height;
+        loaded.rgba.assign(static_cast<std::size_t>(size), 0);
+        stream.seekg(static_cast<std::streamoff>(absolute));
+        stream.read(reinterpret_cast<char*>(loaded.rgba.data()), static_cast<std::streamsize>(size));
+        if (stream.gcount() != static_cast<std::streamsize>(size)) { error = "Thumbnail read failed."; return false; }
+        thumbnail = std::move(loaded);
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        error = std::string("Thumbnail metadata is invalid: ") + exception.what();
+        return false;
+    }
+}
 } // namespace rae::assets

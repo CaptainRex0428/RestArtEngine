@@ -37,6 +37,9 @@ public:
     // Scene currently bound to the editor. Starts at the project default scene and
     // changes when the Content browser opens another one.
     [[nodiscard]] const std::filesystem::path& scenePath() const noexcept { return scenePath_; }
+    // Selects a Content folder (relative to the content root, "" = root). Used by
+    // the browser breadcrumb and by tests that need a deterministic view.
+    void selectContentFolder(std::string folder);
     bool openScene(const std::filesystem::path& path, std::string& error);
     bool createScene(const std::filesystem::path& path, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }

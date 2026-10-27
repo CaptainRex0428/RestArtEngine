@@ -1,5 +1,6 @@
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Assets/AssetFile.h"
+#include "RestArtEngine/Assets/AssetThumbnail.h"
 #include "AssetSerialization.h"
 #include <algorithm>
 #include <array>
@@ -271,7 +272,9 @@ bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& 
             if (mesh.primitive != MeshPrimitive::Imported) continue;
             if (!ids.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
             const auto path = folder / meshAssetFileName(mesh);
-            if (!writeAssetFile(path, makeMeshAssetFile(mesh), error)) return false;
+            auto file = makeMeshAssetFile(mesh);
+            attachThumbnail(file, renderMeshThumbnail(mesh));
+            if (!writeAssetFile(path, file, error)) return false;
             written.push_back(path);
         }
         std::error_code code;
@@ -344,13 +347,17 @@ bool AssetLibrary::ensureBuiltinMeshes(const std::filesystem::path& folder, std:
                 AssetFile file;
                 std::string readError;
                 if (!readAssetFileHeader(entry.path(), file, readError)) continue;
-                if (file.type == AssetFileType::StaticMesh) present.insert(file.id);
+                // A file without a thumbnail predates the preview feature: rewrite it
+                // so generated primitives always carry one.
+                if (file.type == AssetFileType::StaticMesh && file.manifest.contains("thumbnail")) present.insert(file.id);
             }
         }
         for (const auto& mesh : meshes) {
             if (mesh.primitive == MeshPrimitive::Imported) continue;
             if (present.contains(mesh.id)) continue;
-            if (!writeAssetFile(folder / meshAssetFileName(mesh), makeMeshAssetFile(mesh), error)) return false;
+            auto file = makeMeshAssetFile(mesh);
+            attachThumbnail(file, renderMeshThumbnail(mesh));
+            if (!writeAssetFile(folder / meshAssetFileName(mesh), file, error)) return false;
         }
         error.clear();
         return true;

@@ -238,7 +238,6 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         require(v2Editor.world().actors.size() == v2World.actors.size() &&
             v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
             "The editor did not load a scene v2 with its GUID materials.");
-        // Mesh assets: import an OBJ, persist it as a .raasset, then reload both
         // Built-in primitives are generated as .raasset files the first time a
         // project opens; later runs reuse them and never duplicate the files.
         {
@@ -262,7 +261,26 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             require(sphere != nullptr && sphere->vertices.size() == builtinAssets.findMesh(1)->vertices.size() &&
                 sphere->indices.size() == builtinAssets.findMesh(1)->indices.size(),
                 "A built-in primitive did not round-trip through its generated asset.");
+
+            // Thumbnails: generated on the CPU and stored in the container.
+            const auto materialThumb = assets::renderMaterialThumbnail(*builtinAssets.findMaterial(1), 32);
+            require(materialThumb.valid() && materialThumb.rgba.size() == 32u * 32u * 4u,
+                "The material thumbnail was not rendered.");
+            std::size_t opaquePixels = 0;
+            for (std::size_t index = 3; index < materialThumb.rgba.size(); index += 4)
+                if (materialThumb.rgba[index] != 0) ++opaquePixels;
+            require(opaquePixels > 100, "The material thumbnail is empty.");
+            const auto meshThumb = assets::renderMeshThumbnail(*builtinAssets.findMesh(3), 32);
+            require(meshThumb.valid() && meshThumb.rgba.size() == 32u * 32u * 4u,
+                "The mesh thumbnail was not rendered.");
+            assets::AssetFile containerFile = assets::makeMeshAssetFile(*builtinAssets.findMesh(3));
+            assets::attachThumbnail(containerFile, meshThumb);
+            assets::Thumbnail extractedThumb;
+            require(assets::extractThumbnail(containerFile, extractedThumb, v2Error) &&
+                extractedThumb.rgba == meshThumb.rgba && extractedThumb.width == meshThumb.width,
+                "The container did not round-trip its thumbnail.");
         }
+        // Mesh assets: import an OBJ, persist it as a .raasset, then reload both
         // the geometry and a scene that only references the mesh GUID.
         {
             const auto objPath = v2Root / "Meshes" / "tri.obj";
@@ -279,6 +297,12 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             const auto newMeshId = importedMesh->id;
             require(meshAssets.saveMeshes(v2Root / "Meshes", v2Error), v2Error);
             assets::AssetLibrary meshReloaded = v2Assets;
+            {
+                assets::Thumbnail fromDisk;
+                const auto meshPath = v2Root / "Meshes" / assets::AssetLibrary::meshAssetFileName(*meshAssets.findMesh(newMeshId));
+                require(assets::readAssetThumbnail(meshPath, fromDisk, v2Error) && fromDisk.valid(),
+                    "A saved mesh asset does not carry a readable thumbnail.");
+            }
             require(meshReloaded.loadMeshes(v2Root / "Meshes", v2Error), v2Error);
             const auto* reloadedMesh = meshReloaded.findMesh(newMeshId);
             require(reloadedMesh && reloadedMesh->vertices.size() == 3 && reloadedMesh->indices.size() == 3,
@@ -413,6 +437,23 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         }
         require(renderer.present(false, error), error);
     };
+    {
+        // Content browser with thumbnails: the first frame builds the layout, the
+        // second one captures the panels.
+        editor.selectContentFolder("Meshes/Builtin");
+        capture("content_thumbnails_preroll", true);
+        capture("content_thumbnails", true);
+        editor.selectContentFolder(std::string());
+        const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.raasset");
+        require(cubeEntry && cubeEntry->thumbnail.valid(),
+            "The generated built-in mesh thumbnail is missing from the registry.");
+    }
+        {
+            assets::Thumbnail directThumb;
+            std::string thumbError;
+            require(assets::readAssetThumbnail(project.contentRoot / "Meshes" / "Builtin" / "Cube.raasset",
+                directThumb, thumbError), thumbError);
+        }
 
     const std::string originalSource = renderer.shaderSource();
     // ImGui text input filters CR. Keep API/disk checks byte-exact and compare
