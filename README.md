@@ -198,13 +198,13 @@ RestArtEngine.rc                  <- 图标与版本资源
 Projects/Sandbox/            <- 纯数据示例工程
   Sandbox.raproject
   Content/Scenes/Default.rascene
-  Content/Materials/*.ramat
-  Content/Meshes/*.obj
+  Content/Materials/*.rasset      （旧 .ramat 只读兼容）
+  Content/Meshes/*.rasset        （内置图元 + OBJ 导入）
   Shaders/Materials/Standard.hlsli
 Projects/RayTracing_Simple/ <- 光追测试工程
   RayTracing_Simple.raproject
   Content/Scenes/Default.rascene
-  Content/Materials/*.ramat
+  Content/Materials/*.rasset
   Shaders/Materials/Standard.hlsli
 ```
 
@@ -269,7 +269,7 @@ Forward : 背景 + 几何  →  绘制时直接着色
 | 编辑材质参数草稿 | 所有引用该材质的 Actor 实时预览，拖动中持续更新 | 不变 |
 | Apply material | 将当前预览提交为资产参数，画面保持一致 | 不变 |
 | Discard draft | 恢复最近 Apply 的材质参数 | 不变 |
-| Save material assets | 不变 | 写 `Content/Materials/*.ramat` |
+| Save material assets | 不变 | 写 `Content/Materials/*.rasset`（旧 `.ramat` 保留） |
 | 编辑 Shader 草稿 | 不变 | 不变 |
 | Shader Apply / Compile | 成功则整体替换 6 个 shader 阶段 | 不变 |
 | Shader 编译失败 | 保留上一版可用 Shader + 诊断 | 不变 |
@@ -384,6 +384,7 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
 - [GUI 设计规范](docs/GuiDevelopment.md)：面板职责、视觉规则、交互契约与验收方法
+- [资产格式](docs/AssetFormat.md)：`.rasset` 容器、GUID、缩略图、场景 v3 与旧格式兼容
 - [工程管理](docs/ProjectManagement.md)：引擎身份、工程链接、Project Manager 流程
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节

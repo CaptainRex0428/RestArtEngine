@@ -1,17 +1,17 @@
 # `.rasset` 统一资产容器
 
-> 状态：**设计提案，代码尚未实现**。当前提交只落地了 `AssetRegistry`、Content 文件夹树与场景切换；文件格式按本文实现前仍需评审。
+> 状态：**已实现**。容器读写、GUID、材质与网格资产、内置图元、64px 缩略图、场景 v3 的 GUID 引用都已落地；仍缺纹理载荷、数据块压缩与调试导出工具。
 >
-> 扩展名 `.rasset`（原 `.raasset` 更名，旧文件仍可只读加载）。
+> 扩展名 `.rasset`（由 `.raasset` 更名；旧 `.raasset` 仍可只读加载，保存只写新后缀）。
 >
-> 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.rasset`**，旧 `.ramat` 只读兼容。
+> 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.rasset`**；旧 `.ramat` 只读兼容，且保存新容器时**不删除**旧文件。
 >
-> 已实现缩略图：保存资产时用 CPU 光栅化生成 64×64 rgba8 预览（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入容器清单；Content 面板按需读取并直接绘制，缺缩略图时回退线框图标；场景缩略图优先读取场景旁的 `<scene>.rthumb`（GPU 渲染，保存场景时生成，已加入 .gitignore），缺失时回退为 Actor 位置即时渲染的 CPU 布局图。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.rasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
+> 缩略图：保存资产时用 CPU 光栅化生成 64×64 RGBA8（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入清单；Content 面板直接读取绘制，缺失时回退线框图标。场景缩略图不写进场景 JSON：保存场景时用 GPU 渲染 128px 写到同目录 `<scene>.rthumb`（magic `RTHB`，已 gitignore），缺失时回退 Actor 布局的 CPU 示意图。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）。容器读写库在 `src/Assets/AssetFile.cpp`。
 
 ## 目标
 
 - **自包含**：几何、材质参数、缩略图与元数据放在同一个文件里，可以整体复制、移动、提交版本库，不依赖外部 OBJ 与场景内嵌副本。
-- **单一真相**：资产只存一份，场景只引用资产与路径，不再把材质/网格几何抄进 `.rascene`。
+- **单一真相**：资产只存一份，场景只引用资产 ID，不再把材质/网格几何抄进 `.rascene`。
 - **可演进**：头部带版本号，清单是 JSON，未知字段可忽略，读不了的版本明确报错。
 - **可快速浏览**：Content 浏览器只读文件头与清单，不解码大数据块；缩略图可选。
 
@@ -28,7 +28,7 @@
 | 16 | `manifestSize` | 清单 JSON（UTF-8，无 BOM） |
 | 16 + `manifestSize` | 剩余 | 数据块区，按清单里的 `offset` / `size` 引用 |
 
-数据块 `offset` 相对**数据块区起点**，`size` 为字节数；读取器必须校验 `offset + size` 不越界，否则拒绝加载而不是崩溃。
+数据块 `offset` 相对**数据块区起点**，`size` 为字节数；读取器校验 `offset + size` 不越界，否则拒绝加载而不是崩溃。
 
 ## 清单（manifest）
 
@@ -37,40 +37,41 @@
   "format": "RAEngine.Asset",
   "version": 1,
   "type": "staticMesh",
-  "id": 16,
+  "id": "3f2a9c7d51b84e60",
   "name": "Sphere",
-  "source": { "tool": "RestArtEngine", "created": "2026-10-27T12:00:00Z" },
-  "thumbnail": { "offset": 0, "size": 4096, "format": "png" },
+  "thumbnail": { "offset": 0, "size": 16384, "width": 64, "height": 64, "format": "rgba8" },
   "payload": {}
 }
 ```
 
-- `type`：`staticMesh` / `material` / `scene` / `texture`（后续扩展用新值，读取器遇到未知类型只展示、不加载）。
-- `id`：稳定标识，**策略待定**（GUID / 内容哈希 / 项目内自增），本阶段先允许为 0。
+- `type`：`staticMesh` / `material`。场景仍是 `.rascene` JSON，不装进容器；`texture` 是后续类型。
+- `id`：GUID，取 64 位随机数；文件里写成 16 位十六进制，可与文件名无关。
 - `name`：显示名，可重命名而不用改文件名。
+- `thumbnail`：RGBA8 原始像素块，`offset`/`size` 相对数据块区；没有缩略图时整个字段省略。
+- `payload`：类型相关的描述数据，见下。
 
 ### `staticMesh` payload
 
 ```json
 {
-  "vertexCount": 24,
-  "indexCount": 36,
+  "primitive": "sphere",
+  "vertexCount": 6305,
+  "indexCount": 12096,
   "vertexStride": 24,
   "indexFormat": "u32",
   "bounds": { "min": [-1, -1, -1], "max": [1, 1, 1] },
   "blobs": {
-    "vertices": { "offset": 4096, "size": 576 },
-    "indices": { "offset": 4672, "size": 144 }
+    "vertices": { "offset": 0, "size": 151320 },
+    "indices": { "offset": 151320, "size": 48384 }
   }
 }
 ```
 
-- 顶点布局沿用 `MeshVertex`：`position[3] + normal[3]`，步长 24 字节。
-- 内置图元（Sphere / Plane / Cube）也走同一格式，由引擎生成后缓存，不再有"保留 ID 1–3"的特殊分支。
+- 顶点布局沿用 `MeshVertex`：`position[3] + normal[3]`，步长 24 字节；索引为 `u32`。
+- `primitive` 标记内置图元类型（`sphere` / `plane` / `cube`，OBJ 导入为空或省略），加载时据此走解析光追或三角形路径。
+- OBJ 导入的网格额外带 `sourcePath`（相对工程 Content 记录，仅作来源信息，不再依赖原 OBJ 加载）。
 
 ### `material` payload
-
-材质作为一个独立的 `.rasset` 文件（例如 `Content/Materials/Copper.rasset`），场景只引用它，不再把参数抄进 `.rascene`。编辑器里的材质草稿、Apply/Discard 语义不变，落到同一个容器格式。
 
 ```json
 {
@@ -78,45 +79,61 @@
   "roughness": 0.25,
   "metallic": 0.65,
   "grid": false,
-  "twoSided": false,
-  "textures": { "baseColor": "textures/copper.rasset" }
+  "twoSided": false
 }
 ```
 
-### `scene` payload
+材质是独立资产（如 `Content/Materials/Copper.rasset`），场景只引用 GUID。旧 `.ramat` 文件保留在磁盘上可继续读取；材质编辑器保存时写 `.rasset`，不删除旧文件。`textures` 尚未实现。
 
-迁移现有 `.rascene`：`actors` 保留，`materials` / `meshes` 数组改为引用列表：
+## 场景与场景缩略图
+
+场景仍是可读 JSON `.rascene`，**v3** 只引用材质与网格的 GUID（JSON 里保存数值 ID，容器清单里才写成 16 位十六进制）：
 
 ```json
 {
-  "actors": [ { "id": 1, "name": "Sphere", "mesh": "meshes/sphere.rasset", "material": "materials/copper.rasset" } ],
-  "background": "black"
+  "format": "RAEngine.Scene",
+  "version": 3,
+  "actors": [
+    { "id": 1, "name": "Sphere", "mesh": { "meshId": 1, "materialId": 3 } }
+  ],
+  "materials": [ { "id": 3 } ],
+  "meshes": [ { "id": 1 } ]
 }
 ```
 
-相对路径以场景文件所在目录为基准，和现在的 OBJ `sourcePath` 规则一致；移动场景时重算（`moveContentEntry` 已实现同样的重定位逻辑）。
+加载 v3 时从 `Content/Materials`、`Content/Meshes` 解析引用；缺失时报 `Scene references material N that is not loaded from Content/Materials.`。v1（内嵌材质快照 + 内嵌网格描述）和 v2（引用材质）仍可读取，用于打开旧工程。
 
-### `texture` payload（后续）
+场景缩略图是例外：它不写进 `.rascene`，而是保存场景时由 GPU 渲染 128×128 写到同目录 `<scene>.rthumb`：
 
-`width` / `height` / `format`（`rgba8`、`bc7`…）/ `mipCount`，数据块按 mip 顺序排列。
+| 偏移 | 大小 | 字段 |
+|---|---|---|
+| 0 | 4 | magic，ASCII `RTHB` |
+| 4 | 4 | `version`，当前为 `1` |
+| 8 | 4 | `width` |
+| 12 | 4 | `height` |
+| 16 | 剩余 | RGBA8 像素 |
+
+Content 浏览器优先读该文件；不存在时回退到按 Actor 位置生成的 CPU 布局图。
 
 ## 读写策略
 
-1. **浏览**：`AssetRegistry` 读头部与清单，得到类型、名称、ID、缩略图偏移；不解码几何。
-2. **加载**：按清单读取数据块，校验边界与长度，失败返回明确错误；场景加载失败不得破坏当前场景（现有 `World::load` 已是这种事务式实现）。
-3. **保存**：先写临时文件，`fflush` 后原子替换，避免半写文件；清单先序列化，再写数据块，最后回填偏移。
+1. **浏览**：`AssetRegistry` 读头部与清单，得到类型、名称、GUID、大小与缩略图；不解码几何。
+2. **加载**：按清单读取数据块，校验边界与长度，失败返回明确错误；场景加载失败不破坏当前场景。
+3. **保存**：直接覆盖写目标文件（尚未做临时文件＋原子替换，中途崩溃可能留下半写文件，属于待改进项）。
+4. **移动**：Content 内拖拽移动资产时更新其相对路径；移动场景时重写场景内网格/材质的相对引用（`moveContentEntry`）。
 
 ## 迁移步骤
 
-1. ✅ `AssetRegistry` + Content 文件夹树 + 场景切换（本次提交）。
-2. 实现 `.rasset` 读写库与单元测试：magic/版本、清单解析、越界块、损坏文件。
-3. ✅ OBJ 导入生成 `.rasset`（GUID），场景引用资产；保留旧场景 `.obj` 读取兼容。
-4. 材质从 `.ramat` 迁入 `.rasset`：读取旧 `.ramat` 后转存为新容器，材质编辑器改为保存 `.rasset`；旧文件只读兼容一个版本后移除。
-5. 删除场景内嵌的 `materials` / `meshes` 几何，只留引用。
+1. ✅ `AssetRegistry` + Content 文件夹树 + 场景切换。
+2. ✅ `.rasset` 读写库与测试：magic/版本、清单解析、越界块、损坏文件、旧 `.raasset` 可读。
+3. ✅ OBJ 导入生成 `.rasset`（GUID），场景引用资产；旧场景 `.obj` 读取兼容。
+4. ✅ 材质从 `.ramat` 迁入 `.rasset`；旧文件保留只读兼容，保存时不再删除。
+5. ✅ 场景 v3 删除内嵌材质/几何，只留 GUID 引用；v1/v2 仍可读。
+6. ⬜ 纹理资产（`texture` payload、采样参数与 Content 识别）。
 
 ## 未决问题
 
-- 网格仍内嵌在场景（内置描述 + OBJ 相对路径），迁移为 `.rasset` 网格资产是下一步。
-- 缩略图生成时机（保存时渲染 vs 编辑器后台）。
-- 是否压缩数据块（deflate）以及 4 字节对齐要求。
-- 二进制与 JSON 混合的调试体验：是否需要 `--dump-asset` 工具输出清单。
+- 数据块是否压缩（deflate）、4 字节对齐要求，以及大网格的流式加载。
+- 网格/材质缩略图目前是 CPU 光栅化；是否改成 GPU 渲染并缓存（场景已走 GPU sidecar）。
+- 保存的原子性：临时文件＋rename，避免断电或崩溃留下半写资产。
+- 是否需要 `--dump-asset` 工具输出清单与块表，方便排查损坏文件。

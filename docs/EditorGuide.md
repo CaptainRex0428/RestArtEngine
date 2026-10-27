@@ -8,14 +8,14 @@
 
 以下提到的 `Content/` 和材质 `Shaders/` 都是**当前工程内的目录**。默认 Sandbox 分别对应引擎仓库内的 `Projects/Sandbox/Content/` 和 `Projects/Sandbox/Shaders/`。引擎根目录只保留公共 Shader 管线与默认材质模板，编辑器不会将工程材质或导入网格保存到引擎根目录。
 
-如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供网格资源列表；左侧 Details 跟随场景中选中的 Actor 实例，与资源列表的浏览选择分开。材质参数与 Shader 编辑在按需打开的系统独立窗口中。尚未实现类似 UE Content Browser 的任意目录浏览、缩略图或资产移动重命名工具。
+如果在 `.raproject` 中修改了 `contentRoot` 或 `shaderRoot`，实际资产与 Shader 路径随这些配置解析。当前 Content 面板提供文件夹树与资产区（列表/网格两种视图，材质、网格、场景都在这里浏览）；左侧 Details 跟随场景中选中的 Actor 实例，与资源列表的浏览选择分开。材质参数与 Shader 编辑在按需打开的系统独立窗口中。已实现文件夹树、缩略图、拖拽移动与重命名；尚未实现任意磁盘目录浏览、资产搜索/过滤。
 
 ## 面板布局
 
 六个面板（World Outliner、Scene、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左上 Outliner、左下同组的 Scene / Details 页签、右侧设置、底部 Content 和中央场景视口。
 
 **Scene** 显示场景级参数（工程与场景信息、Actor / Mesh / Material 数量、背景 Sky / Black、Key light 与阴影方式）；Viewport settings 只保留 View 相关项（Exposure、VSync、Reset camera）；操作状态与射线追踪摘要中的 Activity 段落移入 Details 顶部，编辑后能立刻在属性旁看到结果；**World Outliner** 每行左侧的小眼睛显示该 Actor 的可见性，点击即可切换（隐藏后名称变暗、眼睛加斜线），点名称完成选择；**Details** 提供主选中 Actor 的名称、可见性、变换与 Mesh / Material 分配编辑，并显示该场景实例的名称、Actor ID、网格类型／几何数量／来源以及它当前使用的材质。即使两个实例使用同一个 Sphere 网格，Details 也只显示当前主实例的信息，不汇总其他实例的材质。点击 Outliner 或视口中的 Actor 切到 Details；底部 Mesh 浏览不改变场景选择、Details 内容或强制切页。多选时明确显示主实例，无选中实例时显示空状态。手动切页后不会每帧强制跳回。
-**Content & Editors** 是文件浏览器：左侧文件夹树、右侧当前文件夹的资产行（自绘类型图标、名称、类型与大小；材质以 `.rasset` 容器显示，旧 `.ramat` 仍可读），支持拖拽资产到文件夹完成移动、右键重命名/删除；`Import OBJ...` 会把网格写成 `Content/Meshes/*.rasset`（GUID）；内置图元在 `Content/Meshes/Builtin/` 下自动生成；资产区支持 `List` / `Grid` 两种视图：列表显示缩略图、名称、类型与大小，网格显示放大的缩略图（悬停显示名称）；场景缩略图按 Actor 布局生成，`New folder` 建目录；双击任意资产打开 `Asset Details` 窗口（GPU 预览 + 名称/类型/GUID/路径/大小 + 类型信息，网格显示顶点与三角形数、材质显示参数、场景提示打开）；窗口内 `Open` 再执行类型动作（打开场景、打开材质编辑器、选中网格）；下方 `Scene mesh library` 仍列出当前场景网格供 `Add Actor from mesh` 使用。
+**Content & Editors** 是文件浏览器：左侧文件夹树、右侧当前文件夹的资产行（自绘类型图标、名称、类型与大小；材质以 `.rasset` 容器显示，旧 `.ramat` 仍可读），支持拖拽资产到文件夹完成移动、右键重命名/删除；`Import OBJ...` 会把网格写成 `Content/Meshes/*.rasset`（GUID）；内置图元在 `Content/Meshes/Builtin/` 下自动生成；资产区支持 `List` / `Grid` 两种视图：列表显示缩略图、名称、类型与大小，网格显示放大的缩略图与资产名（超宽截断、悬停看全名）；场景缩略图优先用保存时生成的 GPU 渲染 `<scene>.rthumb`，缺失时回退 Actor 布局示意图，`New folder` 建目录；双击任意资产打开 `Asset Details` 窗口（GPU 预览 + 名称/类型/GUID/路径/大小 + 类型信息，网格显示顶点与三角形数、材质显示参数、场景提示打开）；窗口内 `Open` 再执行类型动作（打开场景、打开材质编辑器、选中网格）；下方 `Scene mesh library` 仍列出当前场景网格供 `Add Actor from mesh` 使用。
 
 
 - 拖动面板标签，或悬浮窗口的标题栏，在停靠预览出现时松开鼠标。
@@ -26,7 +26,7 @@
 
 Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机和 Gizmo 使用该图像的当前屏幕矩形。视口窗口浮动或与其他面板合并标签后，场景图像仍跟随它显示，不占用原位置的固定矩形。选中的 Actor 会在场景纹理里叠加一圈屏幕空间描边，用于在复杂画面中确认选择；这是编辑器可视化，不写入场景文件，也不影响独立运行时的画面。被其他物体挡住的轮廓段以虚线显示，只画在轮廓上一段一段断开，不填充遮挡区域；默认遮挡物上只画相交的那一圈虚线；设置窗口的 `Outline front objects` 可让前方物体也获得整圈实线描边（交线保持虚线）。描边的开关、粗细（1–6 px）和颜色（Orange / White / Cyan 预设或自定义取色）在工具栏 `UI > Selection outline...` 打开的独立窗口中调整，默认使用品牌橙 `#FD7804`，也可切换为主题强调色或自定义颜色；窗口是编辑器内的浮动小窗，可随时关闭，设置保存在本机 `RestArtEngine.ui.ini`（与主题同文件）。
 
-交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局。已有五面板布局仅在原 Details 所在组补入 Scene；原 Details 自由浮动时保留其位置尺寸并组成双页签，其他区域不重建。已有 Scene 的布局按用户安排保留。自动化自测不加载个人布局文件。Content & Editors 内只保留 Meshes 资源列表及导入／创建入口；Material Editor / Shader Editor 两页位于独立材质窗口中。
+交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局。已有五面板布局仅在原 Details 所在组补入 Scene；原 Details 自由浮动时保留其位置尺寸并组成双页签，其他区域不重建。已有 Scene 的布局按用户安排保留。自动化自测不加载个人布局文件。Content & Editors 内是完整的 Content 浏览器（Materials / Meshes / Scenes 文件夹树、列表/网格资产区、导入与新建入口）；Material Editor / Shader Editor 两页位于独立材质窗口中。
 
 ## 窗口外框与工具栏
 
@@ -119,11 +119,11 @@ Ground 默认启用 `Grid`：世界 XZ 平面每 1 个单位一格，每 5 个�
 
 独立材质窗口中的 Material Editor 可以创建和选择材质，调整 Base Color、Roughness、Metallic 与 Grid。颜色编辑、滑块拖动和开关变化在同帧渲染中预览，所有引用该材质的 Actor 一起更新，前向、延迟及光追反射使用同一组预览参数；无需点击 Apply 或重新编译 Shader。
 
-界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/{id}.ramat`；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
+界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/{name}.rasset`（旧 `.ramat` 保留只读）；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
 
 `Two-sided` 是所有材质共有、逐材质设置的选项。关闭时剔除背面；开启时两面可见，背面使用翻转后的法线参与材质和光照计算。开关即时预览，Apply／Save／Discard 语义与数值参数相同；光栅、阴影及解析／三角形光追都使用该材质设置。新材质默认关闭；旧 `.ramat` 或场景快照缺少 `twoSided` 字段时默认开启，保留原来未剔除背面的行为，保存后会明确写入布尔值。
 
-`Save material assets` 除了写入工程的独立 `.ramat` 文件，也保存当前场景快照，使下次启动恢复材质外观。`Save Scene` 保存当前 Actor 与已应用材质的快照，不会自动应用仍在编辑的参数草稿。`Save All` 会先应用草稿，再保存材质、Shader 与场景；Shader 编译失败时显示错误并留在编辑器中。
+`Save material assets` 除了写入工程的独立 `.rasset` 容器，也保存当前场景快照，使下次启动恢复材质外观。`Save Scene` 保存当前 Actor 与已应用材质的快照，不会自动应用仍在编辑的参数草稿。`Save All` 会先应用草稿，再保存材质、Shader 与场景；Shader 编译失败时显示错误并留在编辑器中。
 
 程序启动与 `Load Scene` 以工程场景快照为准。需要读入工程 `Content/Materials/` 下的独立材质文件时，使用 `Reload material assets`；这会更新引用这些材质的 Actor。加载失败时保留当前资产并显示错误。
 

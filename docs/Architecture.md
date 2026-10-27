@@ -51,14 +51,14 @@ RestArtEngine/                          引擎仓库根目录
    │  ├─ Sandbox.raproject
    │  ├─ Content/                  该工程的资产根目录
    │  │  ├─ Scenes/Default.rascene
-   │  │  ├─ Materials/*.ramat
-   │  │  └─ Meshes/*.obj
+   │  │  ├─ Materials/*.rasset      （旧 .ramat 只读兼容）
+   │  │  └─ Meshes/*.rasset        （内置图元 + OBJ 导入）
    │  └─ Shaders/Materials/Standard.hlsli
    └─ RayTracing_Simple/           光追测试工程（康奈尔盒 + 镜面球）
       ├─ RayTracing_Simple.raproject
       ├─ Content/
       │  ├─ Scenes/Default.rascene
-      │  └─ Materials/*.ramat
+      │  └─ Materials/*.rasset
       └─ Shaders/Materials/Standard.hlsli
 ```
 
@@ -173,11 +173,11 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 ## 文件与持久化
 
-场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`，`version` 为 `1`。它保存 Actor、变换、网格 / 材质引用、材质参数快照及网格元数据。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
+场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`。当前写出 **v3**：Actor、变换、可见性，以及按 GUID 引用材质与网格（JSON 里保存数值 ID，容器清单里写成 16 位十六进制）；v1（内嵌材质快照与网格描述）与 v2（材质引用、网格仍内嵌）仍可读取。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
 
-独立材质存储为工程 `Content/Materials/{id}.ramat`，同样为 JSON，`format` 为 `RAEngine.Material`，`version` 为 `1`。材质文件包含 ID、名称、Base Color、Roughness、Metallic、Grid 与 Two-sided。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载场景使用场景内的材质快照；使用 `Reload material assets` 可显式读入工程独立材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
+材质存为工程 `Content/Materials/{name}.rasset` 容器：GUID 标识，清单 `payload` 保存 ID、名称、Base Color、Roughness、Metallic、Grid 与 Two-sided。旧 `Content/Materials/*.ramat` 仍可读：加载优先 `.rasset`，同 GUID 的 `.ramat` 跳过；保存写 `.rasset` 且不删除 `.ramat`。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载 v3 场景时按 GUID 从工程材质解析引用（v1 使用场景内材质快照）；使用 `Reload material assets` 可显式读入工程材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
 
-加载先构造并验证候选 World 和 AssetLibrary，全部成功后再替换当前场景。JSON 损坏或引用的 OBJ 无法加载时，返回诊断并保留当前 World 和 AssetLibrary。场景文件与独立材质文件各自持久化；需要版本管理的成果包括工程描述、场景、材质参数、OBJ 与工程 Shader 源文件。
+加载先构造并验证候选 World 和 AssetLibrary，全部成功后再替换当前场景。JSON 损坏或引用的资产无法加载时，返回诊断并保留当前 World 和 AssetLibrary。场景文件与独立材质文件各自持久化；需要版本管理的成果包括工程描述、场景、材质参数、OBJ 与工程 Shader 源文件。
 
 ## 与 UE 概念的对应
 
@@ -201,7 +201,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染 64–160px 预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，保存场景时写到同目录 `<scene>.rthumb`，Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
-Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格都是 `.rasset`（材质旧 `.ramat` 只读兼容；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`）、场景 `.rascene` v3（只引用材质与网格 GUID）、`.rasset` 内的 64×64 缩略图、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、相对路径与材质 ID，编辑器在每次文件操作后重建；不读取几何数据。统一自包含资产格式 `.rasset` 的设计见 [AssetFormat.md](AssetFormat.md)（尚未实现）。
+Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不读取几何数据；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
 当前真实场景渲染只接入 DX11，OpenGL、DX12、Vulkan、Null 的 RHI 仍为骨架。后续支持其他 API 时，在 `Renderer` 中落地资源和命令接口，并保持 Scene / Assets 不依赖具体图形 API。
 
