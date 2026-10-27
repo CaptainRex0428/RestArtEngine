@@ -116,9 +116,18 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
 bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
     project_ = project;
     assets_.createDefaults();
-    world_.createDefaultScene();
-    const auto scenePath = project_.defaultScene;
-    if (std::filesystem::exists(scenePath) && !world_.load(scenePath, assets_, error)) return false;
+    // Materials are the single source of truth for scene v2 references: load the
+    // content folder first so the scene can resolve its GUIDs.
+    {
+        std::string materialError;
+        const auto materialFolder = project_.contentRoot / "Materials";
+        if (std::filesystem::is_directory(materialFolder)) (void)assets_.loadMaterials(materialFolder, materialError);
+    }
+    world_.createDefaultScene(assets_);
+    scenePath_ = project_.defaultScene;
+    if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    registry_.setContentRoot(project_.contentRoot);
+    registry_.scan(contentError_);
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
@@ -265,11 +274,15 @@ bool SceneEditor::applyMaterial() {
 
 bool SceneEditor::saveScene() {
     std::string error;
-    if (!world_.save(project_.defaultScene, assets_, error)) {
+    // Persist materials before the scene so its GUID references always resolve.
+    if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
+        status_ = "Material save failed: " + error; return false;
+    }
+    if (!world_.save(scenePath_, assets_, error)) {
         status_ = "Scene save failed: " + error; return false;
     }
     sceneDirty_ = false;
-    status_ = "Saved " + pathText(project_.defaultScene) + " (applied materials only).";
+    status_ = "Saved " + pathText(scenePath_) + " (applied materials only).";
     return true;
 }
 
@@ -1078,7 +1091,7 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
 bool SceneEditor::createScene(const std::filesystem::path& path, std::string& error) {
     error.clear();
     scene::World fresh;
-    fresh.createDefaultScene();
+    fresh.createDefaultScene(assets_);
     assets::AssetLibrary library = assets_;
     std::error_code code;
     std::filesystem::create_directories(path.parent_path(), code);

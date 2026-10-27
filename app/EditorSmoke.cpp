@@ -203,6 +203,43 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     }
 
     {
+        // Scene v2 round-trip through disk: materials live in .raasset files, the
+        // scene stores GUID references, and a scene loaded without its materials
+        // must fail instead of silently rendering the wrong material.
+        std::string v2Error;
+        const auto v2Root = output / "SceneV2RoundTrip";
+        assets::AssetLibrary v2Assets;
+        v2Assets.createDefaults();
+        v2Assets.findMaterial(1)->roughness = 0.11f;
+        require(v2Assets.saveMaterials(v2Root / "Materials", v2Error), v2Error);
+        scene::World v2World;
+        v2World.createDefaultScene(v2Assets);
+        require(v2World.save(v2Root / "Scenes" / "V2.rascene", v2Assets, v2Error), v2Error);
+        assets::AssetLibrary reloadedAssets;
+        require(reloadedAssets.loadMaterials(v2Root / "Materials", v2Error), v2Error);
+        scene::World reloadedWorld;
+        require(reloadedWorld.load(v2Root / "Scenes" / "V2.rascene", reloadedAssets, v2Error), v2Error);
+        require(reloadedWorld.actors.size() == v2World.actors.size() &&
+            reloadedAssets.findMaterial(1) != nullptr &&
+            reloadedAssets.findMaterial(1)->roughness == v2Assets.findMaterial(1)->roughness,
+            "A scene v2 round-trip lost its actors or material values.");
+        assets::AssetLibrary emptyAssets;
+        scene::World rejectedWorld;
+        require(!rejectedWorld.load(v2Root / "Scenes" / "V2.rascene", emptyAssets, v2Error) && !v2Error.empty(),
+            "A scene v2 loaded without its materials instead of reporting the missing reference.");
+        // The editor path: Content materials load first, then the scene resolves
+        // its GUID references without any embedded snapshot.
+        rae::project::ProjectPaths v2Project = project;
+        v2Project.contentRoot = v2Root;
+        v2Project.defaultScene = v2Root / "Scenes" / "V2.rascene";
+        rae::editor::SceneEditor v2Editor;
+        require(v2Editor.initialize(v2Project, renderer, v2Error), v2Error);
+        require(v2Editor.world().actors.size() == v2World.actors.size() &&
+            v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
+            "The editor did not load a scene v2 with its GUID materials.");
+    }
+
+    {
         // Theme preference round-trips through the per-user file the app reads
         // before creating the ImGui context (palette itself is covered by the
         // captured screenshots of both themes).
