@@ -247,4 +247,128 @@ bool readMaterialAssetFile(const AssetFile& file, MaterialAsset& material, std::
     }
 }
 
+
+namespace {
+
+const char* primitiveName(MeshPrimitive primitive) {
+    switch (primitive) {
+    case MeshPrimitive::Sphere: return "Sphere";
+    case MeshPrimitive::Plane: return "Plane";
+    case MeshPrimitive::Cube: return "Cube";
+    default: return "Imported";
+    }
+}
+
+MeshPrimitive primitiveFromName(std::string_view name) {
+    if (name == "Sphere") return MeshPrimitive::Sphere;
+    if (name == "Plane") return MeshPrimitive::Plane;
+    if (name == "Cube") return MeshPrimitive::Cube;
+    return MeshPrimitive::Imported;
+}
+
+Json blobRange(std::size_t offset, std::size_t size) {
+    return Json{{"offset", offset}, {"size", size}};
+}
+
+bool readBlob(const AssetFile& file, const Json& range, std::size_t elementSize,
+              std::size_t count, std::vector<std::uint8_t>& out, std::string& error) {
+    const auto offset = range.at("offset").get<std::size_t>();
+    const auto size = range.at("size").get<std::size_t>();
+    if (offset > file.blobs.size() || size > file.blobs.size() - offset) {
+        error = "Mesh blob range is outside the asset data.";
+        return false;
+    }
+    if (size != elementSize * count) {
+        error = "Mesh blob size does not match its element count.";
+        return false;
+    }
+    out.assign(file.blobs.begin() + static_cast<std::ptrdiff_t>(offset),
+        file.blobs.begin() + static_cast<std::ptrdiff_t>(offset + size));
+    return true;
+}
+
+} // namespace
+
+AssetFile makeMeshAssetFile(const MeshAsset& mesh) {
+    AssetFile file;
+    file.type = AssetFileType::StaticMesh;
+    file.id = mesh.id;
+    file.name = mesh.name;
+    const auto vertexBytes = mesh.vertices.size() * sizeof(MeshVertex);
+    const auto indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
+    file.blobs.resize(vertexBytes + indexBytes);
+    if (vertexBytes) std::memcpy(file.blobs.data(), mesh.vertices.data(), vertexBytes);
+    if (indexBytes)
+        std::memcpy(file.blobs.data() + vertexBytes, mesh.indices.data(), indexBytes);
+    Json bounds{{"min", {0.0f, 0.0f, 0.0f}}, {"max", {0.0f, 0.0f, 0.0f}}};
+    if (!mesh.vertices.empty()) {
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds["min"][axis] = mesh.vertices.front().position[axis];
+            bounds["max"][axis] = mesh.vertices.front().position[axis];
+        }
+        for (const auto& vertex : mesh.vertices) {
+            for (int axis = 0; axis < 3; ++axis) {
+                bounds["min"][axis] = std::min(bounds["min"][axis].get<float>(), vertex.position[axis]);
+                bounds["max"][axis] = std::max(bounds["max"][axis].get<float>(), vertex.position[axis]);
+            }
+        }
+    }
+    file.manifest = Json{
+        {"payload", Json{
+            {"primitive", primitiveName(mesh.primitive)},
+            {"vertexCount", mesh.vertices.size()},
+            {"indexCount", mesh.indices.size()},
+            {"vertexStride", sizeof(MeshVertex)},
+            {"indexFormat", "u32"},
+            {"bounds", bounds},
+            {"blobs", Json{
+                {"vertices", blobRange(0, vertexBytes)},
+                {"indices", blobRange(vertexBytes, indexBytes)},
+            }},
+        }},
+    };
+    if (!mesh.sourcePath.empty()) file.manifest["payload"]["sourcePath"] = mesh.sourcePath;
+    return file;
+}
+
+bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& error) {
+    error.clear();
+    if (file.type != AssetFileType::StaticMesh) { error = "The asset is not a static mesh."; return false; }
+    try {
+        const auto& payload = file.manifest.at("payload");
+        const auto vertexCount = payload.at("vertexCount").get<std::size_t>();
+        const auto indexCount = payload.at("indexCount").get<std::size_t>();
+        if (payload.at("vertexStride").get<std::size_t>() != sizeof(MeshVertex)) {
+            error = "Mesh vertex stride is not supported.";
+            return false;
+        }
+        if (payload.at("indexFormat").get<std::string>() != "u32") {
+            error = "Mesh index format is not supported.";
+            return false;
+        }
+        std::vector<std::uint8_t> vertexBytes;
+        std::vector<std::uint8_t> indexBytes;
+        const auto& blobs = payload.at("blobs");
+        if (!readBlob(file, blobs.at("vertices"), sizeof(MeshVertex), vertexCount, vertexBytes, error)) return false;
+        if (!readBlob(file, blobs.at("indices"), sizeof(std::uint32_t), indexCount, indexBytes, error)) return false;
+        MeshAsset loaded;
+        loaded.id = file.id;
+        loaded.name = file.name;
+        loaded.primitive = primitiveFromName(payload.value("primitive", std::string()));
+        loaded.sourcePath = payload.value("sourcePath", std::string());
+        loaded.vertices.resize(vertexCount);
+        loaded.indices.resize(indexCount);
+        if (!vertexBytes.empty()) std::memcpy(loaded.vertices.data(), vertexBytes.data(), vertexBytes.size());
+        if (!indexBytes.empty()) std::memcpy(loaded.indices.data(), indexBytes.data(), indexBytes.size());
+        if (loaded.vertices.empty() || loaded.indices.empty()) {
+            error = "Mesh asset has no geometry.";
+            return false;
+        }
+        mesh = std::move(loaded);
+        return true;
+    } catch (const std::exception& exception) {
+        error = std::string("Mesh payload is invalid: ") + exception.what();
+        return false;
+    }
+}
 } // namespace rae::assets

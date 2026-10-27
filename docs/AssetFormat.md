@@ -4,7 +4,7 @@
 >
 > 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.raasset`**，旧 `.ramat` 只读兼容。
 >
-> 已实现（v1）：容器读写库 `src/Assets/AssetFile.cpp`、材质持久化改为 `.raasset`、`AssetRegistry` 从清单读取类型/GUID/名称；场景格式升到 **v2**，只保存材质 GUID 引用，加载时从 `Content/Materials` 解析，旧 v1 内嵌快照仍可读。
+> 已实现：容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.raasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
 
 ## 目标
 
@@ -108,7 +108,7 @@
 
 1. ✅ `AssetRegistry` + Content 文件夹树 + 场景切换（本次提交）。
 2. 实现 `.raasset` 读写库与单元测试：magic/版本、清单解析、越界块、损坏文件。
-3. OBJ 导入改为生成 `.raasset`；场景引用资产；保留 `.obj` 读取兼容旧场景。
+3. ✅ OBJ 导入生成 `.raasset`（GUID），场景引用资产；保留旧场景 `.obj` 读取兼容。
 4. 材质从 `.ramat` 迁入 `.raasset`：读取旧 `.ramat` 后转存为新容器，材质编辑器改为保存 `.raasset`；旧文件只读兼容一个版本后移除。
 5. 删除场景内嵌的 `materials` / `meshes` 几何，只留引用。
 

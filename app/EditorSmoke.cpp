@@ -216,6 +216,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         v2World.createDefaultScene(v2Assets);
         require(v2World.save(v2Root / "Scenes" / "V2.rascene", v2Assets, v2Error), v2Error);
         assets::AssetLibrary reloadedAssets;
+        reloadedAssets.createDefaults();
         require(reloadedAssets.loadMaterials(v2Root / "Materials", v2Error), v2Error);
         scene::World reloadedWorld;
         require(reloadedWorld.load(v2Root / "Scenes" / "V2.rascene", reloadedAssets, v2Error), v2Error);
@@ -237,8 +238,44 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         require(v2Editor.world().actors.size() == v2World.actors.size() &&
             v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
             "The editor did not load a scene v2 with its GUID materials.");
-    }
+        // Mesh assets: import an OBJ, persist it as a .raasset, then reload both
+        // the geometry and a scene that only references the mesh GUID.
+        {
+            const auto objPath = v2Root / "Meshes" / "tri.obj";
+            std::filesystem::create_directories(objPath.parent_path());
+            std::ofstream obj(objPath, std::ios::binary);
+            obj << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+            obj.close();
+            assets::AssetLibrary meshAssets = v2Assets;
+            assets::AssetId meshId = 0;
+            require(meshAssets.importObj(objPath, meshId, v2Error), v2Error);
+            auto* importedMesh = meshAssets.findMesh(meshId);
+            importedMesh->id = assets::generateAssetId();
+            importedMesh->name = "Tri";
+            const auto newMeshId = importedMesh->id;
+            require(meshAssets.saveMeshes(v2Root / "Meshes", v2Error), v2Error);
+            assets::AssetLibrary meshReloaded = v2Assets;
+            require(meshReloaded.loadMeshes(v2Root / "Meshes", v2Error), v2Error);
+            const auto* reloadedMesh = meshReloaded.findMesh(newMeshId);
+            require(reloadedMesh && reloadedMesh->vertices.size() == 3 && reloadedMesh->indices.size() == 3,
+                "A mesh asset did not round-trip its geometry.");
+            scene::World meshScene;
+            meshScene.createActor("Tri", newMeshId, v2Assets.findMaterial(1)->id);
+            require(meshScene.save(v2Root / "Scenes" / "Mesh.rascene", meshReloaded, v2Error), v2Error);
+            assets::AssetLibrary meshResolver = v2Assets;
+            require(meshResolver.loadMeshes(v2Root / "Meshes", v2Error), v2Error);
+            scene::World meshSceneReloaded;
+            require(meshSceneReloaded.load(v2Root / "Scenes" / "Mesh.rascene", meshResolver, v2Error), v2Error);
+            require(meshSceneReloaded.actors.size() == 1 &&
+                meshResolver.findMesh(meshSceneReloaded.actors.front().mesh.meshId) != nullptr,
+                "A scene v3 lost its mesh reference.");
+            assets::AssetLibrary missingMesh = v2Assets;
+            scene::World rejectedMeshScene;
+            require(!rejectedMeshScene.load(v2Root / "Scenes" / "Mesh.rascene", missingMesh, v2Error) &&
+                !v2Error.empty(), "A scene v3 loaded without its mesh instead of reporting the reference.");
+        }
 
+    }
     {
         // Theme preference round-trips through the per-user file the app reads
         // before creating the ImGui context (palette itself is covered by the
@@ -594,6 +631,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(fixtureAssets.saveMaterials(materialFolder, error), error);
         require(fixtureWorld.save(sceneFile, fixtureAssets, error), error);
         assets::AssetLibrary loaded;
+        loaded.createDefaults();
         require(loaded.loadMaterials(materialFolder, error), error);
         require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
             "Material assets did not preserve independent Two-sided values.");
@@ -673,6 +711,13 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             legacyScene["materials"].push_back({{"id", material->id}, {"name", material->name},
                 {"baseColor", {material->baseColor[0], material->baseColor[1], material->baseColor[2]}},
                 {"roughness", material->roughness}, {"metallic", material->metallic}, {"grid", material->grid}});
+        }
+        // Legacy scenes embedded mesh descriptors (v3 keeps references only).
+        legacyScene["meshes"] = Json::array();
+        for (const auto id : {1, 2, 3}) {
+            const auto* mesh = fixtureAssets.findMesh(id);
+            legacyScene["meshes"].push_back({{"id", mesh->id}, {"name", mesh->name},
+                {"primitive", id == 1 ? "Sphere" : (id == 2 ? "Plane" : "Cube")}});
         }
         const auto legacySceneFile = fixtureRoot / "legacy.rascene";
         writeFixture(legacySceneFile, legacyScene);
@@ -1809,7 +1854,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         // Scene v2 must reference materials instead of embedding payloads; the
         // committed library is the resolver for the reload.
         const auto previewJson = nlohmann::json::parse(contents(previewScene));
-        require(previewJson.at("version") == 2 && previewJson.at("materials").front().size() == 1 &&
+        require(previewJson.at("version").get<int>() >= 2 && previewJson.at("materials").front().size() == 1 &&
             previewJson.at("materials").front().contains("id"),
             "The saved scene still embeds material payloads.");
         restoredAssets = assets;

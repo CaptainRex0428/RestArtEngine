@@ -261,4 +261,66 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
         return false;
     }
 }
+
+bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& error) const {
+    try {
+        std::unordered_set<AssetId> ids;
+        std::vector<std::filesystem::path> written;
+        for (const auto& mesh : meshes) {
+            // Built-in primitives are engine data, not project assets.
+            if (mesh.primitive != MeshPrimitive::Imported) continue;
+            if (!ids.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
+            const auto path = folder / meshAssetFileName(mesh);
+            if (!writeAssetFile(path, makeMeshAssetFile(mesh), error)) return false;
+            written.push_back(path);
+        }
+        std::error_code code;
+        for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
+            if (code) break;
+            if (!entry.is_regular_file(code) || entry.path().extension() != ".raasset") continue;
+            if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
+            AssetFile stale;
+            std::string readError;
+            if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
+            if (stale.type != AssetFileType::StaticMesh || !ids.contains(stale.id)) continue;
+            std::filesystem::remove(entry.path(), code);
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+std::string AssetLibrary::meshAssetFileName(const MeshAsset& mesh) {
+    return sanitizeAssetName(mesh.name) + ".raasset";
+}
+
+bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& error) {
+    try {
+        if (!std::filesystem::is_directory(folder)) { error.clear(); return true; }
+        std::vector<MeshAsset> loaded;
+        std::unordered_set<AssetId> ids;
+        for (const auto& mesh : meshes) ids.insert(mesh.id);
+        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".raasset") continue;
+            AssetFile file;
+            if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
+            if (file.type != AssetFileType::StaticMesh) continue;
+            if (!readAssetFile(entry.path(), file, error)) throw std::runtime_error(error);
+            MeshAsset mesh;
+            if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+            if (!ids.insert(mesh.id).second)
+                throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(entry.path()));
+            loaded.push_back(std::move(mesh));
+        }
+        meshes.insert(meshes.end(), std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
 } // namespace rae::assets

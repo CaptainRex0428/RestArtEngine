@@ -100,9 +100,9 @@ void World::createDefaultScene(const assets::AssetLibrary& library) {
 }
 bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& library, std::string& error) const {
     try {
-        // Version 2 stores material references only: the .raasset files under
-        // Content/Materials are the single source of truth for material data.
-        Json value={{"format","RAEngine.Scene"},{"version",2},{"actors",Json::array()},
+        // Version 3 stores asset references only: materials and meshes live in
+        // .raasset containers under Content, the scene keeps Actor data.
+        Json value={{"format","RAEngine.Scene"},{"version",3},{"actors",Json::array()},
             {"materials",Json::array()},{"meshes",Json::array()}};
         // Written only when non-default so existing sky scenes keep their file shape.
         if (blackBackground) value["background"]="black";
@@ -111,17 +111,10 @@ bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& 
             if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
             value["materials"].push_back({{"id",material.id}});
         }
-        const auto sceneFolder=std::filesystem::absolute(path).parent_path();
         for (const auto& mesh:library.meshes) {
             validateMesh(mesh);
             if (!meshIds.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
-            Json data={{"id",mesh.id},{"name",mesh.name},{"primitive",primitiveName(mesh.primitive)}};
-            if (mesh.primitive==assets::MeshPrimitive::Imported) {
-                const auto source=std::filesystem::absolute(assets::detail::pathFromUtf8(mesh.sourcePath)).lexically_normal();
-                const auto relative=source.lexically_relative(sceneFolder);
-                data["sourcePath"]=assets::detail::pathUtf8(relative.empty()?source:relative);
-            }
-            value["meshes"].push_back(std::move(data));
+            value["meshes"].push_back({{"id",mesh.id}});
         }
         for (const auto& actor:actors) {
             validateActor(actor,library);
@@ -137,7 +130,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
     try {
         const auto value=assets::detail::readJson(path);
         const auto version=value.at("version").get<int>();
-        if (value.at("format")!="RAEngine.Scene" || (version!=1 && version!=2))
+        if (value.at("format")!="RAEngine.Scene" || (version!=1 && version!=2 && version!=3))
             throw std::runtime_error("Unsupported scene format or version.");
         if (!value.at("actors").is_array() || !value.at("materials").is_array() || !value.at("meshes").is_array())
             throw std::runtime_error("Scene actors, materials, and meshes must be arrays.");
@@ -160,7 +153,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
                 staged.materials.push_back(std::move(material));
             }
         } else {
-            // Version 2 references materials that were loaded from Content before
+            // Version 2+ references materials that were loaded from Content before
             // the scene: every reference must resolve to an existing .raasset.
             staged.materials=library.materials;
             for (const auto& item:value.at("materials")) {
@@ -171,29 +164,41 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
                         " that is not loaded from Content/Materials.");
             }
         }
-        const auto sceneFolder=std::filesystem::absolute(path).parent_path();
-        for (const auto& item:value.at("meshes")) {
-            const auto id=readId(item.at("id"));
-            if (!meshIds.insert(id).second) throw std::runtime_error("Duplicate mesh ID.");
-            const auto primitive=item.at("primitive").get<std::string>();
-            assets::MeshAsset mesh;
-            if (primitive=="Imported") {
-                if (id<=3) throw std::runtime_error("Imported mesh IDs 1 to 3 are reserved.");
-                const auto source=item.at("sourcePath").get<std::string>();
-                if (source.empty()) throw std::runtime_error("Imported mesh source path is empty.");
-                // Import into an isolated library: file errors never partially alter the active world.
-                assets::AssetLibrary imported;
-                assets::AssetId importedId=0; std::string importError;
-                if (!imported.importObj(sceneFolder/assets::detail::pathFromUtf8(source),importedId,importError))
-                    throw std::runtime_error(importError);
-                mesh=std::move(imported.meshes.front());
-            } else {
-                const auto reserved=builtinId(primitive);
-                if (reserved==0 || id!=reserved) throw std::runtime_error("Unknown primitive or invalid built-in mesh ID.");
-                mesh=*builtin.findMesh(reserved);
+        if (version==3) {
+            // Meshes are asset references too: Content/Meshes supplies the geometry.
+            staged.meshes=library.meshes;
+            for (const auto& item:value.at("meshes")) {
+                const auto id=readId(item.at("id"));
+                if (!meshIds.insert(id).second) throw std::runtime_error("Duplicate mesh reference.");
+                if (!library.findMesh(id))
+                    throw std::runtime_error("Scene references mesh " + std::to_string(id) +
+                        " that is not loaded from Content/Meshes.");
             }
-            mesh.id=id; mesh.name=item.at("name").get<std::string>();
-            validateMesh(mesh); staged.meshes.push_back(std::move(mesh));
+        } else {
+            const auto sceneFolder=std::filesystem::absolute(path).parent_path();
+            for (const auto& item:value.at("meshes")) {
+                const auto id=readId(item.at("id"));
+                if (!meshIds.insert(id).second) throw std::runtime_error("Duplicate mesh ID.");
+                const auto primitive=item.at("primitive").get<std::string>();
+                assets::MeshAsset mesh;
+                if (primitive=="Imported") {
+                    if (id<=3) throw std::runtime_error("Imported mesh IDs 1 to 3 are reserved.");
+                    const auto source=item.at("sourcePath").get<std::string>();
+                    if (source.empty()) throw std::runtime_error("Imported mesh source path is empty.");
+                    // Import into an isolated library: file errors never partially alter the active world.
+                    assets::AssetLibrary imported;
+                    assets::AssetId importedId=0; std::string importError;
+                    if (!imported.importObj(sceneFolder/assets::detail::pathFromUtf8(source),importedId,importError))
+                        throw std::runtime_error(importError);
+                    mesh=std::move(imported.meshes.front());
+                } else {
+                    const auto reserved=builtinId(primitive);
+                    if (reserved==0 || id!=reserved) throw std::runtime_error("Unknown primitive or invalid built-in mesh ID.");
+                    mesh=*builtin.findMesh(reserved);
+                }
+                mesh.id=id; mesh.name=item.at("name").get<std::string>();
+                validateMesh(mesh); staged.meshes.push_back(std::move(mesh));
+            }
         }
         for (const auto& item:value.at("actors")) {
             Actor actor; actor.id=readId(item.at("id"));
@@ -210,7 +215,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
         // All parsing, external I/O and reference validation are complete before committing.
         *this=std::move(next);
         if (version==1) library=std::move(staged);
-        else library.meshes=std::move(staged.meshes);
+        else if (version==2) library.meshes=std::move(staged.meshes);
         error.clear();return true;
     } catch (const std::exception& e) {error=e.what();return false;}
 }

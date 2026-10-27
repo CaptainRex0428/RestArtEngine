@@ -52,6 +52,11 @@ bool writeAssetFile(const std::filesystem::path& path, const AssetFile& file, st
 [[nodiscard]] AssetFile makeMaterialAssetFile(const MaterialAsset& material);
 bool readMaterialAssetFile(const AssetFile& file, MaterialAsset& material, std::string& error);
 
+// Static mesh payload: vertex/index blobs plus counts. Built-in primitives are
+// stored the same way, so a scene never needs engine-side geometry tables.
+[[nodiscard]] AssetFile makeMeshAssetFile(const MeshAsset& mesh);
+bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& error);
+
 // File name for a material asset: a sanitized display name plus the extension.
 // Collisions are resolved by the caller appending the GUID.
 [[nodiscard]] std::string sanitizeAssetName(std::string_view name);

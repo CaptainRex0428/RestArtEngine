@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <commdlg.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
+#include <RestArtEngine/Assets/AssetFile.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
 #include <iostream>
@@ -126,6 +127,11 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     world_.createDefaultScene(assets_);
     scenePath_ = project_.defaultScene;
     if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    {
+        std::string meshError;
+        const auto meshFolder = project_.contentRoot / "Meshes";
+        if (std::filesystem::is_directory(meshFolder)) (void)assets_.loadMeshes(meshFolder, meshError);
+    }
     registry_.setContentRoot(project_.contentRoot);
     registry_.scan(contentError_);
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
@@ -277,6 +283,9 @@ bool SceneEditor::saveScene() {
     // Persist materials before the scene so its GUID references always resolve.
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
         status_ = "Material save failed: " + error; return false;
+    }
+    if (!assets_.saveMeshes(project_.contentRoot / "Meshes", error)) {
+        status_ = "Mesh save failed: " + error; return false;
     }
     if (!world_.save(scenePath_, assets_, error)) {
         status_ = "Scene save failed: " + error; return false;
@@ -1032,28 +1041,26 @@ void SceneEditor::importMesh() {
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&dialog)) return;
     try {
-        // Validate before copying. The editor owns the imported copy, not the external source.
+        // Validate into an isolated copy, then persist a self-contained .raasset.
         auto proposed = assets_;
-        assets::AssetId id{};
+        assets::AssetId imported = 0;
         std::string error;
-        if (!proposed.importObj(path, id, error)) { status_ = error; return; }
+        if (!proposed.importObj(path, imported, error)) { status_ = error; return; }
+        auto* mesh = proposed.findMesh(imported);
+        mesh->id = assets::generateAssetId();
+        const auto utf8Path = std::filesystem::path(path).generic_u8string();
+        mesh->sourcePath.assign(reinterpret_cast<const char*>(utf8Path.data()), utf8Path.size());
+        imported = mesh->id;
         const auto folder = project_.contentRoot / "Meshes";
         std::filesystem::create_directories(folder);
-        auto destination = folder / std::filesystem::path(path).filename();
-        const bool same = std::filesystem::exists(destination) && std::filesystem::equivalent(path, destination);
-        if (!same) {
-            int suffix = 1;
-            while (std::filesystem::exists(destination))
-                destination = folder / (std::filesystem::path(path).stem().wstring() + L"_" + std::to_wstring(suffix++) + L".obj");
-            std::filesystem::copy_file(path, destination);
-        }
-        const auto utf8Path = destination.generic_u8string();
-        proposed.findMesh(id)->sourcePath.assign(reinterpret_cast<const char*>(utf8Path.data()), utf8Path.size());
-        assets_ = std::move(proposed); selectedMesh_ = id; sceneDirty_ = true;
-        status_ = "OBJ imported. Add an Actor from this mesh to inspect the instance, then save the scene.";
+        if (!proposed.saveMeshes(folder, error)) { status_ = error; return; }
+        assets_ = std::move(proposed);
+        selectedMesh_ = imported;
+        sceneDirty_ = true;
+        refreshContent();
+        status_ = "OBJ imported as a .raasset in Content/Meshes. Add an Actor from this mesh, then save.";
     } catch (const std::exception& error) { status_ = error.what(); }
 }
-
 
 bool SceneEditor::openScene(const std::filesystem::path& path, std::string& error) {
     error.clear();
@@ -1065,6 +1072,14 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     // Parse into isolated objects: a failed load must not disturb the open scene.
     scene::World stagedWorld;
     assets::AssetLibrary stagedAssets;
+    stagedAssets.createDefaults();
+    {
+        std::string assetError;
+        const auto materialFolder = project_.contentRoot / "Materials";
+        const auto meshFolder = project_.contentRoot / "Meshes";
+        if (std::filesystem::is_directory(materialFolder)) (void)stagedAssets.loadMaterials(materialFolder, assetError);
+        if (std::filesystem::is_directory(meshFolder)) (void)stagedAssets.loadMeshes(meshFolder, assetError);
+    }
     if (!stagedWorld.load(path, stagedAssets, error)) return false;
     world_ = std::move(stagedWorld);
     assets_ = std::move(stagedAssets);
@@ -1128,7 +1143,12 @@ void SceneEditor::openAsset(const assets::AssetEntry& entry) {
         else status_ = "Material '" + entry.name + "' belongs to a scene that is not open.";
         break;
     case assets::AssetType::Mesh:
-        status_ = "Imported meshes are loaded by the scene that references them.";
+        if (assets_.findMesh(entry.id)) {
+            selectedMesh_ = entry.id;
+            status_ = "Mesh selected: use Add Actor from mesh.";
+        } else {
+            status_ = "This mesh is not loaded from Content/Meshes.";
+        }
         break;
     default:
         status_ = entry.name + " is consumed by scenes and shader parameters.";

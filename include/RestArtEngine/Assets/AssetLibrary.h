@@ -41,6 +41,11 @@ public:
     bool importObj(const std::filesystem::path& path, AssetId& result, std::string& error);
     bool saveMaterials(const std::filesystem::path& folder, std::string& error) const;
     bool loadMaterials(const std::filesystem::path& folder, std::string& error);
+    // Static meshes are persisted as .raasset containers; built-in primitives stay
+    // procedural and are skipped. Loading keeps the built-ins already present.
+    bool saveMeshes(const std::filesystem::path& folder, std::string& error) const;
+    bool loadMeshes(const std::filesystem::path& folder, std::string& error);
+    [[nodiscard]] static std::string meshAssetFileName(const MeshAsset& mesh);
     // File name used when persisting a material as a .raasset container.
     [[nodiscard]] static std::string materialAssetFileName(const MaterialAsset& material);
 private:
