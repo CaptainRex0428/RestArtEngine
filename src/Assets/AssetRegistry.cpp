@@ -38,6 +38,43 @@ void readMaterialHeader(const std::filesystem::path& path, std::string& name, As
 
 } // namespace
 
+namespace {
+
+// Scene thumbnails are rendered from Actor placements: no GPU pass and no stored
+// image, so they always match the saved layout.
+Thumbnail sceneThumbnail(const std::filesystem::path& path) {
+    try {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) return {};
+        const Json value = Json::parse(stream);
+        if (!value.contains("actors") || !value["actors"].is_array()) return {};
+        std::vector<ScenePreviewBox> boxes;
+        for (const auto& actor : value["actors"]) {
+            if (!actor.contains("transform")) continue;
+            const auto& transform = actor["transform"];
+            if (!transform.contains("position") || !transform["position"].is_array()) continue;
+            ScenePreviewBox box;
+            for (int axis = 0; axis < 3; ++axis)
+                box.position[axis] = transform["position"].at(static_cast<std::size_t>(axis)).get<float>();
+            if (transform.contains("scale") && transform["scale"].is_array()) {
+                for (int axis = 0; axis < 3; ++axis)
+                    box.extent[axis] = std::max(0.25f, transform["scale"].at(static_cast<std::size_t>(axis)).get<float>());
+            }
+            const auto meshId = actor.contains("mesh") && actor["mesh"].contains("meshId")
+                ? actor["mesh"]["meshId"].get<std::uint64_t>() : 0ull;
+            const auto tint = static_cast<std::uint32_t>(meshId % 5);
+            const float colors[5][3] = {{0.62f, 0.70f, 0.82f}, {0.80f, 0.55f, 0.35f}, {0.45f, 0.72f, 0.55f},
+                {0.75f, 0.62f, 0.82f}, {0.72f, 0.72f, 0.42f}};
+            for (int channel = 0; channel < 3; ++channel) box.color[channel] = colors[tint][channel];
+            boxes.push_back(box);
+        }
+        return renderSceneThumbnail(boxes, 64);
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+} // namespace
 const char* assetTypeName(AssetType type) noexcept {
     switch (type) {
     case AssetType::Scene: return "Scene";
@@ -117,6 +154,7 @@ bool AssetRegistry::scan(std::string& error) {
             entry.type = assetTypeFromPath(path);
             if (entry.type == AssetType::Unknown) continue;
         }
+        if (entry.type == AssetType::Scene) entry.thumbnail = sceneThumbnail(path);
         std::error_code sizeCode;
         entry.sizeBytes = static_cast<std::uint64_t>(std::filesystem::file_size(path, sizeCode));
         if (sizeCode) entry.sizeBytes = 0;

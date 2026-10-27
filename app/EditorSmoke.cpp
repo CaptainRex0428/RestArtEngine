@@ -453,6 +453,19 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         editor.selectContentFolder("Meshes/Builtin");
         capture("content_thumbnails_preroll", true);
         capture("content_thumbnails", true);
+        editor.setContentGridView(true);
+        capture("content_grid", true);
+        editor.setContentGridView(true);
+        editor.selectContentFolder("Scenes");
+        capture("content_scenes_preroll", true);
+        capture("content_scenes", true);
+        editor.setContentGridView(false);
+        editor.selectContentFolder("Meshes/Builtin");
+        {
+            const auto* sceneEntry = editor.assetRegistry().find("Scenes/Default.rascene");
+            require(sceneEntry && sceneEntry->thumbnail.valid(),
+                "A scene asset did not get a generated thumbnail.");
+        }
         editor.selectContentFolder(std::string());
         const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.rasset");
         require(cubeEntry && cubeEntry->thumbnail.valid(),

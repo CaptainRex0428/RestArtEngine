@@ -40,6 +40,8 @@ public:
     // Selects a Content folder (relative to the content root, "" = root). Used by
     // the browser breadcrumb and by tests that need a deterministic view.
     void selectContentFolder(std::string folder);
+    // Switches the Content browser between the list and the thumbnail grid.
+    void setContentGridView(bool grid) { contentGridView_ = grid; }
     bool openScene(const std::filesystem::path& path, std::string& error);
     bool createScene(const std::filesystem::path& path, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }
@@ -88,6 +90,7 @@ private:
     void drawAssets();
     void drawFolderTreeNode(const std::string& folder);
     void drawAssetRows();
+    void drawAssetGrid();
     void drawContentDialogs();
     void openAsset(const assets::AssetEntry& entry);
     void requestSceneOpen(const std::filesystem::path& path);
@@ -113,6 +116,7 @@ private:
     bool renameOpen_ = false, newFolderOpen_ = false, deleteOpen_ = false;
     bool sceneSwitchPrompt_ = false;
     std::filesystem::path pendingScenePath_;
+    bool contentGridView_ = false;
     std::string contentError_;
     scene::World world_;
     ViewportInteraction viewport_;

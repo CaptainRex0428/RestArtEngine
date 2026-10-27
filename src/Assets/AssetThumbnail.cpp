@@ -153,4 +153,56 @@ Thumbnail renderMaterialThumbnail(const MaterialAsset& material, std::uint32_t s
     return thumbnail;
 }
 
+
+Thumbnail renderSceneThumbnail(const std::vector<ScenePreviewBox>& boxes, std::uint32_t size) {
+    Thumbnail thumbnail;
+    thumbnail.width = size;
+    thumbnail.height = size;
+    thumbnail.rgba.assign(static_cast<std::size_t>(size) * size * 4, 0);
+    if (size < 4) return thumbnail;
+
+    // Fixed three-quarter view: yaw 35 degrees around Y, then a top-down layout.
+    const float yaw = 0.610865f; // 35 degrees
+    const float cosine = std::cos(yaw), sine = std::sin(yaw);
+    float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
+    std::vector<std::array<float, 4>> projected; // u, v, radius, height
+    projected.reserve(boxes.size());
+    for (const auto& box : boxes) {
+        const float x = box.position[0], z = box.position[2];
+        const float u = x * cosine - z * sine;
+        const float v = x * sine + z * cosine;
+        const float radius = 0.5f * std::max({box.extent[0], box.extent[1], box.extent[2]});
+        projected.push_back({u, v, radius, box.position[1]});
+        minU = std::min(minU, u - radius);
+        maxU = std::max(maxU, u + radius);
+        minV = std::min(minV, v - radius);
+        maxV = std::max(maxV, v + radius);
+    }
+    if (projected.empty()) return thumbnail;
+    const float span = std::max({maxU - minU, maxV - minV, 1e-3f});
+    const float scale = (static_cast<float>(size) - 6.0f) / span;
+    const float centerU = (minU + maxU) * 0.5f;
+    const float centerV = (minV + maxV) * 0.5f;
+
+    // Painter's order: farther boxes first so nearer ones overlap them.
+    std::sort(projected.begin(), projected.end(),
+        [](const auto& left, const auto& right) { return left[1] < right[1]; });
+    std::size_t boxIndex = 0;
+    for (const auto& item : projected) {
+        const auto& source = boxes[std::min(boxIndex++, boxes.size() - 1)];
+        const float centerX = (item[0] - centerU) * scale + static_cast<float>(size) * 0.5f;
+        const float centerY = (item[1] - centerV) * scale + static_cast<float>(size) * 0.5f;
+        const float half = std::clamp(item[2] * scale, 6.0f, static_cast<float>(size) * 0.22f);
+        const float lift = std::clamp(item[3] * 0.25f, -0.2f, 0.3f);
+        for (int y = static_cast<int>(centerY - half); y <= static_cast<int>(centerY + half); ++y) {
+            for (int x = static_cast<int>(centerX - half); x <= static_cast<int>(centerX + half); ++x) {
+                putPixel(thumbnail, x, y,
+                    std::clamp(source.color[0] * (1.0f + lift), 0.0f, 1.0f),
+                    std::clamp(source.color[1] * (1.0f + lift), 0.0f, 1.0f),
+                    std::clamp(source.color[2] * (1.0f + lift), 0.0f, 1.0f));
+            }
+        }
+    }
+    return thumbnail;
+}
 } // namespace rae::assets

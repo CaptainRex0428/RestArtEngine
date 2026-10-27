@@ -6,7 +6,7 @@
 >
 > 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.rasset`**，旧 `.ramat` 只读兼容。
 >
-> 已实现缩略图：保存资产时用 CPU 光栅化生成 64×64 rgba8 预览（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入容器清单；Content 面板按需读取并直接绘制，缺缩略图时回退线框图标。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.rasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
+> 已实现缩略图：保存资产时用 CPU 光栅化生成 64×64 rgba8 预览（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入容器清单；Content 面板按需读取并直接绘制，缺缩略图时回退线框图标；场景缩略图不落盘，由 Actor 位置在扫描时即时渲染。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）；容器读写库 `src/Assets/AssetFile.cpp`；材质与网格都以 `.rasset` 持久化（材质参数在清单、网格几何在数据块），`AssetRegistry` 从清单读类型/GUID/名称；场景格式升到 **v3**，只保存材质与网格的 GUID 引用，加载时从 `Content/Materials`、`Content/Meshes` 解析。旧 v1/v2 场景仍可读。
 
 ## 目标
 

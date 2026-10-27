@@ -1198,6 +1198,10 @@ void SceneEditor::requestSceneOpen(const std::filesystem::path& path) {
 
 void SceneEditor::drawAssets() {
     if (registry_.contentRoot() != project_.contentRoot) refreshContent();
+    if (ImGui::Button("List")) contentGridView_ = false;
+    ImGui::SameLine();
+    if (ImGui::Button("Grid")) contentGridView_ = true;
+    ImGui::SameLine();
     if (ImGui::Button("Import OBJ...")) importMesh();
     ImGui::SameLine();
     if (ImGui::Button("New folder")) { newFolderBuffer_.clear(); newFolderOpen_ = true; }
@@ -1227,13 +1231,13 @@ void SceneEditor::drawAssets() {
         }
     }
 
-    const float browserHeight = std::max(90.0f, ImGui::GetContentRegionAvail().y - 132.0f);
+    const float browserHeight = std::max(90.0f, ImGui::GetContentRegionAvail().y - 118.0f);
     ImGui::BeginChild("##content-folders", ImVec2(190.0f, browserHeight), ImGuiChildFlags_Borders);
     drawFolderTreeNode(std::string());
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("##content-assets", ImVec2(0.0f, browserHeight), ImGuiChildFlags_Borders);
-    drawAssetRows();
+    if (contentGridView_) drawAssetGrid(); else drawAssetRows();
     ImGui::EndChild();
     // In-memory meshes are scene data, not files yet: keep them visible so
     // "Add Actor from mesh" keeps working until the asset format lands.
@@ -1343,6 +1347,66 @@ void SceneEditor::drawAssetRows() {
         ImGui::SetCursorScreenPos(ImVec2(rowMin.x, rowMax.y));
         ImGui::PopID();
     }
+}
+
+void SceneEditor::drawAssetGrid() {
+    const auto entries = registry_.inFolder(contentFolder_);
+    if (entries.empty()) {
+        ImGui::TextDisabled("No assets in this folder. Use Import OBJ or New folder.");
+        return;
+    }
+    // Manual placement: Selectable ignores its size hint, so cells are laid out
+    // from a fixed origin instead of relying on ImGui cursor advance.
+    const float cell = 84.0f;
+    const float spacing = 8.0f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float available = std::max(cell, ImGui::GetContentRegionAvail().x);
+    const int columns = std::max(1, static_cast<int>((available + spacing) / (cell + spacing)));
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto* entry = entries[i];
+        const int column = static_cast<int>(i) % columns;
+        const int row = static_cast<int>(i) / columns;
+        const ImVec2 position{origin.x + column * (cell + spacing), origin.y + row * (cell + spacing)};
+        ImGui::SetCursorScreenPos(position);
+        ImGui::PushID(entry->relativePath.c_str());
+        const bool selected = selectedAsset_ == entry->relativePath;
+        if (ImGui::Selectable("##grid-cell", selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cell, cell))) {
+            selectedAsset_ = entry->relativePath;
+            if (ImGui::IsMouseDoubleClicked(0)) openAsset(*entry);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", entry->name.c_str());
+        if (ImGui::BeginDragDropSource()) {
+            ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
+            ImGui::TextUnformatted(entry->name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginPopupContextItem("##grid-menu")) {
+            if (ImGui::MenuItem("Open")) openAsset(*entry);
+            if (ImGui::MenuItem("Rename")) {
+                renameTarget_ = entry->relativePath;
+                renameBuffer_ = entry->name;
+                renameOpen_ = true;
+            }
+            if (ImGui::MenuItem("Delete")) {
+                deleteTarget_ = entry->relativePath;
+                deleteOpen_ = true;
+            }
+            ImGui::EndPopup();
+        }
+        const float thumbSize = cell - 34.0f;
+        const ImVec2 thumbPos{position.x + (cell - thumbSize) * 0.5f, position.y + 4.0f};
+        if (entry->thumbnail.valid()) {
+            drawThumbnail(draw, thumbPos, thumbSize, entry->thumbnail);
+        } else {
+            drawAssetIcon(draw, ImVec2(position.x + cell * 0.5f, position.y + 4.0f + thumbSize * 0.5f),
+                thumbSize * 0.4f, entry->type,
+                ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+        }
+        ImGui::PopID();
+    }
+    const int rows = (static_cast<int>(entries.size()) + columns - 1) / columns;
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cell + spacing)));
 }
 
 void SceneEditor::drawContentDialogs() {
