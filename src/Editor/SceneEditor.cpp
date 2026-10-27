@@ -769,13 +769,16 @@ void SceneEditor::drawOutliner() {
     bool deleteRequested = false;
     for (auto& actor : world_.actors) {
         const float eyeSize = ImGui::GetTextLineHeight();
+        // Fixed icon column: the eye is horizontally centred in it so all rows
+        // share one visual axis regardless of the glyph width.
+        const float eyeColumn = eyeSize + 14.0f;
         const ImVec2 rowStart = ImGui::GetCursorScreenPos();
-        const ImVec2 eyeCenter{rowStart.x + eyeSize * 0.5f + 2.0f, rowStart.y + eyeSize * 0.5f};
+        const ImVec2 eyeCenter{rowStart.x + eyeColumn * 0.5f, rowStart.y + eyeSize * 0.5f};
         const std::string eyeId = "##visible" + std::to_string(actor.id);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
-        const bool eyeClicked = ImGui::Button(eyeId.c_str(), ImVec2(eyeSize + 6.0f, eyeSize));
+        const bool eyeClicked = ImGui::Button(eyeId.c_str(), ImVec2(eyeColumn, eyeSize));
         ImGui::PopStyleColor(3);
         const bool eyeHovered = ImGui::IsItemHovered();
         if (eyeHovered) {
@@ -785,7 +788,7 @@ void SceneEditor::drawOutliner() {
         drawEyeIcon(ImGui::GetWindowDrawList(), eyeCenter, eyeSize * 0.92f, actor.visible,
             eyeHovered || ImGui::IsItemActive());
         if (eyeClicked) setActorVisible(actor.id, !actor.visible);
-        ImGui::SameLine(0.0f, 6.0f);
+        ImGui::SameLine(0.0f, 8.0f);
         const auto label = actor.name + "##" + std::to_string(actor.id);
         if (!actor.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         if (ImGui::Selectable(label.c_str(), isSelected(actor.id)))
