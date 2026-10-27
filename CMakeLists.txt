@@ -38,6 +38,7 @@ add_executable(RestArtEngine
     src/Renderer/SelectionOutline.cpp
     src/Assets/AssetLibrary.cpp
     src/Assets/AssetRegistry.cpp
+    src/Assets/AssetFile.cpp
     src/Scene/World.cpp
     src/Project/Project.cpp
     src/ImGui/ImGuiLayer.cpp

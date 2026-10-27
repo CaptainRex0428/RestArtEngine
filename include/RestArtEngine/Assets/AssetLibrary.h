@@ -41,6 +41,8 @@ public:
     bool importObj(const std::filesystem::path& path, AssetId& result, std::string& error);
     bool saveMaterials(const std::filesystem::path& folder, std::string& error) const;
     bool loadMaterials(const std::filesystem::path& folder, std::string& error);
+    // File name used when persisting a material as a .raasset container.
+    [[nodiscard]] static std::string materialAssetFileName(const MaterialAsset& material);
 private:
     AssetId nextMeshId_ = 4;
     AssetId nextMaterialId_ = 3;

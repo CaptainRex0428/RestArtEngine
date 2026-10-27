@@ -1,4 +1,5 @@
 #include "RestArtEngine/Assets/AssetLibrary.h"
+#include "RestArtEngine/Assets/AssetFile.h"
 #include "AssetSerialization.h"
 #include <algorithm>
 #include <array>
@@ -173,30 +174,91 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
 bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::string& error) const {
     try {
         std::unordered_set<AssetId> ids;
-        std::vector<std::pair<std::filesystem::path,detail::Json>> files;
-        for (const auto& material:materials) {
+        std::vector<std::filesystem::path> written;
+        for (const auto& material : materials) {
             if (!ids.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
-            files.emplace_back(folder/(std::to_string(material.id)+".ramat"),detail::Json{{"format","RAEngine.Material"},{"version",1},{"material",detail::materialJson(material)}});
+            const auto path = folder / materialAssetFileName(material);
+            if (!writeAssetFile(path, makeMaterialAssetFile(material), error)) return false;
+            written.push_back(path);
         }
-        for (const auto& [path,data]:files) detail::writeJson(path,data);
-        error.clear(); return true;
-    } catch (const std::exception& e) {error=e.what();return false;}
+        // A renamed material writes a new file: drop the previous file that still
+        // carries the same GUID, otherwise the next load reports a duplicate.
+        std::error_code code;
+        for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
+            if (code) break;
+            if (!entry.is_regular_file(code)) continue;
+            const auto extension = entry.path().extension();
+            if (extension != ".raasset" && extension != ".ramat") continue;
+            if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
+            AssetFile stale;
+            std::string readError;
+            if (extension == ".raasset") {
+                if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
+                if (stale.type != AssetFileType::Material || !ids.contains(stale.id)) continue;
+            } else {
+                try {
+                    const auto value = detail::readJson(entry.path());
+                    if (value.at("format") != "RAEngine.Material") continue;
+                    const auto material = detail::readMaterial(value.at("material"));
+                    if (!ids.contains(material.id)) continue;
+                } catch (const std::exception&) { continue; }
+            }
+            std::filesystem::remove(entry.path(), code);
+        }
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
+
+std::string AssetLibrary::materialAssetFileName(const MaterialAsset& material) {
+    return sanitizeAssetName(material.name) + ".raasset";
+}
+
 bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error) {
     try {
-        if (!std::filesystem::is_directory(folder)) throw std::runtime_error("Material directory does not exist: " + detail::pathUtf8(folder));
-        std::vector<MaterialAsset> loaded; std::unordered_set<AssetId> ids;
-        for (const auto& entry:std::filesystem::directory_iterator(folder)) {
-            if (!entry.is_regular_file() || entry.path().extension()!=".ramat") continue;
-            const auto value=detail::readJson(entry.path());
-            if (value.at("format")!="RAEngine.Material" || value.at("version")!=1) throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(entry.path()));
-            auto material=detail::readMaterial(value.at("material"));
-            if (!ids.insert(material.id).second) throw std::runtime_error("Duplicate material ID in directory.");
+        if (!std::filesystem::is_directory(folder))
+            throw std::runtime_error("Material directory does not exist: " + detail::pathUtf8(folder));
+        std::vector<MaterialAsset> loaded;
+        std::unordered_set<AssetId> ids;
+        std::vector<std::filesystem::path> legacy;
+        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+            if (!entry.is_regular_file()) continue;
+            const auto extension = entry.path().extension();
+            if (extension == ".raasset") {
+                AssetFile file;
+                if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
+                if (file.type != AssetFileType::Material) continue;
+                if (!readAssetFile(entry.path(), file, error)) throw std::runtime_error(error);
+                MaterialAsset material;
+                if (!readMaterialAssetFile(file, material, error)) throw std::runtime_error(error);
+                if (!ids.insert(material.id).second)
+                    throw std::runtime_error("Duplicate material GUID in directory: " + detail::pathUtf8(entry.path()));
+                loaded.push_back(std::move(material));
+            } else if (extension == ".ramat") {
+                legacy.push_back(entry.path());
+            }
+        }
+        // Legacy .ramat files load only when the same GUID is not already present
+        // as a .raasset; the next save writes the new container.
+        for (const auto& path : legacy) {
+            const auto value = detail::readJson(path);
+            if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
+                throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(path));
+            auto material = detail::readMaterial(value.at("material"));
+            if (!ids.insert(material.id).second) continue;
             loaded.push_back(std::move(material));
         }
-        if (loaded.empty()) throw std::runtime_error("No .ramat materials found.");
-        std::sort(loaded.begin(),loaded.end(),[](const auto& a,const auto& b){return a.id<b.id;});
-        materials=std::move(loaded); error.clear(); return true;
-    } catch (const std::exception& e) {error=e.what();return false;}
+        if (loaded.empty()) throw std::runtime_error("No .raasset or .ramat materials found.");
+        std::sort(loaded.begin(), loaded.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        materials = std::move(loaded);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 } // namespace rae::assets

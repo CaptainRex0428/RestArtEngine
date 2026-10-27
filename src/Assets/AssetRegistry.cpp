@@ -1,4 +1,5 @@
 #include "RestArtEngine/Assets/AssetRegistry.h"
+#include "RestArtEngine/Assets/AssetFile.h"
 
 #include <algorithm>
 #include <fstream>
@@ -91,19 +92,35 @@ bool AssetRegistry::scan(std::string& error) {
             continue;
         }
         if (!iterator->is_regular_file(code)) continue;
-        const auto type = assetTypeFromPath(path);
-        if (type == AssetType::Unknown) continue;
-
+        if (!iterator->is_regular_file(code)) continue;
+        const auto extension = path.extension();
         AssetEntry entry;
-        entry.type = type;
         entry.path = path;
         entry.relativePath = pathText(path.lexically_relative(contentRoot_));
         entry.folder = pathText(path.parent_path().lexically_relative(contentRoot_));
         entry.name = pathText(path.stem());
+        if (extension == L".raasset") {
+            // The container carries its own type, GUID and display name.
+            AssetFile header;
+            std::string headerError;
+            if (readAssetFileHeader(path, header, headerError)) {
+                entry.id = header.id;
+                if (!header.name.empty()) entry.name = header.name;
+                switch (header.type) {
+                case AssetFileType::Material: entry.type = AssetType::Material; break;
+                case AssetFileType::StaticMesh: entry.type = AssetType::Mesh; break;
+                case AssetFileType::Scene: entry.type = AssetType::Scene; break;
+                default: entry.type = AssetType::Unknown; break;
+                }
+            }
+        } else {
+            entry.type = assetTypeFromPath(path);
+            if (entry.type == AssetType::Unknown) continue;
+        }
         std::error_code sizeCode;
         entry.sizeBytes = static_cast<std::uint64_t>(std::filesystem::file_size(path, sizeCode));
         if (sizeCode) entry.sizeBytes = 0;
-        if (type == AssetType::Material) {
+        if (extension == L".ramat") {
             std::string innerName;
             AssetId innerId = 0;
             readMaterialHeader(path, innerName, innerId);

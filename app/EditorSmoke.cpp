@@ -8,6 +8,7 @@
 #include <imgui_internal.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <RestArtEngine/Assets/AssetRegistry.h>
+#include <RestArtEngine/Assets/AssetFile.h>
 #include <nlohmann/json.hpp>
 #include <DirectXMath.h>
 #include <algorithm>
@@ -559,7 +560,47 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(loaded.loadMaterials(materialFolder, error), error);
         require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
             "Material assets did not preserve independent Two-sided values.");
+        {
+            // .raasset container round-trip and header validation.
+            const auto container = fixtureRoot / "RoundTrip.raasset";
+            const auto* source = fixtureAssets.findMaterial(2);
+            require(source != nullptr, "Container fixture material is missing.");
+            require(assets::writeAssetFile(container, assets::makeMaterialAssetFile(*source), error), error);
+            assets::AssetFile readBack;
+            require(assets::readAssetFile(container, readBack, error), error);
+            require(readBack.type == assets::AssetFileType::Material && readBack.id == source->id &&
+                readBack.name == source->name, "The asset container lost its header fields.");
+            assets::MaterialAsset containerMaterial;
+            require(assets::readMaterialAssetFile(readBack, containerMaterial, error), error);
+            require(containerMaterial.twoSided == source->twoSided &&
+                containerMaterial.name == source->name, "The material payload did not round-trip.");
+            const auto corrupt = fixtureRoot / "Corrupt.raasset";
+            std::filesystem::copy_file(container, corrupt, std::filesystem::copy_options::overwrite_existing);
+            {
+                std::fstream stream(corrupt, std::ios::binary | std::ios::in | std::ios::out);
+                stream.write("XXXX", 4);
+            }
+            assets::AssetFile rejected;
+            require(!assets::readAssetFileHeader(corrupt, rejected, error) && !error.empty(),
+                "A container with a corrupt magic was accepted.");
+        }
         scene::World loadedWorld;
+        {
+            // The registry reads the container header: type, GUID and name come
+            // from the manifest, not from the file extension.
+            assets::AssetRegistry containerRegistry;
+            containerRegistry.setContentRoot(materialFolder);
+            require(containerRegistry.scan(error), error);
+            require(containerRegistry.count(assets::AssetType::Material) == 2,
+                "The registry did not classify .raasset materials.");
+            const auto* sourceMaterial = fixtureAssets.findMaterial(1);
+            const auto* containerEntry = containerRegistry.find(
+                assets::AssetLibrary::materialAssetFileName(*sourceMaterial));
+            require(containerEntry && containerEntry->id == sourceMaterial->id &&
+                containerEntry->type == assets::AssetType::Material &&
+                containerEntry->name == sourceMaterial->name,
+                "The registry did not read the material GUID from the container.");
+        }
         require(loadedWorld.load(sceneFile, loaded, error), error);
         require(!loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
             "Scene material snapshots did not preserve Two-sided values.");
@@ -569,11 +610,18 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             file << value.dump(2) << '\n';
             require(file.good(), "Failed writing an isolated Two-sided fixture.");
         };
+        // Legacy fixtures: remove the new containers so the .ramat path is exercised,
+        // then write the old JSON shape without the Two-sided field.
+        for (const auto& entry : std::filesystem::directory_iterator(materialFolder))
+            if (entry.path().extension() == ".raasset") std::filesystem::remove(entry.path());
         for (const auto id : {1, 2}) {
-            const auto path = materialFolder / (std::to_string(id) + ".ramat");
-            auto legacy = Json::parse(contents(path));
-            legacy["material"].erase("twoSided");
-            writeFixture(path, legacy);
+            const auto* material = fixtureAssets.findMaterial(id);
+            require(material != nullptr, "Legacy fixture material is missing.");
+            const Json legacy{{"format", "RAEngine.Material"}, {"version", 1}, {"material", {
+                {"id", material->id}, {"name", material->name},
+                {"baseColor", {material->baseColor[0], material->baseColor[1], material->baseColor[2]}},
+                {"roughness", material->roughness}, {"metallic", material->metallic}, {"grid", material->grid}}}};
+            writeFixture(materialFolder / (std::to_string(id) + ".ramat"), legacy);
         }
         require(loaded.loadMaterials(materialFolder, error), error);
         require(loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
@@ -1572,7 +1620,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         const auto materialId = materialActor->mesh.materialId;
         const auto committed = *assets.findMaterial(materialId);
         const auto sceneOnDisk = contents(project.defaultScene);
-        const auto materialPath = project.contentRoot / "Materials" / (std::to_string(materialId) + ".ramat");
+        const auto materialPath = project.contentRoot / "Materials" / assets::AssetLibrary::materialAssetFileName(committed);
         const auto materialOnDisk = contents(materialPath);
         const auto shaderVersion = renderer.shaderRevision();
         // IO injection alone cannot validate native HWND dispatch, especially

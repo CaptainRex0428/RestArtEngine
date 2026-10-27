@@ -201,7 +201,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
-Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质 `.ramat`、导入网格 `.obj`、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、相对路径与材质 ID，编辑器在每次文件操作后重建；不读取几何数据。统一自包含资产格式 `.raasset` 的设计见 [AssetFormat.md](AssetFormat.md)（尚未实现）。
+Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质 `.raasset`（旧 `.ramat` 只读兼容）、导入网格 `.obj`、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、相对路径与材质 ID，编辑器在每次文件操作后重建；不读取几何数据。统一自包含资产格式 `.raasset` 的设计见 [AssetFormat.md](AssetFormat.md)（尚未实现）。
 
 当前真实场景渲染只接入 DX11，OpenGL、DX12、Vulkan、Null 的 RHI 仍为骨架。后续支持其他 API 时，在 `Renderer` 中落地资源和命令接口，并保持 Scene / Assets 不依赖具体图形 API。
 
