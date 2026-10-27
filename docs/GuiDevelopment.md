@@ -28,7 +28,7 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 
 ## Scene / Details 信息分工
 
-Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部仅保留 Meshes 资源列表及导入／创建入口，中央视口和右侧设置延续原布局。界面图标统一放在 `assets/icons/<area>/`，命名与绘制规范见该目录 README；Outliner 小眼睛按 20px 渲染，由 `drawEyeIcon` 过程绘制（杏仁眼形 + 实心瞳孔，隐藏时加斜线），同目录 SVG/PNG 为设计源。World Outliner 每行由透明 `Button`（`ImDrawList` 自绘眼睛，可见／隐藏两种状态，隐藏时加斜线）与 `Selectable` 名称组成；眼睛点击走 `setActorVisible`，产生一条可撤销的 Show/Hide 记录，隐藏行的名称用 `TextDisabled` 配色。Scene 只保留场景级参数（工程与场景信息、Actor / Mesh / Material 统计、背景 Sky / Black、Key light 与 Direct-light 阴影方式）；曝光（Exposure）留在 Viewport settings，作为所有光照与后处理之后的最终提亮系数；Actor 实例的全部编辑（名称、可见性、变换、Mesh / Material 分配）都在 Details，并附带该实例的 Mesh 几何与来源、当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
+Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部仅保留 Meshes 资源列表及导入／创建入口，中央视口和右侧设置延续原布局。界面图标统一放在 `assets/icons/<area>/`，命名与绘制规范见该目录 README；Outliner 小眼睛按 20px 渲染，由 `drawEyeIcon` 过程绘制（杏仁眼形 + 实心瞳孔，隐藏时加斜线），同目录 SVG/PNG 为设计源。World Outliner 每行先画 `Selectable`（名称、选中与右键菜单），再用它的行矩形把透明 `Button`（`ImDrawList` 自绘眼睛，可见／隐藏两态，隐藏加斜线）放到同一行左侧，两者共享行高与垂直中心；眼睛点击走 `setActorVisible`，产生一条可撤销的 Show/Hide 记录，隐藏行的名称用 `TextDisabled` 配色。Scene 只保留场景级参数（工程与场景信息、Actor / Mesh / Material 统计、背景 Sky / Black、Key light 与 Direct-light 阴影方式）；曝光（Exposure）留在 Viewport settings，作为所有光照与后处理之后的最终提亮系数；Actor 实例的全部编辑（名称、可见性、变换、Mesh / Material 分配）都在 Details，并附带该实例的 Mesh 几何与来源、当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
 
 选场景／Outliner 的 Actor 显示 Details，浏览／导入 Mesh 资源不改变 Details 目标或强制切页；切页是一次性事件，不按已有选中状态每帧抢焦点。多选标识主实例；无选中、删除后失效选择、缺失 Mesh／Material 均给出明确状态，撤销恢复后重新按 Actor ID 解析。窄 Details 使用纵向信息和换行入口，长来源路径可换行；底部不重复放属性区。
 

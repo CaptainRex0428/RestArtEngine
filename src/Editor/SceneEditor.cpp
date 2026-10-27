@@ -6,6 +6,7 @@
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
+#include <iostream>
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
@@ -774,38 +775,49 @@ void SceneEditor::drawOutliner() {
     ImGui::Separator();
     ImGui::BeginChild("Actor list", {0, 0});
     bool deleteRequested = false;
+    // One icon column per window: 20px rows keep the eye legible and give the
+    // label a stable left edge.
+    const float eyeSize = std::max(18.0f, ImGui::GetTextLineHeight() + 4.0f);
+    const float eyeColumn = eyeSize + 14.0f;
     for (auto& actor : world_.actors) {
-        const float eyeSize = std::max(18.0f, ImGui::GetTextLineHeight() + 4.0f);
-        // Fixed icon column: the eye is horizontally centred in it so all rows
-        // share one visual axis regardless of the glyph width.
-        const float eyeColumn = eyeSize + 14.0f;
         const ImVec2 rowStart = ImGui::GetCursorScreenPos();
-        const ImVec2 eyeCenter{rowStart.x + eyeColumn * 0.5f, rowStart.y + eyeSize * 0.5f};
+        const float startX = ImGui::GetCursorPosX();
+        const auto label = actor.name + "##" + std::to_string(actor.id);
+        // The Selectable defines the row: it owns the label, the selection and the
+        // context menu. The eye is placed afterwards inside the same row rect so
+        // the two share one vertical centre regardless of padding changes.
+        ImGui::SetCursorPosX(startX + eyeColumn + 8.0f);
+        if (!actor.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        if (ImGui::Selectable(label.c_str(), isSelected(actor.id)))
+            selectActor(actor.id, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift);
+        if (!actor.visible) ImGui::PopStyleColor();
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        const ImVec2 rowMax = ImGui::GetItemRectMax();
+        const float rowHeight = std::max(1.0f, rowMax.y - rowMin.y);
+        ImGui::SetCursorScreenPos(ImVec2(rowMin.x - eyeColumn - 8.0f, rowMin.y));
         const std::string eyeId = "##visible" + std::to_string(actor.id);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
-        const bool eyeClicked = ImGui::Button(eyeId.c_str(), ImVec2(eyeColumn, eyeSize));
+        const bool eyeClicked = ImGui::Button(eyeId.c_str(), ImVec2(eyeColumn, rowHeight));
         ImGui::PopStyleColor(3);
+        const ImVec2 eyeMin = ImGui::GetItemRectMin();
+        const ImVec2 eyeMax = ImGui::GetItemRectMax();
+        const ImVec2 eyeCenter{(eyeMin.x + eyeMax.x) * 0.5f, (eyeMin.y + eyeMax.y) * 0.5f};
         const bool eyeHovered = ImGui::IsItemHovered();
         if (eyeHovered) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             ImGui::SetTooltip(actor.visible ? "Hide actor" : "Show actor");
         }
-        drawEyeIcon(ImGui::GetWindowDrawList(), eyeCenter, eyeSize * 0.92f, actor.visible,
+        drawEyeIcon(ImGui::GetWindowDrawList(), eyeCenter, rowHeight * 0.86f, actor.visible,
             eyeHovered || ImGui::IsItemActive());
         if (eyeClicked) setActorVisible(actor.id, !actor.visible);
-        ImGui::SameLine(0.0f, 8.0f);
-        const auto label = actor.name + "##" + std::to_string(actor.id);
-        if (!actor.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        if (ImGui::Selectable(label.c_str(), isSelected(actor.id), ImGuiSelectableFlags_None, ImVec2(0.0f, eyeSize)))
-            selectActor(actor.id, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift);
-        if (!actor.visible) ImGui::PopStyleColor();
-        if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::BeginPopupContextItem(label.c_str())) {
             selectedActor_ = actor.id;
             if (ImGui::MenuItem("Delete Actor", "Delete")) deleteRequested = true;
             ImGui::EndPopup();
         }
+        ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowMax.y + ImGui::GetStyle().ItemSpacing.y));
     }
     ImGui::EndChild();
     if (deleteRequested) deleteSelectedActor();
