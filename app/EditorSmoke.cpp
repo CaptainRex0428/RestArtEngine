@@ -192,7 +192,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         // still resolves from the new folder.
         require(assets::moveContentEntry(root, "Scenes/Test.rascene", "Scenes/Sub", testError), testError);
         scene::World movedWorld;
-        assets::AssetLibrary movedAssets;
+        assets::AssetLibrary movedAssets = testAssets;
         require(movedWorld.load(root / "Scenes" / "Sub" / "Test.rascene", movedAssets, testError), testError);
         require(!movedWorld.actors.empty() && movedAssets.findMesh(movedWorld.actors.front().mesh.meshId) != nullptr,
             "A moved scene lost its imported mesh reference.");
@@ -626,8 +626,17 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(loaded.loadMaterials(materialFolder, error), error);
         require(loaded.findMaterial(1)->twoSided && loaded.findMaterial(2)->twoSided,
             "Legacy materials without Two-sided lost their previous double-sided visibility.");
+        // Scene v2 stores references only; the legacy path is still exercised by
+        // writing a v1 scene with embedded material payloads and no Two-sided field.
         auto legacyScene = Json::parse(contents(sceneFile));
-        for (auto& material : legacyScene["materials"]) material.erase("twoSided");
+        legacyScene["version"] = 1;
+        legacyScene["materials"] = Json::array();
+        for (const auto id : {1, 2}) {
+            const auto* material = fixtureAssets.findMaterial(id);
+            legacyScene["materials"].push_back({{"id", material->id}, {"name", material->name},
+                {"baseColor", {material->baseColor[0], material->baseColor[1], material->baseColor[2]}},
+                {"roughness", material->roughness}, {"metallic", material->metallic}, {"grid", material->grid}});
+        }
         const auto legacySceneFile = fixtureRoot / "legacy.rascene";
         writeFixture(legacySceneFile, legacyScene);
         require(loadedWorld.load(legacySceneFile, loaded, error), error);
@@ -1760,6 +1769,13 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(world.save(previewScene, assets, error), error);
         scene::World restoredWorld;
         assets::AssetLibrary restoredAssets;
+        // Scene v2 must reference materials instead of embedding payloads; the
+        // committed library is the resolver for the reload.
+        const auto previewJson = nlohmann::json::parse(contents(previewScene));
+        require(previewJson.at("version") == 2 && previewJson.at("materials").front().size() == 1 &&
+            previewJson.at("materials").front().contains("id"),
+            "The saved scene still embeds material payloads.");
+        restoredAssets = assets;
         require(restoredWorld.load(previewScene, restoredAssets, error), error);
         require(restoredAssets.findMaterial(materialId)->roughness == committed.roughness,
             "Saving a scene serialized the unapplied live material preview.");

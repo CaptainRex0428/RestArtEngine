@@ -87,16 +87,29 @@ void World::createDefaultScene() {
     findActor(sphere)->transform.position[1]=1;
     createActor("Ground",2,2);
 }
+void World::createDefaultScene(const assets::AssetLibrary& library) {
+    const auto pick = [&library](std::string_view name, assets::AssetId fallback) {
+        for (const auto& material : library.materials)
+            if (material.name == name) return material.id;
+        return library.materials.empty() ? fallback : library.materials.front().id;
+    };
+    actors.clear(); nextActorId_=1;
+    const auto sphere=createActor("Sphere",1,pick("Copper",1));
+    findActor(sphere)->transform.position[1]=1;
+    createActor("Ground",2,pick("Ground",2));
+}
 bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& library, std::string& error) const {
     try {
-        Json value={{"format","RAEngine.Scene"},{"version",1},{"actors",Json::array()},
+        // Version 2 stores material references only: the .raasset files under
+        // Content/Materials are the single source of truth for material data.
+        Json value={{"format","RAEngine.Scene"},{"version",2},{"actors",Json::array()},
             {"materials",Json::array()},{"meshes",Json::array()}};
         // Written only when non-default so existing sky scenes keep their file shape.
         if (blackBackground) value["background"]="black";
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         for (const auto& material:library.materials) {
             if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
-            value["materials"].push_back(assets::detail::materialJson(material));
+            value["materials"].push_back({{"id",material.id}});
         }
         const auto sceneFolder=std::filesystem::absolute(path).parent_path();
         for (const auto& mesh:library.meshes) {
@@ -123,7 +136,9 @@ bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& 
 bool World::load(const std::filesystem::path& path, assets::AssetLibrary& library, std::string& error) {
     try {
         const auto value=assets::detail::readJson(path);
-        if (value.at("format")!="RAEngine.Scene" || value.at("version")!=1) throw std::runtime_error("Unsupported scene format or version.");
+        const auto version=value.at("version").get<int>();
+        if (value.at("format")!="RAEngine.Scene" || (version!=1 && version!=2))
+            throw std::runtime_error("Unsupported scene format or version.");
         if (!value.at("actors").is_array() || !value.at("materials").is_array() || !value.at("meshes").is_array())
             throw std::runtime_error("Scene actors, materials, and meshes must be arrays.");
         assets::AssetLibrary builtin; builtin.createDefaults();
@@ -136,10 +151,25 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
             else if (background!="sky") throw std::runtime_error("Unsupported scene background: "+background);
         }
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
-        for (const auto& item:value.at("materials")) {
-            auto material=assets::detail::readMaterial(item);
-            if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
-            staged.materials.push_back(std::move(material));
+        if (version==1) {
+            // Legacy scenes embedded a material snapshot; loading one replaces the
+            // library, matching the old behaviour for existing project files.
+            for (const auto& item:value.at("materials")) {
+                auto material=assets::detail::readMaterial(item);
+                if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
+                staged.materials.push_back(std::move(material));
+            }
+        } else {
+            // Version 2 references materials that were loaded from Content before
+            // the scene: every reference must resolve to an existing .raasset.
+            staged.materials=library.materials;
+            for (const auto& item:value.at("materials")) {
+                const auto id=readId(item.at("id"));
+                if (!materialIds.insert(id).second) throw std::runtime_error("Duplicate material reference.");
+                if (!library.findMaterial(id))
+                    throw std::runtime_error("Scene references material " + std::to_string(id) +
+                        " that is not loaded from Content/Materials.");
+            }
         }
         const auto sceneFolder=std::filesystem::absolute(path).parent_path();
         for (const auto& item:value.at("meshes")) {
@@ -178,7 +208,10 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
             validateActor(actor,staged); next.actors.push_back(std::move(actor));
         }
         // All parsing, external I/O and reference validation are complete before committing.
-        *this=std::move(next); library=std::move(staged); error.clear();return true;
+        *this=std::move(next);
+        if (version==1) library=std::move(staged);
+        else library.meshes=std::move(staged.meshes);
+        error.clear();return true;
     } catch (const std::exception& e) {error=e.what();return false;}
 }
 } // namespace rae::scene

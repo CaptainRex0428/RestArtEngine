@@ -4,7 +4,7 @@
 >
 > 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.raasset`**，旧 `.ramat` 只读兼容。
 >
-> 已实现（v1）：容器读写库 `src/Assets/AssetFile.cpp`、材质持久化改为 `.raasset`、`AssetRegistry` 从清单读取类型/GUID/名称。**场景仍内嵌材质快照**，改为纯引用是下一步。
+> 已实现（v1）：容器读写库 `src/Assets/AssetFile.cpp`、材质持久化改为 `.raasset`、`AssetRegistry` 从清单读取类型/GUID/名称；场景格式升到 **v2**，只保存材质 GUID 引用，加载时从 `Content/Materials` 解析，旧 v1 内嵌快照仍可读。
 
 ## 目标
 
@@ -114,7 +114,7 @@
 
 ## 未决问题
 
-- 场景引用从“内嵌材质快照”迁移为“GUID + 路径引用”的具体时机（需要同时改 `World::save/load` 与编辑器加载顺序）。
+- 网格仍内嵌在场景（内置描述 + OBJ 相对路径），迁移为 `.raasset` 网格资产是下一步。
 - 缩略图生成时机（保存时渲染 vs 编辑器后台）。
 - 是否压缩数据块（deflate）以及 4 字节对齐要求。
 - 二进制与 JSON 混合的调试体验：是否需要 `--dump-asset` 工具输出清单。

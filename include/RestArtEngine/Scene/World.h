@@ -32,6 +32,9 @@ public:
     Actor* findActor(ActorId id);
     const Actor* findActor(ActorId id) const;
     void createDefaultScene();
+    // Same layout, but material references come from the loaded library so a
+    // project with GUID materials still produces a valid scene.
+    void createDefaultScene(const assets::AssetLibrary& library);
     bool save(const std::filesystem::path& path, const assets::AssetLibrary& assets, std::string& error) const;
     bool load(const std::filesystem::path& path, assets::AssetLibrary& assets, std::string& error);
 private:
