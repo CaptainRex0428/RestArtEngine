@@ -719,6 +719,17 @@ int wmain(int argc, wchar_t** argv) {
         if (selfTest) { vsync = false; frameLimit = 14; }
         rae::project::ProjectPaths project;
         std::string error;
+        // Self-tests run against a throwaway copy so they never write into the
+        // user project; the copy is removed when the process exits.
+        std::filesystem::path isolatedProjectRoot;
+        struct TempProjectCleanup {
+            std::filesystem::path path;
+            ~TempProjectCleanup() {
+                if (path.empty()) return;
+                std::error_code cleanupCode;
+                std::filesystem::remove_all(path, cleanupCode);
+            }
+        } tempProjectCleanup;
         if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             if (!runProjectManager(engineRoot, project, gc, error)) {
@@ -730,6 +741,19 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
+            if (editorSelfTest) {
+                std::error_code copyCode;
+                isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
+                    ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
+                std::filesystem::remove_all(isolatedProjectRoot, copyCode);
+                std::filesystem::copy(project.projectRoot, isolatedProjectRoot,
+                    std::filesystem::copy_options::recursive |
+                    std::filesystem::copy_options::overwrite_existing, copyCode);
+                if (copyCode)
+                    throw std::runtime_error("Failed to copy the project for the self-test: " + copyCode.message());
+                project = rae::editor::resolveProject(isolatedProjectRoot, project.engineRoot);
+                tempProjectCleanup.path = isolatedProjectRoot;
+            }
         }
         const HINSTANCE instance = GetModuleHandleW(nullptr);
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
