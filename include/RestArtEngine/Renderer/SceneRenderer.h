@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 struct HWND__;
 struct ID3D11Device;
@@ -25,6 +26,9 @@ struct RendererCacheStats {
 };
 
 enum class RenderPath { Forward, Deferred };
+
+// Each tool owns its preview image; rendering another slot never replaces it.
+enum class PreviewSlot { MaterialEditor, AssetDetails, SceneThumbnail };
 
 // Direct-light shadowing strategy. Raster variants share the depth resource;
 // GTAO and ContactShadow additionally use the Deferred G-buffer and fall back
@@ -114,16 +118,25 @@ public:
     // Renders a single lit sphere with the given material parameters into an
     // offscreen texture and returns it for UI display. The main scene targets are
     // reused and then overwritten by the frame's regular render call.
-    bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error);
+    bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size, std::string& error,
+                               PreviewSlot slot = PreviewSlot::MaterialEditor);
     // Same preview target with an explicit orbit camera for the material ball.
     bool renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
-                               float yaw, float pitch, float distance, std::string& error);
+                               float yaw, float pitch, float distance, std::string& error,
+                               PreviewSlot slot = PreviewSlot::MaterialEditor);
     // Renders the given scene into the preview target with a camera framed to the
     // visible actors; used to produce scene thumbnails.
     bool renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
-                            std::uint32_t size, std::string& error);
+                            std::uint32_t size, std::string& error,
+                            PreviewSlot slot = PreviewSlot::SceneThumbnail);
+    // Borrowed SRV until a successful resize of the same slot or shutdown.
+    // Requested size is bounded to the available scene target dimensions.
+    [[nodiscard]] void* previewTexture(PreviewSlot slot) const;
+    bool readPreviewPixels(PreviewSlot slot, std::vector<std::uint8_t>& pixels,
+                           std::uint32_t& width, std::uint32_t& height, std::string& error) const;
+    // Compatibility helpers always address the MaterialEditor slot.
     [[nodiscard]] void* materialPreviewTexture() const;
-    // Copies the last preview image back to CPU memory (RGBA8) for tests.
+    // Copies the material editor preview image back to CPU memory (RGBA8).
     bool readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
                                    std::uint32_t& height, std::string& error) const;
     // Optional per-frame material override, matched by asset ID across raster
@@ -173,7 +186,7 @@ private:
 private:
     bool renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
                             const assets::AssetLibrary& assets, const assets::MaterialAsset* materialOverride,
-                            std::uint32_t size, std::string& error);
+                            std::uint32_t size, std::string& error, PreviewSlot slot);
 };
 
 } // namespace rae::renderer

@@ -312,13 +312,16 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11InfoQueue> infoQueue;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
-        ComPtr<ID3D11Texture2D> sceneTexture;
-        ComPtr<ID3D11Texture2D> previewTexture;
-        ComPtr<ID3D11ShaderResourceView> previewView;
-        std::uint32_t previewSize = 0;
-        bool previewSceneReady = false;
-        scene::World previewWorld;
-        assets::AssetLibrary previewAssets;
+    ComPtr<ID3D11Texture2D> sceneTexture;
+    struct PreviewImage {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> view;
+        std::uint32_t size = 0;
+    };
+    std::array<PreviewImage, 3> previews;
+    bool previewSceneReady = false;
+    scene::World previewWorld;
+    assets::AssetLibrary previewAssets;
     ComPtr<ID3D11ShaderResourceView> sceneView;
     ComPtr<ID3D11DepthStencilView> depth;
     ComPtr<ID3D11ShaderResourceView> depthView;
@@ -935,15 +938,24 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
 bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
                                        const assets::AssetLibrary& assets,
                                        const assets::MaterialAsset* materialOverride,
-                                       std::uint32_t size, std::string& error) {
+                                       std::uint32_t size, std::string& error, PreviewSlot slot) {
     error.clear();
     auto& state = *impl_;
-    if (!state.device || !state.sceneTexture || !state.backbuffer) {
+    if (!state.device || !state.context || !state.sceneTexture || !state.backbuffer) {
         error = "Renderer is not initialized.";
         return false;
     }
-    if (size < 16) size = 16;
-    if (!state.previewTexture || state.previewSize != size) {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= state.previews.size()) { error = "Invalid preview slot."; return false; }
+    D3D11_TEXTURE2D_DESC sceneDescription{};
+    state.sceneTexture->GetDesc(&sceneDescription);
+    const auto maximumSize = std::min(sceneDescription.Width, sceneDescription.Height);
+    if (maximumSize < 16) { error = "Scene target is too small for a preview."; return false; }
+    size = std::clamp(size, 16u, maximumSize);
+    auto& image = state.previews[slotIndex];
+    Impl::PreviewImage candidate;
+    const bool replaceImage = !image.texture || image.size != size;
+    if (replaceImage) {
         D3D11_TEXTURE2D_DESC description{};
         description.Width = size;
         description.Height = size;
@@ -953,34 +965,41 @@ bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scen
         description.SampleDesc.Count = 1;
         description.Usage = D3D11_USAGE_DEFAULT;
         description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        state.previewTexture.Reset();
-        state.previewView.Reset();
-        if (failed(state.device->CreateTexture2D(&description, nullptr, &state.previewTexture),
+        if (failed(state.device->CreateTexture2D(&description, nullptr, &candidate.texture),
                    "Create preview texture", error)) return false;
-        if (failed(state.device->CreateShaderResourceView(state.previewTexture.Get(), nullptr, &state.previewView),
+        if (failed(state.device->CreateShaderResourceView(candidate.texture.Get(), nullptr, &candidate.view),
                    "Create preview view", error)) return false;
-        state.previewSize = size;
+        candidate.size = size;
     }
-    if (!render(settings, world, assets, error, materialOverride)) return false;
+    auto previewSettings = settings;
+    previewSettings.viewportWidth = static_cast<int>(size);
+    previewSettings.viewportHeight = static_cast<int>(size);
+    if (!render(previewSettings, world, assets, error, materialOverride)) return false;
     const D3D11_BOX region{0, 0, 0, size, size, 1};
-    state.context->CopySubresourceRegion(state.previewTexture.Get(), 0, 0, 0, 0,
+    state.context->CopySubresourceRegion(replaceImage ? candidate.texture.Get() : image.texture.Get(), 0, 0, 0, 0,
         state.sceneTexture.Get(), 0, &region);
+    if (replaceImage) image = std::move(candidate);
     return true;
 }
 
 bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
-                                          std::string& error) {
-    return renderMaterialPreview(material, size, 0.65f, 0.18f, 3.0f, error);
+                                          std::string& error, PreviewSlot slot) {
+    return renderMaterialPreview(material, size, 0.65f, 0.18f, 3.0f, error, slot);
 }
 
 bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
-                                          float yaw, float pitch, float distance, std::string& error) {
+                                          float yaw, float pitch, float distance, std::string& error, PreviewSlot slot) {
     auto& state = *impl_;
     if (!state.previewSceneReady) {
         state.previewAssets = state.defaultAssets;
         state.previewWorld.createActor("Preview", 1, 1);
         state.previewSceneReady = true;
     }
+    // The tool library is isolated from the user's committed assets. Both the
+    // actor reference and library entry must match the requested material ID:
+    // resolveMaterial deliberately requires an existing matching asset.
+    state.previewWorld.actors.front().mesh.materialId = material.id;
+    state.previewAssets.materials.assign(1, material);
     SceneSettings settings;
     settings.editorViewport = false;
     settings.offscreenTarget = true;
@@ -998,11 +1017,11 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
     settings.cameraTarget[0] = 0.0f;
     settings.cameraTarget[1] = 0.0f;
     settings.cameraTarget[2] = 0.0f;
-    return renderPreviewFrame(settings, state.previewWorld, state.previewAssets, &material, size, error);
+    return renderPreviewFrame(settings, state.previewWorld, state.previewAssets, &material, size, error, slot);
 }
 
 bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
-                                       std::uint32_t size, std::string& error) {
+                                       std::uint32_t size, std::string& error, PreviewSlot slot) {
     error.clear();
     float minimum[3] = {1e30f, 1e30f, 1e30f};
     float maximum[3] = {-1e30f, -1e30f, -1e30f};
@@ -1044,24 +1063,38 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
     settings.cameraYaw = 0.65f;
     settings.cameraPitch = 0.32f;
     settings.cameraDistance = std::clamp(radius * 2.6f, 1.5f, 80.0f);
-    return renderPreviewFrame(settings, world, assets, nullptr, size, error);
+    return renderPreviewFrame(settings, world, assets, nullptr, size, error, slot);
+}
+
+void* SceneRenderer::previewTexture(PreviewSlot slot) const {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    return slotIndex < impl_->previews.size() ? impl_->previews[slotIndex].view.Get() : nullptr;
 }
 
 void* SceneRenderer::materialPreviewTexture() const {
-    return impl_->previewView.Get();
+    return previewTexture(PreviewSlot::MaterialEditor);
 }
-
 
 bool SceneRenderer::readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
                                               std::uint32_t& height, std::string& error) const {
+    return readPreviewPixels(PreviewSlot::MaterialEditor, pixels, width, height, error);
+}
+
+bool SceneRenderer::readPreviewPixels(PreviewSlot slot, std::vector<std::uint8_t>& pixels,
+                                      std::uint32_t& width, std::uint32_t& height, std::string& error) const {
     error.clear();
+    pixels.clear();
+    width = height = 0;
     auto& state = *impl_;
-    if (!state.device || !state.context || !state.previewTexture) {
-        error = "No material preview has been rendered yet.";
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= state.previews.size()) { error = "Invalid preview slot."; return false; }
+    const auto& image = state.previews[slotIndex];
+    if (!state.device || !state.context || !image.texture) {
+        error = "No image has been rendered in this preview slot yet.";
         return false;
     }
     D3D11_TEXTURE2D_DESC description{};
-    state.previewTexture->GetDesc(&description);
+    image.texture->GetDesc(&description);
     D3D11_TEXTURE2D_DESC stagingDescription = description;
     stagingDescription.Usage = D3D11_USAGE_STAGING;
     stagingDescription.BindFlags = 0;
@@ -1070,7 +1103,7 @@ bool SceneRenderer::readMaterialPreviewPixels(std::vector<std::uint8_t>& pixels,
     ComPtr<ID3D11Texture2D> staging;
     if (failed(state.device->CreateTexture2D(&stagingDescription, nullptr, &staging),
                "Create preview staging texture", error)) return false;
-    state.context->CopyResource(staging.Get(), state.previewTexture.Get());
+    state.context->CopyResource(staging.Get(), image.texture.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (failed(state.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped),
                "Map preview staging texture", error)) return false;
@@ -1102,7 +1135,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(state.width) - viewportX) : static_cast<int>(state.width);
     const int viewportHeight = settings.viewportHeight > 0 ? std::clamp(settings.viewportHeight, 1, static_cast<int>(state.height) - viewportY) : static_cast<int>(state.height);
     const float pitch = std::clamp(settings.cameraPitch, SceneSettings::minPitch, SceneSettings::maxPitch);
-    const float distance = std::clamp(settings.cameraDistance, 2.0f, 30.0f);
+    const float requestedDistance = std::isfinite(settings.cameraDistance) ? settings.cameraDistance : 6.0f;
+    const float distance = settings.offscreenTarget ? std::clamp(requestedDistance, 1.5f, 80.0f)
+                                                  : std::clamp(requestedDistance, 2.0f, 30.0f);
     const float yaw = settings.cameraYaw;
     const XMVECTOR cameraTargetVec = XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 1.0f);
     const XMVECTOR eye = XMVectorAdd(cameraTargetVec, XMVectorSet(
@@ -1111,7 +1146,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         distance * std::cos(pitch) * std::cos(yaw), 0.0f));
     const XMMATRIX view = XMMatrixLookAtRH(eye, cameraTargetVec, XMVectorSet(0, 1, 0, 0));
     const XMMATRIX projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.0f),
-        static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight), 0.05f, 100.0f);
+        static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight), 0.05f,
+        settings.offscreenTarget ? std::max(100.0f, distance * 2.0f) : 100.0f);
     const bool wantsRayScene = settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay;
     state.raySceneActive = wantsRayScene;
     if (wantsRayScene) state.rayLastUsed = Impl::Clock::now();
