@@ -213,7 +213,11 @@ Apply 编译当前在内存里的编辑内容，外部编辑器保存的内容�
 
 F11 进入视口全屏：主窗口无边框覆盖所在显示器，隐藏主工作区面板，已经打开的独立材质窗口仍可使用。再次 F11、Esc 或 F1 恢复之前的窗口与 UI 显示状态；如果进入全屏前已隐藏 UI，退出后仍保持隐藏。Esc 在普通窗口模式仍是请求关闭。上述快捷键只在主系统窗口具有焦点且没有文本输入时触发；材质窗口的键盘操作不会关闭引擎或切换主窗口全屏。该模式不改变其他工作区面板的 Dock 范围，也不代表独占显示模式。
 
-F2 切换 Forward / Deferred；F3 开关解析光追效果；F1 隐藏 / 显示面板；右键拖动视口旋转相机，滚轮缩放；F9 截图。Lit 显示完整光照，Unlit 显示不受光照影响的材质本色并保留曝光和色调映射，Albedo 用于检查不经过曝光和色调映射的基础颜色。Scene 的 Shadow method 可选择 2x2 PCF、硬比较、3x3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追或禁用阴影；PCSS 复用现有深度图并执行 blocker search 与百分比渐进滤波，CSM 使用两个方向光级联切片改善近景和远景的深度分配，GTAO 与接触阴影使用延迟 G-buffer，前向路径回退到普通深度阴影。
+F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板；右键拖动视口旋转相机，滚轮缩放；F9 截图。Lit 显示完整光照，Unlit 显示不受光照影响的材质本色并保留曝光和色调映射，Albedo 用于检查不经过曝光和色调映射的基础颜色。Scene 的 Shadow method 可选择 2x2 PCF、硬比较、3x3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追或禁用阴影；这些是光栅设置，硬件模式单独控制方向光阴影。PCSS 复用现有深度图并执行 blocker search 与百分比渐进滤波，CSM 使用两个方向光级联切片改善近景和远景的深度分配，GTAO 与接触阴影使用延迟 G-buffer，前向路径回退到普通深度阴影。
+
+`Project → Project Settings...` 打开独立配置窗，左侧 Rendering 导航提供硬件光追总开关、反射和阴影选项。修改实时生效，`Save project settings`／`Save All` 保存到当前工程；未保存配置参与退出提示。设备支持、用户请求和实际生效状态分别显示，不支持时保留请求并说明原因。顶部原 `Ray tracing` 复选框已移除，解析式反射位于配置页的 Compatibility preview，作为会话选项保留。硬件要求、源码和边界见 [硬件光追](HardwareRayTracing.md)。
+
+同页的 `GI method → Progressive path tracing` 启用渐进式 GI，并自动开启硬件依赖；可设置每帧采样量、目标样本和最大反弹数，查看进度或点击 Restart accumulation。静止后画面逐步收敛，调参自动触发新历史；曝光不重置累积。当前没有降噪，完整行为和项目字段见 [全局光照](GlobalIllumination.md)。
 
 解析光追同时追踪内置 Sphere / Plane / Cube 与通用 MeshAsset。前 32 个内置对象使用精确解析求交，超出的内置对象、OBJ 和未来网格类型通过结构化三角形缓冲参与环境反射、相互反射和阴影。通用路径不设置引擎层三角形预算，实际可用范围取决于 D3D11 资源创建和显存。它仍是 GPU 解析求交，不是 DXR。
 

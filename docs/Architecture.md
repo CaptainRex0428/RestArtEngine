@@ -206,9 +206,9 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
-当前真实场景渲染只接入 DX11，OpenGL、DX12、Vulkan、Null 的 RHI 仍为骨架。后续支持其他 API 时，在 `Renderer` 中落地资源和命令接口，并保持 Scene / Assets 不依赖具体图形 API。
+当前编辑器和光栅场景使用 DX11，独立 DX12／DXR 1.1 通道已通过共享图像接入场景。OpenGL、DX12、Vulkan、Null 的通用 RHI 仍为骨架，不能切换完整场景后端。原生 DXR 资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，Scene / Assets 不依赖具体图形 API；细节见 [HardwareRayTracing](HardwareRayTracing.md)。
 
-光追开关当前使用 GPU Shader 中的解析求交：内置 Sphere / Plane / Cube 使用精确解析路径，OBJ、未来 MeshAsset 以及超过 32 个内置对象的部分使用 `StructuredBuffer<RayTriangle>` 三角形路径。每帧按 Actor 变换上传全部可见网格三角形，不设置引擎级三角形预算；仅在数量无法用 D3D11 结构化缓冲区的字节数或元素数表示时拒绝分配，避免静默丢弃场景几何。没有 DXR、硬件 RT 管线、通用网格 BVH 或路径追踪。节点材质编辑、纹理资产、加速结构和其他后端是后续扩展。
+解析式兼容模式使用 GPU Shader 求交：内置 Sphere / Plane / Cube 使用精确解析路径，其余网格使用 `StructuredBuffer<RayTriangle>` 遍历。硬件模式将全部可见网格纳入 GPU BLAS／TLAS，提供逐帧预览和渐进式路径追踪，保留材质草稿与双面语义。`GlobalIlluminationSettings`／`Status` 独立表达算法请求与实际能力；当前 DXR 路径计算漫反射／GGX 多次反弹，累积线性 HDR，曝光在显示阶段处理。配置入口为 `Project → Project Settings... → Rendering`，请求值存于 `.raproject` 的可选 `rendering` 对象；历史失效及预算见 [GlobalIllumination](GlobalIllumination.md)。尚无降噪、发光／透明材质及其他后端 GI。
 
 ### 编辑器选中描边
 
@@ -220,7 +220,7 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 
 渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`（默认品牌橙 `#FD7804`，也可改用主题强调色或自定义颜色）、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色或自定义颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，无选中时不执行该通道，也不分配 mask；初始化仍会创建描边 Shader、常量缓冲与状态。描边颜色不写入场景资产，也不参与撤销或保存。
 
-工具预览按实际材质 ID 绑定，并使用独立的材质窗口／资产详情／场景缩略图纹理槽；工具相机采用 1.5–80 的距离范围。预览生命周期及取景上限见 [渲染源码基线](RenderingDevelopment.md#当前源码基线与缺口)。描边 Shader 与其余六个场景 Shader 共用完整候选发布与失败保留流程。
+工具预览按实际材质 ID 绑定，并使用独立的材质窗口／资产详情／场景缩略图纹理槽；工具相机采用 1.5–80 的距离范围。预览生命周期及取景上限见 [渲染源码基线](RenderingDevelopment.md#当前源码基线与缺口)。描边 Shader 与其余六个场景 Shader 共用完整候选发布与失败保留流程；硬件模式同时验证并发布 DXR 计算管线。工具预览不消费主场景硬件执行或诊断捕获。
 
 ## 开发指引
 

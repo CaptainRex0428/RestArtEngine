@@ -55,6 +55,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - 延迟路径写三个 G-buffer（Albedo/Roughness、World Normal/Metallic、World Position/Coverage），再执行全屏光照。
 - 9 种直接光阴影方案：2×2 PCF、硬比较、3×3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追、禁用。全部共享同一张 2048² 深度图，靠常量位切换。
 - 解析式 GPU 光追：内置 Sphere / Plane / Cube 用精确求交，其余网格走 `StructuredBuffer` 三角形路径，用于阴影与反射。**不是 DXR**。
+- 硬件光追：独立 DX12／DXR 1.1 通道执行场景反射和方向光阴影，在 `Project → Project Settings... → Rendering` 配置并随项目保存；设备能力、数据契约及边界见 [硬件光追](docs/HardwareRayTracing.md)。
+- 渐进式 GI：Lambert／GGX 路径采样、多次反弹、物体间颜色传递、粗糙反射与线性 HDR 累积；采样预算、失效规则及限制见 [全局光照](docs/GlobalIllumination.md)。
 - 单方向光 + 程序化环境光；GGX 高光、Schlick Fresnel、ACES 近似色调映射。
 - 检查视图：Lit、Unlit、Albedo、World normals、World position、Roughness、Metallic、Specular F0、Linear depth、Direct diffuse / specular。
 - `Debug` 中的 Profiler 提供 CPU Trace / JSON 导出与异步 GPU Pass 计时；Frame Inspector 冻结单帧事件和真实渲染资源，支持通道及原始像素检查。具体范围见 [诊断工具](docs/Diagnostics.md)。
@@ -185,7 +187,7 @@ Premake 还会在项目 `.idea/` 下生成 RestArtEngine 与 RefreshConfig 运�
 | G / H | 切换选中描边 / 切换选中 Actor 可见性（H 可撤销） |
 | F1 | 显示 / 隐藏控制面板 |
 | F2 | 切换 Forward / Deferred |
-| F3 | 开关光追阴影与反射 |
+| F3 | 打开项目配置 |
 | F11 | 视口全屏（无边框覆盖显示器并隐藏编辑器面板；再按或 Esc 恢复） |
 | F9 / Screenshot 按钮 | 保存当前画面 |
 | Esc / 关闭窗口 | 退出（有未保存修改时会询问） |
@@ -351,6 +353,11 @@ RestArtEngine.exe --frames N               # 运行 N 帧后退出（配合 --ca
 RestArtEngine.exe --capture-dir <path>     # 批量运行／自测的截图输出目录
 RestArtEngine.exe --self-test              # 渲染自测
 RestArtEngine.exe --editor-self-test       # 编辑器自测
+RestArtEngine.exe --hardware-rt-self-test  # 硬件执行、参数、Shader 与项目配置自测
+RestArtEngine.exe --gi-self-test           # 间接颜色、收敛与历史生命周期自测
+RestArtEngine.exe --path-tracing           # 本次启动启用渐进式路径追踪 GI
+RestArtEngine.exe --hardware-rt            # 本次启动请求硬件光追
+RestArtEngine.exe --no-hardware-rt         # 本次启动关闭硬件光追
 RestArtEngine.exe --gc-self-test           # 资源回收与重建、GC 设置界面自测
 RestArtEngine.exe --gc-interval 30         # GC 检查间隔（秒），也可在 UI 中保存设置
 RestArtEngine.exe --frames 8 --capture-temp # 最后帧截图写入受管临时缓存
@@ -361,8 +368,8 @@ RestArtEngine.exe --help
 
 ## 当前边界
 
-- 图形 API 只有 **DirectX 11**；`RenderBackend` 中的 OpenGL / DX12 / Vulkan / Null 仍是生命周期骨架。
-- 光追是**解析求交 + 三角形遍历**，没有 DXR、硬件 RT 核心、通用网格 BVH 或路径追踪。
+- 编辑器与光栅场景使用 **DirectX 11**，硬件光追使用同适配器 DX12／DXR 1.1 通道；`RenderBackend` 中的 OpenGL / DX12 / Vulkan / Null 仍是生命周期骨架，尚不支持完整场景后端切换。
+- 同时保留解析求交／三角形遍历、硬件预览与渐进式路径追踪 GI；尚无降噪、透明／折射、发光材质或其他实时 GI 算法。
 - 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
 - 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称及 Mesh / Material 引用修改尚未纳入撤销历史；可见性开关和 H 已支持撤销。

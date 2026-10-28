@@ -96,6 +96,8 @@ RestArtEngine.panels.ini
 !/docs/GuiDevelopment.md
 !/docs/ProjectManagement.md
 !/docs/RenderingDevelopment.md
+!/docs/HardwareRayTracing.md
+!/docs/GlobalIllumination.md
 !/docs/Diagnostics.md
 !/docs/ShadowMethods.md
 !/docs/UndoTransactions.md

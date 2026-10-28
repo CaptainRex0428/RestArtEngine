@@ -50,6 +50,8 @@ cmake --build --preset windows-debug --target RestArtEngine
 
 `RestArtEngine` 是唯一的构建目标，输出 `RestArtEngine.exe`。它同时是 Project Manager 和编辑器。
 
+硬件光追使用 DXC 运行时。CMake 从 Windows SDK 查找配套的 x64 `dxcompiler.dll`／`dxil.dll`，复制到程序目录并随 install 分发；可用 `DXC_RUNTIME_DIRECTORY` 指定来源。Premake 使用 `scripts/Copy-DxcRuntime.ps1` 同步复制。缺失时编辑器仍能使用 DX11，并在项目配置页说明硬件光追不可用，见 [硬件光追](HardwareRayTracing.md)。
+
 无参数启动时，程序显示 Project Manager。工程管理器可以创建工程、打开 `.raproject`、列出 `Projects/` 下的示例工程（`Sandbox`、`RayTracing_Simple`），或从 `--project` 参数直接进入工程：
 
 ```powershell
