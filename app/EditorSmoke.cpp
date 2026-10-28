@@ -141,7 +141,17 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     std::filesystem::create_directories(output);
     auto& world = editor.world();
     auto& assets = editor.assets();
+    require(assets.findMaterial(assets::EngineDefaultMaterialId) &&
+        assets.findMaterial(assets::EngineDefaultMaterialId)->origin == assets::AssetOrigin::Engine,
+        "Editor initialization did not mount the engine default material.");
+    const auto engineMaterialPath = project.engineRoot / "Content/Materials/DefaultMaterial.rasset";
+    const auto engineMaterialBytes = contents(engineMaterialPath);
+    const auto mountEngineMaterials = [&] {
+        std::string mountError;
+        require(assets.loadEngineMaterials(project.engineRoot / "Content/Materials", mountError), mountError);
+    };
     world.createDefaultScene(); assets.createDefaults();
+    mountEngineMaterials();
     // Command registry: the same ids back the buttons, the Edit menu and the
     // keyboard, and enablement tracks editor state.
     require(editor.commands().contains("actor.delete") && editor.commands().contains("edit.undo"),
@@ -185,8 +195,8 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             std::find(folders.begin(), folders.end(), "Scenes") != folders.end(),
             "The asset registry did not list content folders.");
         const auto* materialEntry = registry.find("Materials/1.ramat");
-        require(materialEntry && materialEntry->id == 7 && materialEntry->name == "RegistryMat",
-            "The registry did not read the material header.");
+        require(materialEntry && materialEntry->id == 7 && materialEntry->name == "1",
+            "The registry did not preserve the material GUID and display filename.");
 
         // Moving a scene re-bases its relative OBJ reference so the imported mesh
         // still resolves from the new folder.
@@ -236,8 +246,12 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         v2Project.defaultScene = v2Root / "Scenes" / "V2.rascene";
         rae::editor::SceneEditor v2Editor;
         require(v2Editor.initialize(v2Project, renderer, v2Error), v2Error);
+        assets::AssetQuery v2MaterialQuery;
+        v2MaterialQuery.type = assets::AssetType::Material;
+        v2MaterialQuery.recursive = true;
         require(v2Editor.world().actors.size() == v2World.actors.size() &&
-            v2Editor.assetRegistry().count(assets::AssetType::Material) == 2,
+            v2Editor.assetRegistry().query(v2MaterialQuery).size() == 2 &&
+            v2Editor.assets().findMaterial(assets::EngineDefaultMaterialId),
             "The editor did not load a scene v2 with its GUID materials.");
         // Built-in primitives are generated as .rasset files the first time a
         // project opens; later runs reuse them and never duplicate the files.
@@ -328,6 +342,13 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             require(meshSceneReloaded.actors.size() == 1 &&
                 meshResolver.findMesh(meshSceneReloaded.actors.front().mesh.meshId) != nullptr,
                 "A scene v3 lost its mesh reference.");
+            auto importedProject = v2Project;
+            importedProject.defaultScene = v2Root / "Scenes" / "Mesh.rascene";
+            rae::editor::SceneEditor importedEditor;
+            require(importedEditor.initialize(importedProject, renderer, v2Error), v2Error);
+            require(importedEditor.world().actors.size() == 1 &&
+                importedEditor.world().actors.front().mesh.meshId == newMeshId,
+                "Initial editor load did not resolve a scene v3 imported mesh from Content.");
             assets::AssetLibrary missingMesh = v2Assets;
             scene::World rejectedMeshScene;
             require(!rejectedMeshScene.load(v2Root / "Scenes" / "Mesh.rascene", missingMesh, v2Error) &&
@@ -449,6 +470,32 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         require(renderer.present(false, error), error);
     };
     {
+        // View the gizmo from the opposite side to inspect auto-flipped axes.
+        const float originalYaw = settings.cameraYaw;
+        const auto originalPreferences = imgui::uiPreferences();
+        const auto gizmoPreferencesPath = output / "gizmo-preferences.ini";
+        { std::ofstream legacy(gizmoPreferencesPath); legacy << "theme=black\n"; }
+        require(imgui::loadUiPreferences(gizmoPreferencesPath).gizmoNegativeAxisHints,
+            "UI preferences without the gizmo option should default to negative-axis hints enabled.");
+        imgui::uiPreferences().gizmoNegativeAxisHints = false;
+        settings.cameraYaw = -0.65f;
+        capture("gizmo_solid_negative_axes_preroll", true);
+        capture("gizmo_solid_negative_axes", true);
+        imgui::uiPreferences().gizmoNegativeAxisHints = true;
+        imgui::saveUiPreferences(gizmoPreferencesPath, imgui::uiPreferences());
+        imgui::uiPreferences() = imgui::loadUiPreferences(gizmoPreferencesPath);
+        require(imgui::uiPreferences().gizmoNegativeAxisHints, "Enabled negative-axis hints did not persist.");
+        capture("gizmo_hatched_negative_axes", true);
+        require(scenePixels(output / "gizmo_solid_negative_axes.bmp", settings) !=
+            scenePixels(output / "gizmo_hatched_negative_axes.bmp", settings),
+            "Enabling negative-axis hints did not change the displayed gizmo.");
+        imgui::uiPreferences().gizmoNegativeAxisHints = false;
+        imgui::saveUiPreferences(gizmoPreferencesPath, imgui::uiPreferences());
+        require(!imgui::loadUiPreferences(gizmoPreferencesPath).gizmoNegativeAxisHints,
+            "Disabled negative-axis hints did not persist.");
+        capture("gizmo_solid_negative_axes_restored", true);
+        imgui::uiPreferences() = originalPreferences;
+        settings.cameraYaw = originalYaw;
         // Content browser with thumbnails: the first frame builds the layout, the
         // second one captures the panels.
         editor.selectContentFolder("Meshes/Builtin");
@@ -468,11 +515,13 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             capture("asset_details_mesh", true);
             { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Sphere###AssetDetails") != nullptr,
                 "The asset details window did not open for a mesh asset."); }
-            editor.showAssetDetails("Scenes/Default.rscene");
+            editor.showAssetDetails("Scenes/Default.rascene");
             capture("asset_details_scene_preroll", true);
-            capture("asset_details_scene", true);
+            capture("asset_details_scene", true, true);
             { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Default###AssetDetails") != nullptr,
                 "The asset details window did not open for a scene asset."); }
+            require(renderedUiText.find("Scenes/Default.rascene") != std::string::npos,
+                "Asset Details did not switch from the mesh to the requested scene.");
         }
         editor.selectContentFolder("Meshes/Builtin");
         {
@@ -484,6 +533,68 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.rasset");
         require(cubeEntry && cubeEntry->thumbnail.valid(),
             "The generated built-in mesh thumbnail is missing from the registry.");
+        const auto selectedBeforeBrowsing = editor.selectedActor();
+        editor.closeAssetDetails();
+        editor.selectContentFolder("Meshes/Builtin");
+        require(editor.navigateContentUp() && editor.contentFolder() == "Meshes",
+            "Content Up did not select the parent directory.");
+        require(editor.navigateContentBack() && editor.contentFolder() == "Meshes/Builtin",
+            "Content Back did not restore the previous directory.");
+        require(editor.navigateContentForward() && editor.contentFolder() == "Meshes",
+            "Content Forward did not restore the next directory.");
+        editor.selectContentFolder("");
+        editor.setContentRecursive(true);
+        editor.setContentTypeFilter(assets::AssetType::Mesh);
+        editor.setContentSearch("sPhErE");
+        const auto sphereResults = editor.visibleContentEntries();
+        require(!sphereResults.empty() && std::all_of(sphereResults.begin(), sphereResults.end(), [](const auto* entry) {
+            return entry->type == assets::AssetType::Mesh;
+        }), "Recursive Content search did not combine case-insensitive search with the type filter.");
+        editor.setContentGridView(true);
+        capture("content_search_mesh", true);
+        editor.setContentTypeFilter(assets::AssetType::Material);
+        require(editor.visibleContentEntries().empty(), "Content type filter did not exclude mesh search results.");
+        capture("content_empty_results", true);
+        editor.setContentSearch("");
+        editor.setContentTypeFilter(assets::AssetType::Unknown);
+        editor.setContentRecursive(false);
+        editor.setContentSort(assets::AssetSort::Name);
+        capture("content_root_folders", true);
+        editor.selectContentFolder("Meshes/Builtin");
+        {
+            ImGuiContextScope active(context);
+            const auto originalTheme = imgui::currentTheme();
+            for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+                imgui::setTheme(theme);
+                editor.setContentGridView(true);
+                capture(theme == imgui::EditorTheme::Black ? "content_browser_black" : "content_browser_blue", true);
+                editor.setContentGridView(false);
+                capture(theme == imgui::EditorTheme::Black ? "content_list_black" : "content_list_blue", true);
+                // Mixed types in one view make semantic accents and the selected
+                // row/card distinguishable in actual screenshots of both themes.
+                editor.selectContentFolder("");
+                editor.setContentRecursive(true);
+                // Every asset path has an extension; this search suppresses
+                // folder cards so all available file types fit the palette view.
+                editor.setContentSearch(".");
+                editor.setContentSort(assets::AssetSort::Type);
+                editor.selectContentAsset("Scenes/Default.rascene");
+                editor.setContentGridView(true);
+                capture(theme == imgui::EditorTheme::Black ? "content_type_colors_black" : "content_type_colors_blue", true);
+                editor.setContentGridView(false);
+                capture(theme == imgui::EditorTheme::Black ? "content_type_colors_list_black" : "content_type_colors_list_blue", true);
+                editor.setContentSearch("");
+                editor.setContentRecursive(false);
+                editor.setContentSort(assets::AssetSort::Name);
+                editor.selectContentFolder("Meshes/Builtin");
+            }
+            imgui::setTheme(originalTheme);
+        }
+        require(editor.selectedActor() == selectedBeforeBrowsing,
+            "Content navigation or filtering changed the selected Actor.");
+        editor.setContentGridView(true);
+        editor.selectContentFolder("");
+        std::cout << "PASS: Content navigation history, recursive search, type filters and independent Actor selection.\n";
     }
         {
             assets::Thumbnail directThumb;
@@ -857,6 +968,8 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         // GPU material preview: the offscreen sphere must be lit by the draft color
         // and change when the draft changes.
         assets::MaterialAsset previewMaterial = *assets.findMaterial(1);
+        // A preview must use its own material ID, not assume the first library material.
+        previewMaterial.id = 0x123456789abcdef;
         previewMaterial.baseColor[0] = 0.9f;
         previewMaterial.baseColor[1] = 0.1f;
         previewMaterial.baseColor[2] = 0.1f;
@@ -878,6 +991,33 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(red[0] > 30 && red[0] > red[1],
             std::string("The GPU material preview is not lit by the draft base color. rgb=") +
                 std::to_string(red[0]) + "," + std::to_string(red[1]) + "," + std::to_string(red[2]));
+        const auto* materialTexture = renderer.materialPreviewTexture();
+        auto detailsMaterial = previewMaterial;
+        detailsMaterial.baseColor[0] = 0.1f;
+        detailsMaterial.baseColor[1] = 0.9f;
+        require(renderer.renderMaterialPreview(detailsMaterial, 96, error, renderer::PreviewSlot::AssetDetails), error);
+        require(renderer.previewTexture(renderer::PreviewSlot::AssetDetails) != materialTexture &&
+            renderer.materialPreviewTexture() == materialTexture,
+            "Asset Details replaced the material editor preview texture.");
+        std::vector<std::uint8_t> detailsPixels, preservedPixels;
+        require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, detailsPixels,
+            previewWidth, previewHeight, error), error);
+        const auto detailsCenter = (48u * 96u + 48u) * 4u;
+        require(previewWidth == 96 && previewHeight == 96 &&
+            detailsPixels[detailsCenter + 1] > detailsPixels[detailsCenter] + 20,
+            "Asset Details did not retain its own green preview.");
+        require(renderer.renderScenePreview(world, assets, 128, error), error);
+        require(renderer.readMaterialPreviewPixels(preservedPixels, previewWidth, previewHeight, error), error);
+        require(previewWidth == 64 && preservedPixels == redPixels &&
+            renderer.materialPreviewTexture() == materialTexture,
+            "Rendering another preview consumer changed the material editor image.");
+        require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, preservedPixels,
+            previewWidth, previewHeight, error), error);
+        require(preservedPixels == detailsPixels, "Scene thumbnail generation changed Asset Details pixels.");
+        require(renderer.renderMaterialPreview(detailsMaterial, 128, error, renderer::PreviewSlot::AssetDetails), error);
+        require(renderer.readMaterialPreviewPixels(preservedPixels, previewWidth, previewHeight, error), error);
+        require(preservedPixels == redPixels && renderer.materialPreviewTexture() == materialTexture,
+            "Resizing Asset Details invalidated the material editor preview.");
         previewMaterial.baseColor[0] = 0.1f;
         previewMaterial.baseColor[1] = 0.9f;
         previewMaterial.baseColor[2] = 0.1f;
@@ -904,7 +1044,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(renderer.renderScenePreview(world, assets, 64, error), error);
         std::vector<std::uint8_t> scenePixels;
         std::uint32_t sceneWidth = 0, sceneHeight = 0;
-        require(renderer.readMaterialPreviewPixels(scenePixels, sceneWidth, sceneHeight, error), error);
+        require(renderer.readPreviewPixels(renderer::PreviewSlot::SceneThumbnail, scenePixels, sceneWidth, sceneHeight, error), error);
         std::size_t brightPixels = 0;
         for (std::size_t index = 0; index + 3 < scenePixels.size(); index += 4)
             if (scenePixels[index] + scenePixels[index + 1] + scenePixels[index + 2] > 60) ++brightPixels;
@@ -1023,6 +1163,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
 
     // Restore default content for a useful editor screenshot.
     world.createDefaultScene(); assets.createDefaults();
+    mountEngineMaterials();
     // Command registry: the same ids back the buttons, the Edit menu and the
     // keyboard, and enablement tracks editor state.
     require(editor.commands().contains("actor.delete") && editor.commands().contains("edit.undo"),
@@ -1267,6 +1408,19 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     require(settings.viewportHeight > initialHeight + 80,
         "Undocking the bottom panel did not expand the scene viewport.");
     capture("dock_floating", true);
+    {
+        ImGuiContextScope active(context);
+        auto* floatingHost = content->DockNode ? content->DockNode->HostWindow : content;
+        require(floatingHost != nullptr, "Floating Content has no host window.");
+        const auto originalSize = floatingHost->Size;
+        ImGui::SetWindowSize(floatingHost, ImVec2(440, 360), ImGuiCond_Always);
+        editor.selectContentFolder("Meshes/Builtin");
+        editor.setContentGridView(true);
+        capture("content_narrow_preroll", true);
+        capture("content_narrow", true);
+        ImGui::SetWindowSize(floatingHost, originalSize, ImGuiCond_Always);
+        capture("content_size_restored", true);
+    }
 
     const auto verifyLayoutRoundtrip = [&](const char* filename) {
         ImGuiContextScope active(context);
@@ -1546,24 +1700,43 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             " scrollY=" + std::to_string(window->Scroll.y) + "/" + std::to_string(window->ScrollMax.y) +
             " viewport=" + std::to_string(window->ViewportId) +
             " navWindow=" + (context->NavWindow ? context->NavWindow->Name : "<none>"));
-        auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
-        ImGui::ScrollToRectEx(window, rect, ImGuiScrollFlags_KeepVisibleEdgeY);
-        capture("material_locate", true);
-        return ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+        for (int attempt = 0; attempt != 4; ++attempt) {
+            const auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+            ImGui::ScrollToRectEx(window, rect, ImGuiScrollFlags_KeepVisibleEdgeY);
+            capture("material_locate", true);
+            const auto current = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+            if (context->NavId == id && window->InnerRect.Contains(current.GetCenter())) return current;
+            ImGui::FocusWindow(window);
+            ImGui::SetNavID(id, ImGuiNavLayer_Main, window->NavRootFocusScopeId, ImRect());
+            capture("material_locate", true);
+        }
+        throw std::runtime_error(std::string("Editor control is still clipped after revealing it: ") + window->Name);
     };
     {
         const auto findChild = [&](const char* parent, const char* label) {
             for (auto* window : context->Windows)
-                if (window->Active && window->ParentWindow && window->ParentWindow->ID == ImHashStr(parent) &&
-                    std::strstr(window->Name, label)) return window;
+                if (window->Active && std::strstr(window->Name, label))
+                    for (auto* ancestor = window->ParentWindow; ancestor; ancestor = ancestor->ParentWindow)
+                        if (ancestor->ID == ImHashStr(parent)) return window;
             throw std::runtime_error(std::string("Selection test cannot find child: ") + parent + "/" + label);
         };
         const auto clickMesh = [&](assets::AssetId id) {
             const auto* mesh = assets.findMesh(id);
             require(mesh != nullptr, "Mesh selection test fixture is missing.");
-            auto* library = findChild("Content & Editors", "Mesh library");
-            const auto label = mesh->name + "##" + std::to_string(id);
-            click(itemRect(library, library->GetID(label.c_str())).GetCenter());
+            const auto& entries = editor.assetRegistry().entries();
+            const auto found = std::find_if(entries.begin(), entries.end(), [id](const auto& entry) {
+                return entry.type == assets::AssetType::Mesh && entry.id == id;
+            });
+            require(found != entries.end(), "Mesh selection test asset is absent from Content.");
+            editor.selectContentFolder(found->folder);
+            editor.setContentSearch("");
+            editor.setContentTypeFilter(assets::AssetType::Unknown);
+            editor.setContentGridView(false);
+            capture("content_click_preroll", true);
+            auto* library = findChild("Content & Editors", "##content-assets");
+            const auto assetId = ImHashStr(found->relativePath.c_str(), 0, library->ID);
+            const auto rowId = ImHashStr("##asset-row", 0, assetId);
+            click(itemRect(library, rowId).GetCenter());
         };
         const auto captureInspectorThemes = [&](const char* prefix) {
             ImGuiContextScope active(context);
@@ -1605,6 +1778,13 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         capture("instance_details_content_independent", true, true);
         require(editor.selectedActor() == 1 && findWindow("Scene")->DockId == findWindow("Details")->DockId,
             "Content browsing changed the scene Actor or inspector tab group.");
+        const auto actorsBeforeContentDelete = world.actors.size();
+        input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Delete, true); };
+        capture("content_delete_key_down", true);
+        input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Delete, false); };
+        capture("content_delete_key_up", true, true);
+        require(world.actors.size() == actorsBeforeContentDelete && editor.selectedActor() == 1,
+            "Delete while browsing Content deleted the scene Actor.");
         const auto* instanceMesh = assets.findMesh(world.findActor(1)->mesh.meshId);
         const auto vertices = std::string("Vertices: ") + std::to_string(instanceMesh->vertices.size());
         const auto triangles = std::string("Triangles: ") + std::to_string(instanceMesh->indices.size() / 3);
@@ -1680,6 +1860,9 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             click(dockTabCenter(details));
         click(itemRect(details, details->GetID("Edit assigned material")).GetCenter());
         capture("material_opened", true);
+        const auto* reopened = findWindow("Material Editor###MaterialWorkspace");
+        require(reopened && reopened->Active && reopened->Viewport && reopened->Viewport->PlatformHandle,
+            "The material entry click did not reopen a live platform window.");
     };
     auto* materialWindow = findWindow("Material Editor###MaterialWorkspace");
     require(!materialWindow || !materialWindow->Active,
@@ -2199,9 +2382,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     saveMaterialCapture("shader_native.bmp");
     const auto buttonRow = [&]() {
         const auto* bar = tabBar();
-        return ImVec2(bar->Window->WorkRect.Min.x + 45,
-            bar->BarRect.Max.y + context->Style.ItemSpacing.y * 2 + context->FontSize +
-            (context->FontSize + context->Style.FramePadding.y * 2) * .5f);
+        return itemRect(bar->Window, ImHashStr("Apply / Compile", 0, bar->SelectedTabId)).GetCenter();
     };
     const auto replaceDraft = [&](const std::string& source) {
         ImGuiWindow* textWindow = nullptr;
@@ -2272,6 +2453,187 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         input.events = [key](ImGuiIO& io) { io.AddKeyEvent(key, false); };
         capture("ui_interaction", true);
     };
+    {
+        // Drag actual Content widgets through ImGui's source/target delivery
+        // path. No synthetic payload or direct actor-creation callback is used.
+        const auto savedWorld = world;
+        const auto savedSettings = settings;
+        const auto savedFolder = editor.contentFolder();
+        const auto savedAsset = editor.selectedContentAsset();
+        const auto cameraUnchanged = [&](const renderer::SceneSettings& before) {
+            require(settings.cameraYaw == before.cameraYaw && settings.cameraPitch == before.cameraPitch &&
+                settings.cameraDistance == before.cameraDistance &&
+                std::equal(std::begin(settings.cameraTarget), std::end(settings.cameraTarget),
+                    std::begin(before.cameraTarget)), "A Content asset drag changed the scene camera.");
+        };
+        const auto assetPoint = [&](const std::string& path, bool grid) {
+            const auto* entry = editor.assetRegistry().find(path);
+            require(entry != nullptr, "Content drag fixture is absent from the asset registry: " + path);
+            const auto folder = entry->folder;
+            const auto name = entry->name;
+            const auto type = entry->type;
+            editor.selectContentFolder(folder);
+            editor.setContentSearch(name);
+            editor.setContentTypeFilter(type);
+            editor.setContentRecursive(false);
+            editor.setContentGridView(grid);
+            editor.selectContentAsset(path);
+            capture("content_drag_source_layout", true);
+            capture("content_drag_source_layout", true);
+            ImGuiWindow* browser = nullptr;
+            for (auto* window : context->Windows)
+                if (window->Active && std::strstr(window->Name, "##content-assets")) browser = window;
+            require(browser != nullptr, "Content drag fixture has no asset child window.");
+            const ImGuiID pathId = ImHashStr(path.c_str(), 0, browser->ID);
+            return itemRect(browser, ImHashStr(grid ? "##asset-tile" : "##asset-row", 0, pathId)).GetCenter();
+        };
+        const auto beginAssetDrag = [&](const std::string& path, bool grid) {
+            const auto start = assetPoint(path, grid);
+            input.mouse = start;
+            capture("content_drag_source_hover", true);
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+            capture("content_drag_source_press", true);
+            input.mouse = {start.x + 18.0f, start.y};
+            capture("content_drag_source_active", true);
+            require(context->DragDropActive && context->DragDropPayload.IsDataType("RAE_ASSET") &&
+                context->DragDropPayload.DataSize == static_cast<int>(path.size()) &&
+                std::memcmp(context->DragDropPayload.Data, path.data(), path.size()) == 0,
+                "Dragging a Content widget did not produce its real RAE_ASSET path payload.");
+        };
+        const auto holdAssetAt = [&](ImVec2 destination, const char* name) {
+            input.mouse = destination;
+            capture(name, true);
+            // AcceptDragDropPayload records a candidate before the release
+            // frame. Keep a second held frame so a drop tests actual delivery.
+            capture(name, true);
+        };
+        const auto releaseAsset = [&](const char* name) {
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+            capture(name, true);
+            capture(name, true, true);
+        };
+        const auto checkPlacedMesh = [&](const char* path, bool grid, assets::AssetId meshId,
+                                         float x, float surfaceY, float z, const char* prefix) {
+            const auto count = world.actors.size();
+            const auto history = editor.undoStack().cursor();
+            const auto camera = settings;
+            beginAssetDrag(path, grid);
+            const auto destination = projectPoint(x, surfaceY, z);
+            require(findWindow("Scene Viewport##Interaction")->WorkRect.Contains(destination),
+                "Mesh drop test point is outside the scene image.");
+            holdAssetAt(destination, (std::string(prefix) + "_preview").c_str());
+            require(world.actors.size() == count && editor.undoStack().cursor() == history,
+                "Hovering a dragged Mesh created an Actor before mouse release.");
+            // Camera input must remain unclaimed by the viewport while the
+            // Content gesture owns the mouse, including wheel/Alt/right/middle.
+            input.events = [](ImGuiIO& io) {
+                io.AddKeyEvent(ImGuiMod_Alt, true);
+                io.AddMouseButtonEvent(1, true); io.AddMouseButtonEvent(2, true);
+                io.AddMouseWheelEvent(0, 1);
+            };
+            input.mouse = {destination.x + 9.0f, destination.y + 7.0f};
+            capture("content_drag_camera_guard", true);
+            cameraUnchanged(camera);
+            input.events = [](ImGuiIO& io) {
+                io.AddKeyEvent(ImGuiMod_Alt, false);
+                io.AddMouseButtonEvent(1, false); io.AddMouseButtonEvent(2, false);
+            };
+            holdAssetAt(destination, (std::string(prefix) + "_preview").c_str());
+            require(world.actors.size() == count && editor.undoStack().cursor() == history,
+                "A held Content drag mutated the scene or its history.");
+            releaseAsset((std::string(prefix) + "_placed").c_str());
+            require(world.actors.size() == count + 1 && editor.undoStack().cursor() == history + 1 &&
+                editor.undoStack().undoLabel() == "Place Mesh", "A Mesh drop did not create exactly one undoable Actor.");
+            const auto* actor = world.findActor(editor.selectedActor());
+            require(actor && actor->mesh.meshId == meshId && editor.selection().size() == 1 &&
+                editor.selection().front() == actor->id && assets.findMaterial(actor->mesh.materialId),
+                "The dropped Mesh did not become the sole selected Actor with valid asset references.");
+            const auto placed = *actor;
+            const auto* mesh = assets.findMesh(meshId);
+            require(mesh && !mesh->vertices.empty(), "Placed Mesh has no geometry for the bounds assertion.");
+            float bottom = std::numeric_limits<float>::max();
+            for (const auto& vertex : mesh->vertices) bottom = std::min(bottom, vertex.position[1]);
+            require(std::abs(placed.transform.position[0] - x) < .12f &&
+                std::abs(placed.transform.position[2] - z) < .12f &&
+                std::abs(placed.transform.position[1] + bottom - surfaceY) < .02f,
+                "The dropped Mesh sank below its support or ignored the scene mouse position.");
+            for (int axis = 0; axis < 3; ++axis)
+                require(placed.transform.rotation[axis] == 0 && placed.transform.scale[axis] == 1,
+                    "Dropping a Mesh changed its default rotation or scale.");
+            require(findWindow("Details")->DockNode->SelectedTabId == findWindow("Details")->TabId &&
+                renderedUiText.find("Actor #" + std::to_string(placed.id)) != std::string::npos,
+                "A dropped Mesh did not reveal its Actor instance in Details.");
+            cameraUnchanged(camera);
+            require(editor.undo() && world.actors.size() == count && !world.findActor(placed.id) &&
+                editor.undoStack().cursor() == history, "One Undo did not remove the dropped Actor.");
+            require(editor.redo() && world.actors.size() == count + 1 && world.findActor(placed.id) &&
+                world.findActor(placed.id)->mesh.meshId == meshId && editor.selectedActor() == placed.id &&
+                std::memcmp(&world.findActor(placed.id)->transform, &placed.transform, sizeof(scene::Transform)) == 0,
+                "Redo did not restore the same dropped Actor, GUID references and placement.");
+            require(editor.undo(), "Mesh drop test could not restore the pre-drop scene.");
+            capture("content_drag_undo_restored", true);
+        };
+        settings.cameraYaw = .4f; settings.cameraPitch = .65f; settings.cameraDistance = 8.0f;
+        settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1.3f; settings.cameraTarget[2] = 0;
+        world.actors.clear();
+        const auto support = world.createActor("Mesh drop support", 2, 2);
+        world.findActor(support)->transform.position[1] = 1.6f;
+        capture("content_drag_surface_fixture", true);
+        checkPlacedMesh("Meshes/Builtin/Cube.rasset", true, 3, .7f, 1.6f, .4f, "content_drop_grid_surface");
+        world.actors.clear();
+        capture("content_drag_ground_fixture", true);
+        checkPlacedMesh("Meshes/Builtin/Sphere.rasset", false, 1, -.8f, 0, .65f, "content_drop_list_ground");
+        world = savedWorld;
+        settings = savedSettings;
+        capture("content_drag_scene_restored", true);
+        click(projectPoint(-.35f, 1.35f, 0));
+        require(editor.selectedActor() == 1, "Canceled-drop fixtures need a selected Actor and its live gizmo.");
+        const auto viewportToolbar = itemRect(findWindow("Scene Viewport##Interaction"),
+            findWindow("Scene Viewport##Interaction")->GetID("Move [W]")).GetCenter();
+        const auto sceneDestination = projectPoint(1.8f, 0, .4f);
+        require(findWindow("Scene Viewport##Interaction")->WorkRect.Contains(sceneDestination) &&
+            sceneDestination.y > viewportToolbar.y + 50.0f,
+            "Canceled-drop fixture is outside the scene image or inside its toolbar.");
+        const auto materialEntry = std::find_if(editor.assetRegistry().entries().begin(),
+            editor.assetRegistry().entries().end(), [](const auto& entry) { return entry.type == assets::AssetType::Material; });
+        require(materialEntry != editor.assetRegistry().entries().end(), "No Material exists for the unsupported drop test.");
+        const std::string materialPath = materialEntry->relativePath;
+        for (int scenario = 0; scenario < 4; ++scenario) {
+            const auto count = world.actors.size(), historySize = editor.undoStack().size(), history = editor.undoStack().cursor();
+            const auto selected = editor.selectedActor();
+            const auto camera = settings;
+            beginAssetDrag(scenario == 3 ? materialPath : "Meshes/Builtin/Cube.rasset", scenario % 2 == 0);
+            const auto destination = scenario == 1 ? ImVec2(mainOrigin().x - 60, mainOrigin().y - 60) :
+                scenario == 2 ? viewportToolbar : sceneDestination;
+            holdAssetAt(destination, "content_drop_rejected_hover");
+            if (scenario == 0) {
+                pressKey(ImGuiKey_Escape);
+                require(!context->DragDropActive, "Escape did not cancel the Content payload.");
+                input.mouse = {destination.x + 12, destination.y + 9};
+                capture("content_drop_escape_still_held", true);
+                require(!context->DragDropActive, "A canceled source restarted its payload before mouse release.");
+            }
+            releaseAsset(scenario == 0 ? "content_drop_escape" : scenario == 1 ? "content_drop_outside" :
+                scenario == 2 ? "content_drop_toolbar" : "content_drop_material_rejected");
+            require(world.actors.size() == count && editor.selectedActor() == selected &&
+                editor.undoStack().size() == historySize && editor.undoStack().cursor() == history,
+                "A canceled, outside, toolbar or unsupported Content drop changed the scene/history/selection.");
+            for (const auto& original : savedWorld.actors) {
+                const auto* actor = world.findActor(original.id);
+                require(actor && std::memcmp(&actor->transform, &original.transform, sizeof(scene::Transform)) == 0,
+                    "A rejected asset drag moved an existing Actor through its gizmo.");
+            }
+            cameraUnchanged(camera);
+        }
+
+        editor.setContentSearch(""); editor.setContentTypeFilter(assets::AssetType::Unknown);
+        editor.setContentRecursive(false); editor.setContentGridView(false);
+        editor.selectContentFolder(savedFolder); editor.selectContentAsset(savedAsset);
+        input.mouse = {-100, -100};
+        capture("content_drag_tests_restored", true);
+        std::cout << "PASS: Grid/List Mesh delivery, surface/ground bounds, Details, undo/redo, "
+            "cancellation and camera/gizmo input isolation.\n";
+    }
     click(scenePoint(30, 100));
     require(editor.selectedActor() == 0, "Clicking empty viewport did not clear Actor selection.");
     capture("instance_details_empty", true, true);
@@ -2629,6 +2991,82 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     selectTab("Material Editor");
     click(projectPoint(-.35f, 1.35f, 0));
     capture("editor", true);
+    {
+        // Engine Content is a shared, immutable source; only the new project
+        // copy may enter the existing draft/apply/save workflow.
+        ImGuiContextScope active(context);
+        editor.selectContentFolder("engine://Materials");
+        editor.setContentGridView(true);
+        capture("engine_content_preroll", true);
+        capture("engine_content", true, true);
+        const auto entries = editor.visibleContentEntries();
+        require(entries.size() == 1 && entries.front()->id == assets::EngineDefaultMaterialId &&
+            entries.front()->readOnly(), "Engine Content did not expose the read-only default material.");
+        require(editor.navigateContentUp() && editor.contentFolder() == "engine://" &&
+            !editor.navigateContentUp(), "Engine Content navigation escaped its mount root.");
+        editor.selectContentFolder("engine://Materials");
+        editor.showAssetDetails("engine://Materials/DefaultMaterial.rasset");
+        capture("engine_asset_details_preroll", true);
+        capture("engine_asset_details", true, true);
+        require(renderedUiText.find("Engine Content (read-only)") != std::string::npos,
+            "Engine asset details did not explain its source and protection.");
+        editor.closeAssetDetails();
+
+        require(editor.commands().enabled("actor.addSphere"), "Default material does not permit creating a sphere.");
+        bool created = false;
+        for (const auto& command : editor.commands().commands()) if (command.info.id == "actor.addSphere") {
+            command.action(); created = true; break;
+        }
+        const auto* actor = world.findActor(editor.selectedActor());
+        require(created && actor && actor->mesh.materialId == assets::EngineDefaultMaterialId,
+            "New actors must use the shared engine default, regardless of browser material selection.");
+        capture("engine_default_actor", true);
+        auto* detailsWindow = findWindow("Details");
+        if (detailsWindow->DockNode && detailsWindow->DockNode->SelectedTabId != detailsWindow->TabId)
+            click(dockTabCenter(detailsWindow));
+        click(itemRect(detailsWindow, detailsWindow->GetID("Edit assigned material")).GetCenter());
+        selectTab("Material Editor");
+        const auto materialRect = [&](const char* label) {
+            const auto* bar = tabBar();
+            return itemRect(bar->Window, ImHashStr(label, 0, bar->SelectedTabId));
+        };
+        capture("engine_material_readonly", true, true);
+        saveMaterialCapture("engine_material_readonly_native.bmp");
+        require(renderedUiText.find("Live preview") != std::string::npos && renderer.materialPreviewTexture(),
+            "A clean read-only engine material must retain its preview sphere.");
+        require(renderedUiText.find("Engine Content - read-only") != std::string::npos,
+            "Engine material editor lacks its read-only explanation.");
+        click(materialRect("Grid").GetCenter());
+        click(materialRect("Apply material").GetCenter());
+        require(!editor.materialPreview() && !assets.findMaterial(assets::EngineDefaultMaterialId)->grid,
+            "Disabled engine material controls changed the shared material or activated a draft.");
+        const auto count = assets.materials.size();
+        click(materialRect("Copy to Project").GetCenter());
+        require(assets.materials.size() == count + 1 && editor.contentFolder() == "Materials",
+            "Copy to Project did not publish and select an independent project material.");
+        const auto* copyEntry = editor.assetRegistry().find(editor.selectedContentAsset());
+        require(copyEntry && !copyEntry->readOnly() && copyEntry->id != assets::EngineDefaultMaterialId,
+            "Material copy kept the engine identity or read-only origin.");
+        const auto copiedId = copyEntry->id;
+        const auto copyPath = copyEntry->path;
+        click(materialRect("Grid").GetCenter());
+        require(editor.materialPreview() && editor.materialPreview()->id == copiedId && editor.materialPreview()->grid,
+            "Project copy could not use live material editing.");
+        click(materialRect("Apply material").GetCenter());
+        click(materialRect("Save material assets").GetCenter());
+        assets::AssetFile savedCopy;
+        assets::MaterialAsset savedMaterial;
+        require(assets::readAssetFile(copyPath, savedCopy, error) &&
+            assets::readMaterialAssetFile(savedCopy, savedMaterial, error) && savedMaterial.grid,
+            "Edited project copy did not persist its own parameters.");
+        require(contents(engineMaterialPath) == engineMaterialBytes &&
+            !assets.findMaterial(assets::EngineDefaultMaterialId)->grid,
+            "Editing/saving a project copy modified the shared engine default.");
+        capture("engine_material_copy", true);
+        saveMaterialCapture("engine_material_copy_native.bmp");
+        std::cout << "PASS: Engine Content navigation, read-only material UI, default Actor assignment, "
+            "Copy to Project, editable independent parameters, save and unchanged engine file.\n";
+    }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);
     input.detach();
     ui.shutdown();

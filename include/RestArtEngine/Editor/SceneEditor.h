@@ -37,14 +37,28 @@ public:
     // Scene currently bound to the editor. Starts at the project default scene and
     // changes when the Content browser opens another one.
     [[nodiscard]] const std::filesystem::path& scenePath() const noexcept { return scenePath_; }
-    // Selects a Content folder (relative to the content root, "" = root). Used by
+    // Selects a Content key (project-relative, "" = Project root; "engine://" = Engine root). Used by
     // the browser breadcrumb and by tests that need a deterministic view.
     void selectContentFolder(std::string folder);
     // Opens the asset details window for a content-relative path (also used by
     // tests to verify the inspector without double-clicking).
     void showAssetDetails(std::string relativePath);
+    void closeAssetDetails() { assetDetailsOpen_ = false; assetDetailsFocused_ = false; }
     // Switches the Content browser between the list and the thumbnail grid.
     void setContentGridView(bool grid) { contentGridView_ = grid; }
+    void setContentSearch(std::string search) { contentQuery_.search = std::move(search); }
+    void setContentTypeFilter(assets::AssetType type) { contentQuery_.type = type; }
+    void setContentRecursive(bool recursive) { contentQuery_.recursive = recursive; }
+    void setContentSort(assets::AssetSort sort, bool descending = false) { contentQuery_.sort = sort; contentQuery_.descending = descending; }
+    [[nodiscard]] const std::string& contentFolder() const noexcept { return contentFolder_; }
+    [[nodiscard]] std::vector<const assets::AssetEntry*> visibleContentEntries() const;
+    bool navigateContentBack();
+    bool navigateContentForward();
+    bool navigateContentUp();
+    void selectContentAsset(std::string path);
+    // Save a new Project material without applying/saving unrelated drafts or assets.
+    bool copyMaterialToProject(assets::AssetId source, std::string& error);
+    [[nodiscard]] const std::string& selectedContentAsset() const noexcept { return selectedAsset_; }
     bool openScene(const std::filesystem::path& path, std::string& error);
     bool createScene(const std::filesystem::path& path, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }
@@ -71,6 +85,7 @@ private:
     void deleteSelectedActor();
     void duplicateSelectedActor();
     void duplicateForDrag();
+    bool createMeshActor(assets::AssetId mesh, const scene::Transform& transform, const std::string& label);
     void registerCommands();
     void drawEditMenu();
     // Flips visibility for every selected Actor as one undoable edit (H).
@@ -94,6 +109,10 @@ private:
     void drawFolderTreeNode(const std::string& folder);
     void drawAssetRows();
     void drawAssetGrid();
+    void drawAssetItemActions(const assets::AssetEntry&);
+    void drawContentFolderTarget(const std::string&);
+    void processContentActions();
+    [[nodiscard]] std::string contentDeleteReason(const assets::AssetEntry&) const;
     void drawContentDialogs();
     // Double-click: opens the asset details window. "Open" inside it (or the
     // context menu) runs the type-specific action.
@@ -116,14 +135,23 @@ private:
     project::ProjectPaths project_;
     assets::AssetRegistry registry_;
     std::filesystem::path scenePath_;
-    std::string contentFolder_;    // selected folder, relative to the content root
-    std::string selectedAsset_;    // selected entry, relative to the content root
+    std::string contentFolder_;    // source-qualified registry folder key
+    std::string selectedAsset_;    // source-qualified registry entry key
     std::string renameBuffer_, newFolderBuffer_;
     std::string renameTarget_, deleteTarget_;
     bool renameOpen_ = false, newFolderOpen_ = false, deleteOpen_ = false;
     bool sceneSwitchPrompt_ = false;
     std::filesystem::path pendingScenePath_;
-    bool contentGridView_ = false;
+    bool contentGridView_ = true;
+    assets::AssetQuery contentQuery_;
+    std::vector<std::string> contentHistory_{std::string()};
+    std::size_t contentHistoryIndex_ = 0;
+    bool contentSourcesVisible_ = true, contentFocused_ = false, contentRevealFolder_ = true;
+    bool contentEngineVisible_ = true;
+    float contentSourcesWidth_ = 170.0f, contentThumbnailSize_ = 72.0f;
+    std::string pendingContentOpen_, pendingContentMove_, pendingContentMoveFolder_;
+    assets::AssetId pendingContentCopy_ = 0;
+    bool assetDragCancelled_ = false;
     // Offscreen material preview: throttled re-render of the draft parameters.
     float materialPreviewAge_ = 1.0f;
     assets::MaterialAsset materialPreviewParams_{};

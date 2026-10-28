@@ -1,4 +1,5 @@
 #include <RestArtEngine/ImGui/EditorTheme.h>
+#include <RestArtEngine/Assets/AssetRegistry.h>
 #include <imgui.h>
 #include <fstream>
 #include <cstdio>
@@ -141,6 +142,18 @@ void setTheme(EditorTheme theme) {
     applyTheme(theme);
 }
 
+ImVec4 assetTypeColor(assets::AssetType type) {
+    // One palette for cards, lists, filters and details. Preserve hue identity
+    // when switching themes; leave actual preview pixels unmodified.
+    switch (type) {
+    case assets::AssetType::Mesh:     return ImVec4(80 / 255.0f, 178 / 255.0f, 235 / 255.0f, 1);
+    case assets::AssetType::Material: return ImVec4(100 / 255.0f, 205 / 255.0f, 133 / 255.0f, 1);
+    case assets::AssetType::Scene:    return ImVec4(238 / 255.0f, 175 / 255.0f, 79 / 255.0f, 1);
+    case assets::AssetType::Shader:   return ImVec4(184 / 255.0f, 145 / 255.0f, 239 / 255.0f, 1);
+    default:                        return ImVec4(167 / 255.0f, 174 / 255.0f, 184 / 255.0f, 1);
+    }
+}
+
 std::filesystem::path defaultUiPreferencesPath() {
     // Stored next to the ImGui layout ini; both are per-user, never committed.
     return std::filesystem::path("RestArtEngine.ui.ini");
@@ -168,6 +181,10 @@ void readPreferences(const std::filesystem::path& path, UiPreferences& preferenc
         if (line.rfind("theme=", 0) == 0) {
             preferences.theme = line.find("darkblue") != std::string::npos || line.find("dark_blue") != std::string::npos
                 ? EditorTheme::DarkBlue : EditorTheme::Black;
+        } else if (line == "gizmo_negative_axis_hints=on") {
+            preferences.gizmoNegativeAxisHints = true;
+        } else if (line == "gizmo_negative_axis_hints=off") {
+            preferences.gizmoNegativeAxisHints = false;
         } else if (line == "outline=off") {
             preferences.selectionOutline = false;
         } else if (line == "outline=on") {
@@ -207,6 +224,7 @@ void saveUiPreferences(const std::filesystem::path& path, const UiPreferences& p
     std::ofstream stream(path, std::ios::trunc);
     if (!stream) return;
     stream << "theme=" << (preferences.theme == EditorTheme::DarkBlue ? "darkblue" : "black") << '\n';
+    stream << "gizmo_negative_axis_hints=" << (preferences.gizmoNegativeAxisHints ? "on" : "off") << '\n';
     stream << "outline=" << (preferences.selectionOutline ? "on" : "off") << '\n';
     stream << "outline_thickness=" << preferences.outlineThickness << '\n';
     stream << "outline_theme_color=" << (preferences.outlineThemeColor ? "on" : "off") << '\n';

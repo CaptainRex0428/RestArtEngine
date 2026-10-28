@@ -1,7 +1,9 @@
 #include <RestArtEngine/Editor/ViewportInteraction.h>
 #include <RestArtEngine/Editor/EditorDockManager.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <ImGuizmo.h>
 #include <DirectXMath.h>
 #include <algorithm>
@@ -122,9 +124,20 @@ bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
     return distance >= 0;
 }
 
-scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World& world,
-                   const assets::AssetLibrary& assets, FXMMATRIX view, CXMMATRIX projection,
-                   const assets::MaterialAsset* materialOverride) {
+struct ViewRay {
+    XMVECTOR origin;
+    XMVECTOR direction;
+    float length;
+};
+
+struct SurfaceHit {
+    scene::ActorId actor = 0;
+    XMFLOAT3 point{};
+    XMFLOAT3 normal{};
+    float distance = 0;
+};
+
+ViewRay viewRay(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection) {
     const auto screenMouse = ImGui::GetMousePos();
     const auto mainOrigin = ImGui::GetMainViewport()->Pos;
     const ImVec2 mouse{screenMouse.x - mainOrigin.x, screenMouse.y - mainOrigin.y};
@@ -135,9 +148,13 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
             0, 1, projection, view, XMMatrixIdentity());
     };
     const XMVECTOR origin = unproject(0), farPoint = unproject(1);
-    const XMVECTOR direction = XMVector3Normalize(farPoint - origin);
-    float nearest = XMVectorGetX(XMVector3Length(farPoint - origin));
-    scene::ActorId hit = 0;
+    return {origin, XMVector3Normalize(farPoint - origin), XMVectorGetX(XMVector3Length(farPoint - origin))};
+}
+
+SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const assets::AssetLibrary& assets,
+                          const assets::MaterialAsset* materialOverride) {
+    SurfaceHit hit;
+    hit.distance = ray.length;
     for (const auto& actor : world.actors) {
         if (!actor.visible || !validTransform(actor.transform)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
@@ -156,12 +173,131 @@ scene::ActorId pick(const renderer::SceneSettings& settings, const scene::World&
                 vertices[j] = XMVector3TransformCoord(XMVectorSet(p[0], p[1], p[2], 1), matrix);
             }
             float distance = 0;
-            if (valid && intersectTriangle(origin, direction, vertices[0], vertices[1], vertices[2], distance,
+            if (valid && intersectTriangle(ray.origin, ray.direction, vertices[0], vertices[1], vertices[2], distance,
                     material->twoSided, orientation) &&
-                distance < nearest) { nearest = distance; hit = actor.id; }
+                distance < hit.distance) {
+                hit.actor = actor.id;
+                hit.distance = distance;
+                XMStoreFloat3(&hit.point, ray.origin + XMVectorScale(ray.direction, distance));
+                // Mirrored triangles reverse their winding; recover the authored
+                // front, then face the visible side toward the incoming ray.
+                auto normal = XMVectorScale(XMVector3Normalize(
+                    XMVector3Cross(vertices[1] - vertices[0], vertices[2] - vertices[0])), orientation);
+                if (XMVectorGetX(XMVector3Dot(normal, ray.direction)) > 0)
+                    normal = XMVectorNegate(normal);
+                XMStoreFloat3(&hit.normal, normal);
+            }
         }
     }
     return hit;
+}
+
+const assets::MeshAsset* droppedMesh(const ImGuiPayload& payload, const assets::AssetRegistry& registry,
+                                    const assets::AssetLibrary& assets) {
+    // Content paths have no terminating NUL. Resolve the copied byte range
+    // afresh each frame instead of retaining a registry entry across a rescan.
+    if (!payload.Data || payload.DataSize <= 0 || payload.DataSize > 4096) return nullptr;
+    const std::string_view path(static_cast<const char*>(payload.Data), static_cast<std::size_t>(payload.DataSize));
+    if (path.find('\0') != std::string_view::npos) return nullptr;
+    const auto* entry = registry.find(path);
+    if (!entry || entry->type != assets::AssetType::Mesh || !entry->id) return nullptr;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(entry->path, error)) return nullptr;
+    return assets.findMesh(entry->id);
+}
+
+bool meshBounds(const assets::MeshAsset& mesh, XMFLOAT3& minimum, XMFLOAT3& maximum) {
+    minimum = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    maximum = {-minimum.x, -minimum.y, -minimum.z};
+    if (mesh.vertices.empty() || mesh.indices.empty()) return false;
+    for (const auto& vertex : mesh.vertices) {
+        for (const auto value : vertex.position) if (!std::isfinite(value)) return false;
+        minimum.x = std::min(minimum.x, vertex.position[0]);
+        minimum.y = std::min(minimum.y, vertex.position[1]);
+        minimum.z = std::min(minimum.z, vertex.position[2]);
+        maximum.x = std::max(maximum.x, vertex.position[0]);
+        maximum.y = std::max(maximum.y, vertex.position[1]);
+        maximum.z = std::max(maximum.z, vertex.position[2]);
+    }
+    return true;
+}
+
+bool dropTransform(const ViewRay& ray, const SurfaceHit& surface, const XMFLOAT3& minimum,
+                   const XMFLOAT3& maximum, scene::Transform& transform, XMVECTOR& contact) {
+    XMVECTOR normal;
+    if (surface.actor) {
+        contact = XMLoadFloat3(&surface.point);
+        normal = XMLoadFloat3(&surface.normal);
+    } else {
+        const float vertical = XMVectorGetY(ray.direction);
+        if (std::abs(vertical) < 1e-5f) return false;
+        const float distance = -XMVectorGetY(ray.origin) / vertical;
+        if (!std::isfinite(distance) || distance < 0 || distance > ray.length) return false;
+        contact = ray.origin + XMVectorScale(ray.direction, distance);
+        normal = XMVectorSet(0, 1, 0, 0);
+    }
+    // Keep the authored orientation/scale. Move the bounds' supporting corner
+    // to the contact plane so an off-centre pivot cannot bury the new instance.
+    const auto support = XMVectorSet(XMVectorGetX(normal) >= 0 ? minimum.x : maximum.x,
+        XMVectorGetY(normal) >= 0 ? minimum.y : maximum.y,
+        XMVectorGetZ(normal) >= 0 ? minimum.z : maximum.z, 0);
+    const auto position = contact - XMVectorScale(normal, XMVectorGetX(XMVector3Dot(support, normal)));
+    XMFLOAT3 placed;
+    XMStoreFloat3(&placed, position);
+    transform.position[0] = placed.x;
+    transform.position[1] = placed.y;
+    transform.position[2] = placed.z;
+    return validTransform(transform);
+}
+
+void drawDropHint(const ImVec2& clipMin, const ImVec2& clipMax, const char* text, bool valid) {
+    auto* drawList = ImGui::GetWindowDrawList();
+    const float wrapWidth = std::max(1.0f, clipMax.x - clipMin.x - 16.0f);
+    const auto textSize = ImGui::CalcTextSize(text, nullptr, false, wrapWidth);
+    const ImVec2 position{clipMin.x + 8, std::max(clipMin.y + 8, clipMax.y - textSize.y - 8)};
+    drawList->PushClipRect(clipMin, clipMax, true);
+    drawList->AddRectFilled({position.x - 4, position.y - 4},
+        {position.x + textSize.x + 4, position.y + textSize.y + 4},
+        ImGui::GetColorU32(ImGuiCol_WindowBg, .92f), ImGui::GetStyle().FrameRounding);
+    drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+        ImGui::GetColorU32(valid ? ImGuiCol_DragDropTarget : ImGuiCol_Text), text, nullptr, wrapWidth);
+    drawList->PopClipRect();
+}
+
+void drawDropPreview(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection,
+                     const scene::Transform& transform, FXMVECTOR contact, const XMFLOAT3& minimum,
+                     const XMFLOAT3& maximum, const ImVec2& clipMin, const ImVec2& clipMax) {
+    const auto desktopOrigin = ImGui::GetMainViewport()->Pos;
+    const auto project = [&](FXMVECTOR point, ImVec2& screen) {
+        const auto clip = XMVector4Transform(XMVectorSetW(point, 1), view * projection);
+        if (XMVectorGetW(clip) <= 1e-5f) return false;
+        const auto pixel = XMVector3Project(point, static_cast<float>(settings.viewportX),
+            static_cast<float>(settings.viewportY), static_cast<float>(settings.viewportWidth),
+            static_cast<float>(settings.viewportHeight), 0, 1, projection, view, XMMatrixIdentity());
+        screen = {desktopOrigin.x + XMVectorGetX(pixel), desktopOrigin.y + XMVectorGetY(pixel)};
+        return std::isfinite(screen.x) && std::isfinite(screen.y);
+    };
+    ImVec2 corners[8];
+    bool visible[8];
+    for (int index = 0; index < 8; ++index)
+        visible[index] = project(XMVectorSet((index & 1 ? maximum.x : minimum.x) + transform.position[0],
+            (index & 2 ? maximum.y : minimum.y) + transform.position[1],
+            (index & 4 ? maximum.z : minimum.z) + transform.position[2], 1), corners[index]);
+    auto* drawList = ImGui::GetWindowDrawList();
+    const auto accent = ImGui::GetColorU32(ImGuiCol_DragDropTarget);
+    drawList->PushClipRect(clipMin, clipMax, true);
+    for (int index = 0; index < 8; ++index)
+        for (const int edge : {1, 2, 4})
+            if (!(index & edge) && visible[index] && visible[index | edge])
+                drawList->AddLine(corners[index], corners[index | edge], accent, 1.5f);
+    ImVec2 marker;
+    if (project(contact, marker)) {
+        drawList->AddCircle(marker, 5.0f, accent, 16, 2.0f);
+        drawList->AddLine({marker.x - 9, marker.y}, {marker.x + 9, marker.y}, accent);
+        drawList->AddLine({marker.x, marker.y - 9}, {marker.x, marker.y + 9}, accent);
+    }
+    drawList->PopClipRect();
+    drawDropHint(clipMin, clipMax, "Release to place mesh | Esc to cancel", true);
 }
 } // namespace
 
@@ -169,6 +305,8 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                const assets::AssetLibrary& assets, std::vector<scene::ActorId>& selection,
                                scene::ActorId& selected, renderer::SceneRenderer& renderer,
                                const std::function<void()>& duplicateForDrag,
+                               const assets::AssetRegistry& registry,
+                               const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
                                const assets::MaterialAsset* materialOverride) {
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
@@ -218,11 +356,13 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     hovered_ = ImGui::IsWindowHovered();
     focused_ = ImGui::IsWindowFocused();
     const bool popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    const auto* activePayload = ImGui::GetDragDropPayload();
+    const bool assetDragging = activePayload && activePayload->IsDataType("RAE_ASSET");
     ImGuiIO& io = ImGui::GetIO();
     // WantTextInput is computed from the preceding frame. A click in the scene
     // can already have deactivated the text field drawn earlier this frame, so
     // use live item ownership for pointer input and retain the flag for keys.
-    const bool blocked = popup || (!usingGizmo_ && ImGui::IsAnyItemActive());
+    const bool blocked = popup || assetDragging || (!usingGizmo_ && ImGui::IsAnyItemActive());
     if (!blocked && !io.WantTextInput && !usingGizmo_ && (hovered_ || focused_)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W, false)) operation_ = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) operation_ = 1;
@@ -230,7 +370,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) operation_ = (operation_ + 1) % 3;
         if (ImGui::IsKeyPressed(ImGuiKey_F, false)) focusActor(settings, world, assets, selected);
     }
-    ImGui::BeginDisabled(usingGizmo_);
+    ImGui::BeginDisabled(usingGizmo_ || assetDragging);
     const char* labels[] = {"Move [W]", "Rotate [E]", "Scale [R]"};
     for (int i = 0; i < 3; ++i) {
         if (i) ImGui::SameLine();
@@ -252,7 +392,8 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     // Camera drags deliberately ignore ImGui item activation: clicking the
     // viewport activates the window itself, which would otherwise cancel an
     // Alt+left-drag orbit before it ever starts.
-    const bool canCamera = !popup && !overToolbar && hovered_ && !usingGizmo_;
+    const bool canCamera = !popup && !assetDragging && !overToolbar && hovered_ && !usingGizmo_;
+    if (assetDragging) orbiting_ = panning_ = false;
 
     // Right-drag orbits; Alt+left-drag is the DCC-style alternative.
     const bool altOrbiting = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
@@ -304,6 +445,8 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         static_cast<float>(settings.viewportWidth) / static_cast<float>(settings.viewportHeight), .05f, 100);
     XMFLOAT4X4 viewData, projectionData;
     XMStoreFloat4x4(&viewData, view); XMStoreFloat4x4(&projectionData, projection);
+    // The native negative-axis hatching is an optional, persisted viewport aid.
+    ImGuizmo::GetStyle().HatchedAxisLineThickness = imgui::uiPreferences().gizmoNegativeAxisHints ? 6.0f : 0.0f;
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
     ImGuizmo::SetRect(imageMin.x, imageMin.y,
@@ -368,7 +511,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         pickedThisFrame_ = true;
-        const auto hit = pick(settings, world, assets, view, projection, materialOverride);
+        const auto hit = closestSurface(viewRay(settings, view, projection), world, assets, materialOverride).actor;
         if ((io.KeyCtrl || io.KeyShift) && hit) {
             // Additive picking mirrors the Outliner: toggle membership and keep
             // the clicked Actor as the primary one.
@@ -379,6 +522,35 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
             selected = hit;
             selection.assign(hit ? 1 : 0, hit);
         }
+    }
+    // The scene image is a draw-list primitive, not an ImGui item. Give its
+    // actual visible area a stable drop target without inserting an invisible
+    // button that would take mouse ownership from the camera or Gizmo.
+    const ImRect dropArea({imageMin.x, std::max(imageMin.y, toolbarBottom)}, imageMax);
+    if (assetDragging && !popup && !usingGizmo_ && createFromMesh &&
+        ImGui::GetCurrentContext()->HoveredWindowUnderMovingWindow == ImGui::GetCurrentWindow() &&
+        dropArea.GetWidth() > 0 && dropArea.GetHeight() > 0 &&
+        ImGui::BeginDragDropTargetCustom(dropArea, ImGui::GetID("##scene-mesh-drop"))) {
+        const auto* payload = ImGui::GetDragDropPayload();
+        const auto* mesh = payload ? droppedMesh(*payload, registry, assets) : nullptr;
+        XMFLOAT3 minimum, maximum;
+        scene::Transform placement;
+        XMVECTOR contact;
+        const auto ray = viewRay(settings, view, projection);
+        if (!mesh) {
+            drawDropHint(dropArea.Min, dropArea.Max, "Choose a mesh asset to place in the scene", false);
+        } else if (!meshBounds(*mesh, minimum, maximum)) {
+            drawDropHint(dropArea.Min, dropArea.Max, "This mesh has no usable geometry", false);
+        } else if (!dropTransform(ray, closestSurface(ray, world, assets, materialOverride), minimum, maximum, placement, contact)) {
+            drawDropHint(dropArea.Min, dropArea.Max, "No placement surface here. Aim at visible geometry or the ground", false);
+        } else {
+            if (const auto* accepted = ImGui::AcceptDragDropPayload("RAE_ASSET",
+                    ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                drawDropPreview(settings, view, projection, placement, contact, minimum, maximum, dropArea.Min, dropArea.Max);
+                if (accepted->IsDelivery()) createFromMesh(mesh->id, placement);
+            }
+        }
+        ImGui::EndDragDropTarget();
     }
     ImGui::End();
     return changed;

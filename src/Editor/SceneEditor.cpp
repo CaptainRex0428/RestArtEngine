@@ -7,6 +7,7 @@
 #include <RestArtEngine/Assets/AssetFile.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <iostream>
 #include <algorithm>
 #include <cfloat>
@@ -15,6 +16,8 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <system_error>
+#include <utility>
 
 namespace rae::editor {
 namespace {
@@ -69,6 +72,9 @@ bool validMaterialParameters(const assets::MaterialAsset& material) {
     return unitValue(material.roughness) && unitValue(material.metallic) &&
         std::all_of(std::begin(material.baseColor), std::end(material.baseColor), unitValue);
 }
+bool readOnlyMaterial(const assets::MaterialAsset& material) {
+    return material.origin == assets::AssetOrigin::Engine || assets::isEngineAssetId(material.id);
+}
 void continueButtonRow(const char* nextLabel) {
     const auto& style = ImGui::GetStyle();
     const float nextWidth = ImGui::CalcTextSize(nextLabel).x + 2 * style.FramePadding.x;
@@ -117,16 +123,17 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
 bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
     project_ = project;
     assets_.createDefaults();
+    if (!assets_.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
     // Materials are the single source of truth for scene v2 references: load the
     // content folder first so the scene can resolve its GUIDs.
     {
         std::string materialError;
         const auto materialFolder = project_.contentRoot / "Materials";
-        if (std::filesystem::is_directory(materialFolder)) (void)assets_.loadMaterials(materialFolder, materialError);
+        if (std::filesystem::is_directory(materialFolder) && !assets_.loadMaterials(materialFolder, materialError)) {
+            error = materialError;
+            return false;
+        }
     }
-    world_.createDefaultScene(assets_);
-    scenePath_ = project_.defaultScene;
-    if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
     {
         std::string meshError;
         const auto meshFolder = project_.contentRoot / "Meshes";
@@ -135,11 +142,16 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
         // Built-in primitives become real assets so the Content browser lists
         // them alongside imported meshes; existing files win. They live in their
         // own generated folder so user mesh assets stay easy to tell apart.
-        (void)assets_.ensureBuiltinMeshes(builtinFolder, meshError);
-        (void)assets_.loadMeshes(meshFolder, meshError);
+        if (!assets_.ensureBuiltinMeshes(builtinFolder, meshError) || !assets_.loadMeshes(meshFolder, meshError)) {
+            error = meshError;
+            return false;
+        }
     }
-    registry_.setContentRoot(project_.contentRoot);
-    registry_.scan(contentError_);
+    // Scene v3 refers to mesh GUIDs. Resolve the complete Content library first.
+    world_.createDefaultScene(assets_);
+    scenePath_ = project_.defaultScene;
+    if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    refreshContent();
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
@@ -172,24 +184,31 @@ void SceneEditor::registerCommands() {
         [this] { return selectedActor_ != 0 && !viewport_.isUsing(); });
     commands_.add("actor.addSphere", "actor", "+ Sphere", "", 0,
         [this] {
-            selectedActor_ = world_.createActor("Sphere", 1, selectedMaterial_);
+            selectedActor_ = world_.createActor("Sphere", 1, assets::EngineDefaultMaterialId);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
             selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
             sceneDirty_ = true;
         },
-        [this] { return assets_.findMesh(1) != nullptr && assets_.findMaterial(selectedMaterial_) != nullptr; });
+        [this] { return assets_.findMesh(1) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
     commands_.add("actor.addCube", "actor", "+ Cube", "", 0,
         [this] {
-            selectedActor_ = world_.createActor("Cube", 3, selectedMaterial_);
+            selectedActor_ = world_.createActor("Cube", 3, assets::EngineDefaultMaterialId);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
             selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
             sceneDirty_ = true;
         },
-        [this] { return assets_.findMesh(3) != nullptr && assets_.findMaterial(selectedMaterial_) != nullptr; });
+        [this] { return assets_.findMesh(3) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
     commands_.add("scene.save", "scene", "Save Scene", "Ctrl+S", ImGuiMod_Ctrl | ImGuiKey_S,
         [this] { saveScene(); });
+    commands_.add("actor.addFromMesh", "actor", "Add Actor from mesh", "", 0,
+        [this] {
+            scene::Transform transform;
+            transform.position[1] = 1;
+            createMeshActor(selectedMesh_, transform, "Create Actor from mesh");
+        },
+        [this] { return assets_.findMesh(selectedMesh_) && assets_.findMaterial(assets::EngineDefaultMaterialId); });
     commands_.add("view.toggleOutline", "edit", "Toggle Selection Outline", "G", ImGuiKey_G,
         [this] {
             auto& preferences = imgui::uiPreferences();
@@ -259,8 +278,9 @@ void SceneEditor::selectMaterial(assets::AssetId id) {
 }
 
 const assets::MaterialAsset* SceneEditor::materialPreview() const {
+    const auto* material = assets_.findMaterial(selectedMaterial_);
     if (!materialDraftDirty_ || materialDraft_.id != selectedMaterial_ ||
-        !assets_.findMaterial(selectedMaterial_) || !validMaterialParameters(materialDraft_)) return nullptr;
+        !material || readOnlyMaterial(*material) || !validMaterialParameters(materialDraft_)) return nullptr;
     return &materialDraft_;
 }
 
@@ -273,6 +293,7 @@ void SceneEditor::discardMaterial() {
 bool SceneEditor::applyMaterial() {
     auto* target = assets_.findMaterial(selectedMaterial_);
     if (!target) { status_ = "Material no longer exists."; return false; }
+    if (readOnlyMaterial(*target)) { status_ = "Engine materials are read-only. Copy to Project to edit."; return false; }
     if (materialDraft_.name.empty() || !validMaterialParameters(materialDraft_)) {
         status_ = "Material needs a name and finite Base color/Roughness/Metallic values between zero and one.";
         return false;
@@ -304,7 +325,7 @@ bool SceneEditor::saveScene(renderer::SceneRenderer* renderer) {
         std::vector<std::uint8_t> pixels;
         std::uint32_t width = 0, height = 0;
         if (renderer->renderScenePreview(world_, assets_, 128, previewError) &&
-            renderer->readMaterialPreviewPixels(pixels, width, height, previewError) && width > 0 && height > 0) {
+            renderer->readPreviewPixels(renderer::PreviewSlot::SceneThumbnail, pixels, width, height, previewError) && width > 0 && height > 0) {
             assets::Thumbnail thumbnail;
             thumbnail.width = width;
             thumbnail.height = height;
@@ -378,6 +399,19 @@ void SceneEditor::insertActor(std::size_t index, const scene::Actor& actor) {
     auto& actors = world_.actors;
     if (index > actors.size()) index = actors.size();
     actors.insert(actors.begin() + static_cast<std::ptrdiff_t>(index), actor);
+}
+
+bool SceneEditor::createMeshActor(assets::AssetId meshId, const scene::Transform& transform, const std::string& label) {
+    const auto* mesh = assets_.findMesh(meshId);
+    if (!mesh || !assets_.findMaterial(assets::EngineDefaultMaterialId)) return false;
+    selectedActor_ = world_.createActor(mesh->name, meshId, assets::EngineDefaultMaterialId);
+    auto& actor = *world_.findActor(selectedActor_);
+    actor.transform = transform;
+    selection_.assign(1, selectedActor_);
+    pushActorCreated(actor, label);
+    sceneDirty_ = true;
+    status_ = "Placed '" + actor.name + "'. Use Move [W] handles to reposition.";
+    return true;
 }
 
 void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
@@ -525,6 +559,11 @@ void SceneEditor::drawUiMenu() {
         ImGui::EndMenu();
     }
     ImGui::Separator();
+    auto& preferences = imgui::uiPreferences();
+    if (ImGui::MenuItem("Gizmo negative-axis hints", nullptr, &preferences.gizmoNegativeAxisHints))
+        imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Show stripes when a move or scale axis flips to its negative direction.");
     if (ImGui::MenuItem("Material editor...", nullptr, materialWindowOpen_, !assets_.materials.empty())) {
         selectMaterial(assets_.findMaterial(selectedMaterial_) ? selectedMaterial_ : assets_.materials.front().id);
     }
@@ -832,6 +871,8 @@ std::filesystem::path utf8Path(std::string_view text) {
 
 std::string parentFolder(std::string_view folder) {
     const auto slash = folder.rfind('/');
+    if (assets::isEngineContentPath(folder) && slash < assets::EngineContentPrefix.size())
+        return std::string(assets::EngineContentPrefix);
     return slash == std::string_view::npos ? std::string() : std::string(folder.substr(0, slash));
 }
 
@@ -906,11 +947,11 @@ void drawThumbnail(ImDrawList* list, ImVec2 topLeft, float size, const assets::T
 } // namespace
 
 void SceneEditor::drawOutliner() {
-    ImGui::BeginDisabled(!assets_.findMesh(1) || !assets_.findMaterial(selectedMaterial_));
+    ImGui::BeginDisabled(!assets_.findMesh(1) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
     commandButton("actor.addSphere");
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!assets_.findMesh(3) || !assets_.findMaterial(selectedMaterial_));
+    ImGui::BeginDisabled(!assets_.findMesh(3) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
     commandButton("actor.addCube");
     ImGui::EndDisabled();
     commandButton("actor.duplicate");
@@ -1074,6 +1115,7 @@ void SceneEditor::setSceneBackground(bool black) {
 }
 
 void SceneEditor::importMesh() {
+    if (assets::isEngineContentPath(contentFolder_)) { status_ = "Choose Project Content to import assets."; return; }
     wchar_t path[32768]{};
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = GetActiveWindow();
@@ -1115,12 +1157,16 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     scene::World stagedWorld;
     assets::AssetLibrary stagedAssets;
     stagedAssets.createDefaults();
+    if (!stagedAssets.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
     {
         std::string assetError;
         const auto materialFolder = project_.contentRoot / "Materials";
         const auto meshFolder = project_.contentRoot / "Meshes";
-        if (std::filesystem::is_directory(materialFolder)) (void)stagedAssets.loadMaterials(materialFolder, assetError);
-        if (std::filesystem::is_directory(meshFolder)) (void)stagedAssets.loadMeshes(meshFolder, assetError);
+        if ((std::filesystem::is_directory(materialFolder) && !stagedAssets.loadMaterials(materialFolder, assetError)) ||
+            (std::filesystem::is_directory(meshFolder) && !stagedAssets.loadMeshes(meshFolder, assetError))) {
+            error = assetError;
+            return false;
+        }
     }
     if (!stagedWorld.load(path, stagedAssets, error)) return false;
     world_ = std::move(stagedWorld);
@@ -1129,6 +1175,7 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     sceneDirty_ = false;
     materialsDirty_ = false;
     materialDraftDirty_ = false;
+    pendingMaterial_ = 0;
     undo_.clear();
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
@@ -1171,19 +1218,151 @@ bool SceneEditor::saveSceneAs(const std::filesystem::path& path, std::string& er
 }
 
 void SceneEditor::selectContentFolder(std::string folder) {
+    if (folder == ".") folder.clear();
+    if (std::find(registry_.folders().begin(), registry_.folders().end(), folder) == registry_.folders().end()) return;
+    if (assets::isEngineContentPath(folder)) contentEngineVisible_ = true;
+    if (folder == contentFolder_) return;
     contentFolder_ = std::move(folder);
+    contentRevealFolder_ = true;
     selectedAsset_.clear();
+    contentHistory_.resize(contentHistoryIndex_ + 1);
+    contentHistory_.push_back(contentFolder_);
+    contentHistoryIndex_ = contentHistory_.size() - 1;
+}
+
+std::vector<const assets::AssetEntry*> SceneEditor::visibleContentEntries() const {
+    auto query = contentQuery_;
+    query.folder = contentFolder_;
+    return registry_.query(query);
+}
+
+void SceneEditor::selectContentAsset(std::string path) {
+    if (registry_.find(path)) selectedAsset_ = std::move(path);
+}
+
+bool SceneEditor::copyMaterialToProject(assets::AssetId sourceId, std::string& error) {
+    error.clear();
+    if (materialDraftDirty_) {
+        error = "Apply or discard the current material draft before copying another asset.";
+        return false;
+    }
+    const auto* source = assets_.findMaterial(sourceId);
+    if (!source) { error = "The source material is not loaded."; return false; }
+    std::filesystem::path staging;
+    bool ownsStaging = false;
+    try {
+        auto proposed = assets_;
+        const auto id = proposed.cloneMaterial(sourceId, source->name + " Copy");
+        auto* copy = proposed.findMaterial(id);
+        const auto folder = project_.contentRoot / "Materials";
+        const auto resolvedRoot = std::filesystem::weakly_canonical(project_.contentRoot);
+        const auto resolvedFolder = std::filesystem::weakly_canonical(folder);
+        const auto relative = resolvedFolder.lexically_relative(resolvedRoot);
+        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") {
+            error = "Project Materials must remain inside Project Content.";
+            return false;
+        }
+        const auto resolvedEngine = std::filesystem::weakly_canonical(project_.engineRoot / "Content");
+        const auto fromEngine = resolvedFolder.lexically_relative(resolvedEngine);
+        if (resolvedFolder == resolvedEngine || (!fromEngine.empty() && !fromEngine.is_absolute() && *fromEngine.begin() != "..")) {
+            error = "Cannot copy into Engine Content. Choose a separate project.";
+            return false;
+        }
+        std::filesystem::create_directories(folder);
+        const auto baseName = assets::sanitizeAssetName(copy->name);
+        std::string filename;
+        for (std::size_t suffix = 1;; ++suffix) {
+            copy->name = baseName + (suffix == 1 ? std::string() : " " + std::to_string(suffix));
+            filename = copy->name + ".rasset";
+            const bool nameInUse = std::any_of(assets_.materials.begin(), assets_.materials.end(), [&](const auto& material) {
+                return material.name == copy->name;
+            });
+            if (!nameInUse && !std::filesystem::exists(folder / utf8Path(filename)) &&
+                !std::filesystem::exists(folder / utf8Path(copy->name + ".ramat")) &&
+                !std::filesystem::exists(folder / utf8Path(copy->name + ".raasset"))) break;
+        }
+        const auto destination = folder / utf8Path(filename);
+        staging = folder / (".copy-" + assets::assetIdText(id));
+        if (!std::filesystem::create_directory(staging)) {
+            error = "Cannot reserve a temporary folder for the material copy.";
+            return false;
+        }
+        ownsStaging = true;
+        const auto temporary = staging / "material.rasset";
+        if (!assets::writeAssetFile(temporary, assets::makeMaterialAssetFile(*copy), error)) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            std::filesystem::remove(staging, ignored);
+            return false;
+        }
+        // Publish only the new file, without replacing an existing destination.
+        // Other project materials and unapplied drafts are never saved here.
+        if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            error = "Cannot publish the material copy: " + std::system_category().message(GetLastError());
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            std::filesystem::remove(staging, ignored);
+            return false;
+        }
+        std::error_code ignored;
+        std::filesystem::remove(staging, ignored);
+        staging.clear();
+        assets_ = std::move(proposed);
+        refreshContent();
+        selectContentFolder("Materials");
+        selectedAsset_ = "Materials/" + filename;
+        selectMaterial(id);
+        status_ = "Copied material to Project Content. Assign the copy to an Actor to use your edits.";
+        return true;
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        if (ownsStaging && !staging.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove(staging / "material.rasset", ignored);
+            std::filesystem::remove(staging, ignored);
+        }
+        return false;
+    }
+}
+
+bool SceneEditor::navigateContentBack() {
+    if (contentHistoryIndex_ == 0) return false;
+    contentFolder_ = contentHistory_[--contentHistoryIndex_];
+    if (assets::isEngineContentPath(contentFolder_)) contentEngineVisible_ = true;
+    contentRevealFolder_ = true;
+    selectedAsset_.clear();
+    return true;
+}
+
+bool SceneEditor::navigateContentForward() {
+    if (contentHistoryIndex_ + 1 >= contentHistory_.size()) return false;
+    contentFolder_ = contentHistory_[++contentHistoryIndex_];
+    if (assets::isEngineContentPath(contentFolder_)) contentEngineVisible_ = true;
+    contentRevealFolder_ = true;
+    selectedAsset_.clear();
+    return true;
+}
+
+bool SceneEditor::navigateContentUp() {
+    if (contentFolder_.empty() || contentFolder_ == assets::EngineContentPrefix) return false;
+    selectContentFolder(parentFolder(contentFolder_));
+    return true;
 }
 
 void SceneEditor::refreshContent() {
     registry_.setContentRoot(project_.contentRoot);
+    registry_.setEngineContentRoot(project_.engineRoot / "Content");
     registry_.scan(contentError_);
+    if (!selectedAsset_.empty() && !registry_.find(selectedAsset_)) selectedAsset_.clear();
+    if (std::find(registry_.folders().begin(), registry_.folders().end(), contentFolder_) == registry_.folders().end())
+        selectContentFolder(std::string());
 }
 
 void SceneEditor::activateAsset(const assets::AssetEntry& entry) {
     switch (entry.type) {
     case assets::AssetType::Scene:
-        requestSceneOpen(entry.path);
+        if (entry.readOnly()) status_ = "Engine scenes are read-only; open a project scene to edit Actors.";
+        else requestSceneOpen(entry.path);
         break;
     case assets::AssetType::Material:
         if (assets_.findMaterial(entry.id)) selectMaterial(entry.id);
@@ -1204,6 +1383,8 @@ void SceneEditor::activateAsset(const assets::AssetEntry& entry) {
 }
 
 void SceneEditor::showAssetDetails(std::string relativePath) {
+    if (relativePath.empty()) { closeAssetDetails(); return; }
+    assetDetailsError_.clear();
     assetDetailsPath_ = std::move(relativePath);
     assetDetailsOpen_ = true;
     assetDetailsFocusRequested_ = true;
@@ -1211,6 +1392,7 @@ void SceneEditor::showAssetDetails(std::string relativePath) {
 }
 
 void SceneEditor::openAssetDetails(const assets::AssetEntry& entry) {
+    assetDetailsError_.clear();
     assetDetailsPath_ = entry.relativePath;
     assetDetailsOpen_ = true;
     assetDetailsFocusRequested_ = true;
@@ -1256,10 +1438,10 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
             assetDetailsAge_ += ImGui::GetIO().DeltaTime;
             if (assetDetailsAge_ > 0.3f) {
                 (void)renderer.renderMaterialPreview(*material, static_cast<std::uint32_t>(previewSize),
-                    assetDetailsError_);
+                    assetDetailsError_, renderer::PreviewSlot::AssetDetails);
                 assetDetailsAge_ = 0.0f;
             }
-            if (auto* texture = renderer.materialPreviewTexture()) {
+            if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
                     previewOrigin, ImVec2(previewOrigin.x + previewSize, previewOrigin.y + previewSize));
                 drewPreview = true;
@@ -1269,14 +1451,14 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         const auto* mesh = assets_.findMesh(entry->id);
         if (mesh) {
             scene::World previewWorld;
-            previewWorld.createActor(mesh->name, mesh->id, 1);
+            previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
             assetDetailsAge_ += ImGui::GetIO().DeltaTime;
             if (assetDetailsAge_ > 0.3f) {
                 (void)renderer.renderScenePreview(previewWorld, assets_,
-                    static_cast<std::uint32_t>(previewSize), assetDetailsError_);
+                    static_cast<std::uint32_t>(previewSize), assetDetailsError_, renderer::PreviewSlot::AssetDetails);
                 assetDetailsAge_ = 0.0f;
             }
-            if (auto* texture = renderer.materialPreviewTexture()) {
+            if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
                     previewOrigin, ImVec2(previewOrigin.x + previewSize, previewOrigin.y + previewSize));
                 drewPreview = true;
@@ -1289,15 +1471,16 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
                 previewSize - 30.0f, entry->thumbnail);
         } else {
             drawAssetIcon(draw, ImVec2(previewOrigin.x + previewSize * 0.5f, previewOrigin.y + previewSize * 0.5f),
-                previewSize * 0.3f, entry->type, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+                previewSize * 0.3f, entry->type, ImGui::GetColorU32(imgui::assetTypeColor(entry->type)));
         }
     }
 
     ImGui::SameLine();
     ImGui::BeginGroup();
     ImGui::Text("Name: %s", entry->name.c_str());
-    ImGui::Text("Type: %s", assets::assetTypeName(entry->type));
+    ImGui::TextColored(imgui::assetTypeColor(entry->type), "Type: %s", assets::assetTypeName(entry->type));
     ImGui::Text("GUID: %s", entry->id ? assets::assetIdText(entry->id).c_str() : "-");
+    ImGui::TextDisabled("Source: %s", entry->readOnly() ? "Engine Content (read-only)" : "Project Content");
     ImGui::TextWrapped("Path: %s", entry->relativePath.c_str());
     char sizeBuffer[32]{};
     ImGui::Text("Size: %s", sizeLabel(entry->sizeBytes, sizeBuffer, sizeof(sizeBuffer)));
@@ -1321,9 +1504,17 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
     }
     if (!assetDetailsError_.empty()) ImGui::TextDisabled("%s", assetDetailsError_.c_str());
     ImGui::Spacing();
+    const auto copyId = entry->readOnly() && entry->type == assets::AssetType::Material ? entry->id : 0;
     if (ImGui::Button("Open", ImVec2(90.0f, 0.0f))) {
-        activateAsset(*entry);
+        const auto selected = *entry;
+        activateAsset(selected);
         assetDetailsOpen_ = false;
+    }
+    if (copyId) {
+        continueButtonRow("Copy to Project");
+        ImGui::BeginDisabled(materialDraftDirty_ || !assets_.findMaterial(copyId));
+        if (ImGui::Button("Copy to Project")) pendingContentCopy_ = copyId;
+        ImGui::EndDisabled();
     }
     ImGui::SameLine();
     if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) assetDetailsOpen_ = false;
@@ -1343,224 +1534,400 @@ void SceneEditor::requestSceneOpen(const std::filesystem::path& path) {
 
 void SceneEditor::drawAssets() {
     if (registry_.contentRoot() != project_.contentRoot) refreshContent();
-    if (ImGui::Button("List")) contentGridView_ = false;
-    ImGui::SameLine();
-    if (ImGui::Button("Grid")) contentGridView_ = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Import OBJ...")) importMesh();
-    ImGui::SameLine();
-    if (ImGui::Button("New folder")) { newFolderBuffer_.clear(); newFolderOpen_ = true; }
-    ImGui::SameLine();
+    contentFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    const bool engineFolder = assets::isEngineContentPath(contentFolder_);
+    if (ImGui::Button("Add...")) ImGui::OpenPopup("##content-add");
+    if (ImGui::BeginPopup("##content-add")) {
+        if (ImGui::MenuItem("New folder...", nullptr, false, !engineFolder)) { newFolderBuffer_.clear(); newFolderOpen_ = true; }
+        if (ImGui::MenuItem("Import OBJ...", nullptr, false, !engineFolder)) importMesh();
+        ImGui::Separator();
+        ImGui::TextDisabled("Scene mesh library");
+        for (const auto& mesh : assets_.meshes) {
+            const auto label = mesh.name + "##mesh-" + std::to_string(mesh.id);
+            if (ImGui::MenuItem(label.c_str(), nullptr, selectedMesh_ == mesh.id)) selectedMesh_ = mesh.id;
+        }
+        ImGui::Separator();
+        commandButton("actor.addFromMesh");
+        ImGui::EndPopup();
+    }
+    continueButtonRow("Import...");
+    ImGui::BeginDisabled(engineFolder);
+    if (ImGui::Button("Import...")) importMesh();
+    ImGui::EndDisabled();
+    continueButtonRow("Refresh");
     if (ImGui::Button("Refresh")) refreshContent();
-    ImGui::SameLine();
-    ImGui::TextDisabled("%zu assets", registry_.entries().size());
-    if (!contentError_.empty())
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.35f, 1.0f), "%s", contentError_.c_str());
-
-    ImGui::Separator();
-    if (ImGui::SmallButton("Content")) { contentFolder_.clear(); selectedAsset_.clear(); }
+    continueButtonRow("View...");
+    if (ImGui::Button("View...")) ImGui::OpenPopup("##content-view");
+    if (ImGui::BeginPopup("##content-view")) {
+        ImGui::Checkbox("Show Sources", &contentSourcesVisible_);
+        if (ImGui::Checkbox("Show Engine Content", &contentEngineVisible_) && !contentEngineVisible_ && engineFolder)
+            selectContentFolder(std::string());
+        ImGui::Separator();
+        if (ImGui::RadioButton("Tiles", contentGridView_)) contentGridView_ = true;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("List", !contentGridView_)) contentGridView_ = false;
+        ImGui::SetNextItemWidth(160.0f);
+        ImGui::SliderFloat("Thumbnail size", &contentThumbnailSize_, 48.0f, 128.0f, "%.0f");
+        const char* sorts[] = {"Name", "Type", "Size"};
+        int sort = static_cast<int>(contentQuery_.sort);
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::Combo("Sort by", &sort, sorts, 3)) contentQuery_.sort = static_cast<assets::AssetSort>(sort);
+        ImGui::Checkbox("Descending", &contentQuery_.descending);
+        ImGui::Checkbox("Show superseded legacy files", &contentQuery_.showLegacy);
+        ImGui::EndPopup();
+    }
+    continueButtonRow("<");
+    ImGui::BeginDisabled(contentHistoryIndex_ == 0);
+    if (ImGui::SmallButton("<##content-back")) navigateContentBack();
+    ImGui::EndDisabled();
+    ImGui::SameLine(0.0f, 4.0f);
+    ImGui::BeginDisabled(contentHistoryIndex_ + 1 >= contentHistory_.size());
+    if (ImGui::SmallButton(">##content-forward")) navigateContentForward();
+    ImGui::EndDisabled();
+    ImGui::SameLine(0.0f, 4.0f);
+    ImGui::BeginDisabled(contentFolder_.empty() || contentFolder_ == assets::EngineContentPrefix);
+    if (ImGui::SmallButton("Up")) navigateContentUp();
+    ImGui::EndDisabled();
+    // The source switch remains available when the Sources pane is collapsed.
+    const bool currentEngine = assets::isEngineContentPath(contentFolder_);
+    const auto rootLabel = currentEngine ? "Engine Content" : "Project Content";
+    continueButtonRow(rootLabel);
+    if (ImGui::SmallButton(rootLabel)) selectContentFolder(currentEngine ? std::string(assets::EngineContentPrefix) : std::string());
+    ImGui::SameLine(0.0f, 3.0f);
+    if (ImGui::SmallButton("v##content-source")) ImGui::OpenPopup("##content-source-menu");
+    if (ImGui::BeginPopup("##content-source-menu")) {
+        if (ImGui::MenuItem("Project Content", nullptr, !currentEngine)) selectContentFolder(std::string());
+        if (contentEngineVisible_ && ImGui::MenuItem("Engine Content", nullptr, currentEngine)) selectContentFolder(std::string(assets::EngineContentPrefix));
+        ImGui::EndPopup();
+    }
     {
-        std::string accumulated;
-        std::string_view rest = contentFolder_;
+        // Navigation mutates the live path; breadcrumb views borrow this copy.
+        const auto path = contentFolder_;
+        std::string accumulated = assets::isEngineContentPath(path) ? std::string(assets::EngineContentPrefix) : std::string();
+        std::string_view rest = path;
+        if (!accumulated.empty()) rest.remove_prefix(assets::EngineContentPrefix.size());
         while (!rest.empty()) {
             const auto slash = rest.find('/');
             const auto piece = rest.substr(0, slash);
-            accumulated = accumulated.empty() ? std::string(piece) : accumulated + "/" + std::string(piece);
-            ImGui::SameLine(0.0f, 4.0f);
-            ImGui::TextDisabled("/");
-            ImGui::SameLine(0.0f, 4.0f);
+            accumulated += (accumulated.empty() || accumulated == assets::EngineContentPrefix ? "" : "/") + std::string(piece);
             const auto label = std::string(piece) + "##crumb-" + accumulated;
-            if (ImGui::SmallButton(label.c_str())) { contentFolder_ = accumulated; selectedAsset_.clear(); }
+            continueButtonRow(std::string(piece).c_str());
+            if (ImGui::SmallButton(label.c_str())) selectContentFolder(accumulated);
             if (slash == std::string_view::npos) break;
             rest.remove_prefix(slash + 1);
         }
     }
+    const float filterWidth = 110.0f;
+    const float recursiveWidth = ImGui::GetFrameHeight() + ImGui::CalcTextSize("Include subfolders").x + 16.0f;
+    const float searchAvailable = ImGui::GetContentRegionAvail().x;
+    const bool inlineFilters = searchAvailable > filterWidth + recursiveWidth + 160.0f;
+    ImGui::SetNextItemWidth(std::max(80.0f, searchAvailable - (inlineFilters ? filterWidth + recursiveWidth + 16.0f : 0.0f)));
+    textInput("##content-search", contentQuery_.search);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Search names and paths. All words must match.");
+    if (contentQuery_.search.empty() && !ImGui::IsItemActive()) {
+        const auto min = ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddText(ImVec2(min.x + ImGui::GetStyle().FramePadding.x,
+            min.y + ImGui::GetStyle().FramePadding.y), ImGui::GetColorU32(ImGuiCol_TextDisabled), "Search assets...");
+    }
+    const char* types[] = {"All types", "Scenes", "Materials", "Meshes", "Shaders"};
+    int type = static_cast<int>(contentQuery_.type);
+    if (inlineFilters) ImGui::SameLine();
+    ImGui::SetNextItemWidth(filterWidth);
+    ImGui::PushStyleColor(ImGuiCol_Text, type == 0 ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+        : imgui::assetTypeColor(contentQuery_.type));
+    const bool typeMenuOpen = ImGui::BeginCombo("##content-type", types[type]);
+    ImGui::PopStyleColor();
+    if (typeMenuOpen) {
+        for (int index = 0; index < 5; ++index) {
+            const auto assetType = static_cast<assets::AssetType>(index);
+            ImGui::PushStyleColor(ImGuiCol_Text, index == 0 ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                : imgui::assetTypeColor(assetType));
+            if (ImGui::Selectable(types[index], type == index)) contentQuery_.type = assetType;
+            ImGui::PopStyleColor();
+            if (type == index) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    continueButtonRow("Include subfolders");
+    ImGui::Checkbox("Include subfolders", &contentQuery_.recursive);
+    if (!contentError_.empty()) ImGui::TextWrapped("Content: %s", contentError_.c_str());
 
-    const float browserHeight = std::max(90.0f, ImGui::GetContentRegionAvail().y - 118.0f);
-    ImGui::BeginChild("##content-folders", ImVec2(190.0f, browserHeight), ImGuiChildFlags_Borders);
-    drawFolderTreeNode(std::string());
-    ImGui::EndChild();
-    ImGui::SameLine();
+    const float browserHeight = std::max(48.0f, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing());
+    const float availableWidth = ImGui::GetContentRegionAvail().x;
+    // Sources collapse on narrow floating panels; breadcrumbs remain available.
+    if (contentSourcesVisible_ && availableWidth >= 500.0f) {
+        contentSourcesWidth_ = std::clamp(contentSourcesWidth_, 100.0f, std::max(100.0f, availableWidth - 160.0f));
+        ImGui::BeginChild("##content-folders", ImVec2(contentSourcesWidth_, browserHeight), ImGuiChildFlags_Borders);
+        ImGui::TextDisabled("Sources");
+        drawFolderTreeNode(std::string());
+        if (contentEngineVisible_) drawFolderTreeNode(std::string(assets::EngineContentPrefix));
+        contentRevealFolder_ = false;
+        ImGui::EndChild();
+        ImGui::SameLine(0.0f, 2.0f);
+        ImGui::InvisibleButton("##content-splitter", ImVec2(5.0f, browserHeight));
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        if (ImGui::IsItemActive()) contentSourcesWidth_ += ImGui::GetIO().MouseDelta.x;
+        ImGui::SameLine(0.0f, 2.0f);
+    }
     ImGui::BeginChild("##content-assets", ImVec2(0.0f, browserHeight), ImGuiChildFlags_Borders);
     if (contentGridView_) drawAssetGrid(); else drawAssetRows();
     ImGui::EndChild();
-    // In-memory meshes are scene data, not files yet: keep them visible so
-    // "Add Actor from mesh" keeps working until the asset format lands.
-    if (ImGui::CollapsingHeader("Scene mesh library", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::BeginChild("Mesh library", ImVec2(0.0f, 96.0f), ImGuiChildFlags_Borders);
-        for (const auto& mesh : assets_.meshes) {
-            const auto label = mesh.name + "##" + std::to_string(mesh.id);
-            if (ImGui::Selectable(label.c_str(), selectedMesh_ == mesh.id)) selectedMesh_ = mesh.id;
-        }
-        ImGui::EndChild();
+    const auto count = visibleContentEntries().size();
+    const auto folders = contentQuery_.search.empty() && contentQuery_.type == assets::AssetType::Unknown
+        ? registry_.childFolders(contentFolder_).size() : 0;
+    ImGui::TextDisabled("%zu assets | %zu folders", count, folders);
+    if (!selectedAsset_.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("| Selected: %s", leafName(selectedAsset_).c_str());
     }
+    processContentActions();
     drawContentDialogs();
 }
 
-void SceneEditor::drawFolderTreeNode(const std::string& folder) {
-    std::vector<std::string> children;
-    for (const auto& candidate : registry_.folders())
-        if (candidate != folder && parentFolder(candidate) == folder) children.push_back(candidate);
+void SceneEditor::drawContentFolderTarget(const std::string& folder) {
+    if (assets::isEngineContentPath(folder)) return;
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("RAE_ASSET")) {
+            pendingContentMove_.assign(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+            pendingContentMoveFolder_ = folder;
+        }
+        ImGui::EndDragDropTarget();
+    }
+}
 
-    const bool root = folder.empty();
-    const auto label = root ? std::string("Content") : leafName(folder);
+void SceneEditor::drawFolderTreeNode(const std::string& folder) {
+    const auto children = registry_.childFolders(folder);
+    const bool root = folder.empty() || folder == assets::EngineContentPrefix;
+    const auto label = root ? std::string(folder.empty() ? "Project Content" : "Engine Content") : leafName(folder);
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (contentFolder_ == folder) flags |= ImGuiTreeNodeFlags_Selected;
     if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     if (root) flags |= ImGuiTreeNodeFlags_DefaultOpen;
-    const auto id = root ? std::string("Content###content-root") : label + "###folder-" + folder;
+    const auto id = label + "###folder-" + folder;
+    if (contentRevealFolder_ && (root || contentFolder_ == folder || contentFolder_.starts_with(folder + "/")))
+        ImGui::SetNextItemOpen(true);
     const bool open = ImGui::TreeNodeEx(id.c_str(), flags, "%s", label.c_str());
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-        contentFolder_ = folder;
-        selectedAsset_.clear();
-    }
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("RAE_ASSET")) {
-            const std::string source(static_cast<const char*>(payload->Data),
-                static_cast<std::size_t>(payload->DataSize));
-            std::string error;
-            if (assets::moveContentEntry(project_.contentRoot, source, folder, error)) {
-                refreshContent();
-                contentFolder_ = folder;
-                selectedAsset_.clear();
-                status_ = "Moved '" + source + "'.";
-            } else {
-                status_ = error;
-            }
-        }
-        ImGui::EndDragDropTarget();
-    }
+    if (contentRevealFolder_ && contentFolder_ == folder) ImGui::SetScrollHereY(.5f);
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) selectContentFolder(folder);
+    drawContentFolderTarget(folder);
     if (open && !(flags & ImGuiTreeNodeFlags_NoTreePushOnOpen)) {
         for (const auto& child : children) drawFolderTreeNode(child);
         ImGui::TreePop();
     }
 }
 
+std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) const {
+    if (entry.readOnly()) return "Engine Content is read-only. Copy to Project to edit.";
+    if (entry.path.lexically_normal() == scenePath_.lexically_normal()) return "The open scene cannot be deleted.";
+    if (entry.type == assets::AssetType::Mesh) {
+        if (const auto* mesh = assets_.findMesh(entry.id); mesh && mesh->primitive != assets::MeshPrimitive::Imported)
+            return "Built-in meshes are required by the editor.";
+    }
+    for (const auto& actor : world_.actors) {
+        if ((entry.type == assets::AssetType::Mesh && actor.mesh.meshId == entry.id) ||
+            (entry.type == assets::AssetType::Material && actor.mesh.materialId == entry.id))
+            return "This asset is used by an Actor in the open scene.";
+    }
+    if (entry.type == assets::AssetType::Material && entry.id == selectedMaterial_ && materialWindowOpen_)
+        return "Close the material editor before deleting this asset.";
+    if ((entry.type == assets::AssetType::Material && assets_.findMaterial(entry.id)) ||
+        (entry.type == assets::AssetType::Mesh && assets_.findMesh(entry.id)))
+        return "Loaded assets cannot be deleted while this project is open.";
+    return {};
+}
+
+void SceneEditor::drawAssetItemActions(const assets::AssetEntry& entry) {
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s\n%s\nDouble-click: Details%s", entry.name.c_str(), entry.relativePath.c_str(),
+        entry.readOnly() ? "Engine Content (read-only)" : "Project Content",
+        entry.type == assets::AssetType::Mesh ? "\nDrag: place in Viewport" : entry.readOnly() ? "" : "\nDrag: move to a folder");
+    if (!assetDragCancelled_ && ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("RAE_ASSET", entry.relativePath.data(), entry.relativePath.size());
+        ImGui::TextUnformatted(entry.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginPopupContextItem("##asset-menu")) {
+        selectedAsset_ = entry.relativePath;
+        if (ImGui::MenuItem("Open")) pendingContentOpen_ = entry.relativePath;
+        if (ImGui::MenuItem("Details...")) openAssetDetails(entry);
+        if (entry.type == assets::AssetType::Mesh && ImGui::MenuItem("Add Actor from mesh", nullptr, false,
+            assets_.findMesh(entry.id) && assets_.findMaterial(assets::EngineDefaultMaterialId))) {
+            selectedMesh_ = entry.id;
+            commands_.invoke("actor.addFromMesh");
+        }
+        if (entry.readOnly() && entry.type == assets::AssetType::Material &&
+            ImGui::MenuItem("Copy to Project", nullptr, false, !materialDraftDirty_ && assets_.findMaterial(entry.id)))
+            pendingContentCopy_ = entry.id;
+        const auto* mesh = entry.type == assets::AssetType::Mesh ? assets_.findMesh(entry.id) : nullptr;
+        const bool builtin = mesh && mesh->primitive != assets::MeshPrimitive::Imported;
+        if (ImGui::MenuItem("Rename file...", nullptr, false, !builtin && !entry.readOnly())) {
+            renameTarget_ = entry.relativePath;
+            renameBuffer_ = pathText(entry.path.stem());
+            renameOpen_ = true;
+        }
+        const auto reason = contentDeleteReason(entry);
+        if (ImGui::MenuItem("Delete...", nullptr, false, reason.empty())) {
+            deleteTarget_ = entry.relativePath;
+            deleteOpen_ = true;
+        }
+        if (!reason.empty()) ImGui::TextDisabled("%s", reason.c_str());
+        ImGui::EndPopup();
+    }
+}
+
+void SceneEditor::processContentActions() {
+    if (!pendingContentMove_.empty()) {
+        const auto source = std::exchange(pendingContentMove_, {});
+        const auto target = std::exchange(pendingContentMoveFolder_, {});
+        const auto* entry = registry_.find(source);
+        const auto* mesh = entry && entry->type == assets::AssetType::Mesh ? assets_.findMesh(entry->id) : nullptr;
+        const std::string root = entry && entry->type == assets::AssetType::Material ? "Materials"
+            : entry && entry->type == assets::AssetType::Mesh ? "Meshes"
+            : entry && entry->type == assets::AssetType::Scene ? "Scenes" : "";
+        std::string error;
+        if (!entry || entry->readOnly() || assets::isEngineContentPath(target)) {
+            contentError_ = "Engine Content is read-only. Copy to Project to edit.";
+        } else if (!root.empty() && target != root && !target.starts_with(root + "/")) {
+            contentError_ = "This asset must remain inside Content/" + root + ".";
+        } else if (mesh && mesh->primitive != assets::MeshPrimitive::Imported) {
+            contentError_ = "Built-in meshes cannot be moved.";
+        } else if (assets::moveContentEntry(project_.contentRoot, source, target, error)) {
+            const auto destination = target.empty() ? leafName(source) : target + "/" + leafName(source);
+            if ((project_.contentRoot / utf8Path(source)).lexically_normal() == scenePath_.lexically_normal())
+                scenePath_ = project_.contentRoot / utf8Path(destination);
+            if (assetDetailsPath_ == source) assetDetailsPath_ = destination;
+            refreshContent();
+            selectContentFolder(target);
+            selectedAsset_ = destination;
+            status_ = "Moved '" + source + "'.";
+        } else contentError_ = error;
+    }
+    if (!pendingContentOpen_.empty()) {
+        const auto path = std::exchange(pendingContentOpen_, {});
+        // Copy before activation: opening scenes replaces the registry.
+        if (const auto* found = registry_.find(path)) {
+            const auto entry = *found;
+            activateAsset(entry);
+        }
+    }
+    if (pendingContentCopy_) {
+        const auto source = std::exchange(pendingContentCopy_, 0);
+        if (!copyMaterialToProject(source, contentError_)) status_ = contentError_;
+    }
+}
+
 void SceneEditor::drawAssetRows() {
-    const auto entries = registry_.inFolder(contentFolder_);
-    if (entries.empty()) {
-        ImGui::TextDisabled("No assets in this folder. Use Import OBJ or New folder.");
+    const auto entries = visibleContentEntries();
+    const auto folders = contentQuery_.search.empty() && contentQuery_.type == assets::AssetType::Unknown
+        ? registry_.childFolders(contentFolder_) : std::vector<std::string>{};
+    if (entries.empty() && folders.empty()) {
+        ImGui::TextWrapped(contentQuery_.search.empty() && contentQuery_.type == assets::AssetType::Unknown
+            ? "This folder is empty. Import an OBJ or create a folder using Add."
+            : "No matching assets. Clear the search, choose All types, or include subfolders.");
         return;
     }
-    for (const auto* entry : entries) {
-        ImGui::PushID(entry->relativePath.c_str());
-        const float rowHeight = ImGui::GetTextLineHeight() + 10.0f;
-        const bool selected = selectedAsset_ == entry->relativePath;
-        if (ImGui::Selectable("##asset-row", selected, ImGuiSelectableFlags_AllowDoubleClick,
+    const float rowHeight = ImGui::GetTextLineHeight() + 12.0f;
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(folders.size() + entries.size()), rowHeight + ImGui::GetStyle().ItemSpacing.y);
+    while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+        const bool folder = static_cast<std::size_t>(i) < folders.size();
+        const auto* entry = folder ? nullptr : entries[i - folders.size()];
+        const auto& path = folder ? folders[i] : entry->relativePath;
+        const auto name = folder ? leafName(path) : entry->name;
+        ImGui::PushID(path.c_str());
+        if (ImGui::Selectable("##asset-row", !folder && selectedAsset_ == path, ImGuiSelectableFlags_AllowDoubleClick,
             ImVec2(0.0f, rowHeight))) {
-            selectedAsset_ = entry->relativePath;
-            if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry);
+            if (folder) { if (ImGui::IsMouseDoubleClicked(0)) selectContentFolder(path); }
+            else { selectedAsset_ = path; if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry); }
         }
-        if (ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
-            ImGui::TextUnformatted(entry->name.c_str());
-            ImGui::EndDragDropSource();
-        }
-        if (ImGui::BeginPopupContextItem("##asset-menu")) {
-            if (ImGui::MenuItem("Open")) activateAsset(*entry);
-            if (ImGui::MenuItem("Details...")) openAssetDetails(*entry);
-            if (ImGui::MenuItem("Rename")) {
-                renameTarget_ = entry->relativePath;
-                renameBuffer_ = entry->name;
-                renameOpen_ = true;
-            }
-            if (ImGui::MenuItem("Delete")) {
-                deleteTarget_ = entry->relativePath;
-                deleteOpen_ = true;
-            }
-            ImGui::EndPopup();
-        }
-        const ImVec2 rowMin = ImGui::GetItemRectMin();
-        const ImVec2 rowMax = ImGui::GetItemRectMax();
+        const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
         ImDrawList* draw = ImGui::GetWindowDrawList();
-        const ImU32 color = ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        if (entry->thumbnail.valid()) {
-            const float thumbSize = rowHeight - 4.0f;
-            drawThumbnail(draw, ImVec2(rowMin.x + 3.0f, rowMin.y + 2.0f), thumbSize, entry->thumbnail);
+        const float icon = rowHeight - 8.0f;
+        if (folder) {
+            draw->AddRectFilled(ImVec2(min.x + 4, min.y + 8), ImVec2(min.x + 4 + icon, min.y + 6 + icon), IM_COL32(110, 151, 190, 255), 2.0f);
+            draw->AddRectFilled(ImVec2(min.x + 4, min.y + 4), ImVec2(min.x + 10, min.y + 9), IM_COL32(110, 151, 190, 255));
+            drawContentFolderTarget(path);
         } else {
-            drawAssetIcon(draw, ImVec2(rowMin.x + 14.0f, rowMin.y + rowHeight * 0.5f), rowHeight * 0.55f,
-                entry->type, color);
+            const auto typeColor = ImGui::GetColorU32(imgui::assetTypeColor(entry->type));
+            draw->AddRectFilled(ImVec2(min.x, min.y + 3), ImVec2(min.x + 3, max.y - 3), typeColor);
+            if (entry->thumbnail.valid()) drawThumbnail(draw, ImVec2(min.x + 4, min.y + 4), icon, entry->thumbnail);
+            else drawAssetIcon(draw, ImVec2(min.x + 4 + icon * .5f, min.y + rowHeight * .5f), icon * .7f, entry->type, typeColor);
+            drawAssetItemActions(*entry);
         }
-        const float textY = rowMin.y + (rowHeight - ImGui::GetTextLineHeight()) * 0.5f;
-        ImGui::SetCursorScreenPos(ImVec2(rowMin.x + 30.0f, textY));
-        ImGui::TextUnformatted(entry->name.c_str());
         char buffer[32]{};
-        const auto meta = std::string(assets::assetTypeName(entry->type)) + "   " +
-            sizeLabel(entry->sizeBytes, buffer, sizeof(buffer));
+        const auto meta = folder ? std::string("Folder") : std::string(assets::assetTypeName(entry->type)) + "  " + sizeLabel(entry->sizeBytes, buffer, sizeof(buffer));
         const float metaWidth = ImGui::CalcTextSize(meta.c_str()).x;
-        ImGui::SetCursorScreenPos(ImVec2(rowMax.x - metaWidth - 6.0f, textY));
-        ImGui::TextDisabled("%s", meta.c_str());
-        ImGui::SetCursorScreenPos(ImVec2(rowMin.x, rowMax.y));
+        const bool showMeta = max.x - min.x > 280.0f;
+        const float textY = min.y + 6.0f;
+        draw->PushClipRect(ImVec2(min.x + rowHeight, min.y), ImVec2(showMeta ? max.x - metaWidth - 16 : max.x - 4, max.y), true);
+        draw->AddText(ImVec2(min.x + rowHeight, textY), ImGui::GetColorU32(ImGuiCol_Text), name.c_str());
+        draw->PopClipRect();
+        if (showMeta) draw->AddText(ImVec2(max.x - metaWidth - 4, textY), folder ? ImGui::GetColorU32(ImGuiCol_TextDisabled)
+            : ImGui::GetColorU32(imgui::assetTypeColor(entry->type)), meta.c_str());
         ImGui::PopID();
     }
 }
 
 void SceneEditor::drawAssetGrid() {
-    const auto entries = registry_.inFolder(contentFolder_);
-    if (entries.empty()) {
-        ImGui::TextDisabled("No assets in this folder. Use Import OBJ or New folder.");
-        return;
-    }
-    // Manual placement: Selectable ignores its size hint, so cells are laid out
-    // from a fixed origin instead of relying on ImGui cursor advance.
-    const float cell = std::clamp(ImGui::GetContentRegionAvail().y - 8.0f, 64.0f, 96.0f);
-    const float spacing = 8.0f;
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float available = std::max(cell, ImGui::GetContentRegionAvail().x);
-    const int columns = std::max(1, static_cast<int>((available + spacing) / (cell + spacing)));
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const auto* entry = entries[i];
-        const int column = static_cast<int>(i) % columns;
-        const int row = static_cast<int>(i) / columns;
-        const ImVec2 position{origin.x + column * (cell + spacing), origin.y + row * (cell + spacing)};
-        ImGui::SetCursorScreenPos(position);
-        ImGui::PushID(entry->relativePath.c_str());
-        const bool selected = selectedAsset_ == entry->relativePath;
-        if (ImGui::Selectable("##grid-cell", selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cell, cell))) {
-            selectedAsset_ = entry->relativePath;
-            if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", entry->name.c_str());
-        const float labelY = position.y + cell - ImGui::GetTextLineHeight() - 5.0f;
-        const float textWidth = std::min(ImGui::CalcTextSize(entry->name.c_str()).x, cell - 8.0f);
-        const float labelX = position.x + std::max(4.0f, (cell - textWidth) * 0.5f);
-        draw->PushClipRect(ImVec2(position.x + 2.0f, labelY - 1.0f),
-            ImVec2(position.x + cell - 2.0f, position.y + cell), true);
-        draw->AddText(ImVec2(labelX, labelY), ImGui::GetColorU32(ImGuiCol_Text), entry->name.c_str());
-        draw->PopClipRect();
-        if (ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload("RAE_ASSET", entry->relativePath.data(), entry->relativePath.size());
-            ImGui::TextUnformatted(entry->name.c_str());
-            ImGui::EndDragDropSource();
-        }
-        if (ImGui::BeginPopupContextItem("##grid-menu")) {
-            if (ImGui::MenuItem("Open")) activateAsset(*entry);
-            if (ImGui::MenuItem("Details...")) openAssetDetails(*entry);
-            if (ImGui::MenuItem("Rename")) {
-                renameTarget_ = entry->relativePath;
-                renameBuffer_ = entry->name;
-                renameOpen_ = true;
+    const auto entries = visibleContentEntries();
+    const auto folders = contentQuery_.search.empty() && contentQuery_.type == assets::AssetType::Unknown
+        ? registry_.childFolders(contentFolder_) : std::vector<std::string>{};
+    const auto count = folders.size() + entries.size();
+    if (count == 0) { drawAssetRows(); return; }
+    const float labelsHeight = ImGui::GetTextLineHeight() * 3.0f + 16.0f;
+    // Fit one complete card in a short dock: names and type must remain visible.
+    const float thumbnailSize = std::min(contentThumbnailSize_,
+        std::max(24.0f, ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y * 2.0f - labelsHeight - 4.0f));
+    const float width = std::max(88.0f, thumbnailSize + 32.0f);
+    const float height = thumbnailSize + labelsHeight;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const int columns = std::max(1, static_cast<int>((ImGui::GetContentRegionAvail().x + spacing) / (width + spacing)));
+    const float originX = ImGui::GetCursorScreenPos().x;
+    const int rows = (static_cast<int>(count) + columns - 1) / columns;
+    ImGuiListClipper clipper;
+    clipper.Begin(rows, height + ImGui::GetStyle().ItemSpacing.y);
+    while (clipper.Step()) for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+        const float y = ImGui::GetCursorScreenPos().y;
+        for (int col = 0; col < columns; ++col) {
+            const auto i = static_cast<std::size_t>(row * columns + col);
+            if (i >= count) break;
+            const bool folder = i < folders.size();
+            const auto* entry = folder ? nullptr : entries[i - folders.size()];
+            const auto& path = folder ? folders[i] : entry->relativePath;
+            const auto name = folder ? leafName(path) : entry->name;
+            const ImVec2 position(originX + col * (width + spacing), y);
+            ImGui::SetCursorScreenPos(position);
+            ImGui::PushID(path.c_str());
+            ImGui::GetWindowDrawList()->AddRectFilled(position, ImVec2(position.x + width, position.y + height),
+                ImGui::GetColorU32(ImGuiCol_FrameBg, 0.55f), 3.0f);
+            if (ImGui::Selectable("##asset-tile", !folder && selectedAsset_ == path, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(width, height))) {
+                if (folder) { if (ImGui::IsMouseDoubleClicked(0)) selectContentFolder(path); }
+                else { selectedAsset_ = path; if (ImGui::IsMouseDoubleClicked(0)) openAssetDetails(*entry); }
             }
-            if (ImGui::MenuItem("Delete")) {
-                deleteTarget_ = entry->relativePath;
-                deleteOpen_ = true;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImVec2 thumb(position.x + (width - thumbnailSize) * 0.5f, position.y + 6.0f);
+            if (folder) {
+                draw->AddRectFilled(ImVec2(thumb.x + 6, thumb.y + thumbnailSize * .3f), ImVec2(thumb.x + thumbnailSize - 6, thumb.y + thumbnailSize - 8), IM_COL32(110, 151, 190, 255), 4.0f);
+                draw->AddRectFilled(ImVec2(thumb.x + 6, thumb.y + thumbnailSize * .2f), ImVec2(thumb.x + thumbnailSize * .45f, thumb.y + thumbnailSize * .4f), IM_COL32(110, 151, 190, 255), 3.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nDouble-click to open folder", path.c_str());
+                drawContentFolderTarget(path);
+            } else {
+                if (entry->thumbnail.valid()) drawThumbnail(draw, thumb, thumbnailSize, entry->thumbnail);
+                else drawAssetIcon(draw, ImVec2(thumb.x + thumbnailSize * .5f, thumb.y + thumbnailSize * .5f), thumbnailSize * .5f, entry->type, ImGui::GetColorU32(imgui::assetTypeColor(entry->type)));
+                drawAssetItemActions(*entry);
+                draw->AddRectFilled(ImVec2(position.x, position.y + height - 3), ImVec2(position.x + width, position.y + height),
+                    ImGui::GetColorU32(imgui::assetTypeColor(entry->type)));
             }
-            ImGui::EndPopup();
+            const float textY = position.y + thumbnailSize + 10.0f;
+            draw->PushClipRect(ImVec2(position.x + 5, textY), ImVec2(position.x + width - 5, textY + ImGui::GetTextLineHeight() * 2), true);
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(position.x + 5, textY), ImGui::GetColorU32(ImGuiCol_Text), name.c_str(), nullptr, width - 10.0f);
+            draw->PopClipRect();
+            draw->AddText(ImVec2(position.x + 5, position.y + height - ImGui::GetTextLineHeight() - 4),
+                folder ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : ImGui::GetColorU32(imgui::assetTypeColor(entry->type)),
+                folder ? "Folder" : assets::assetTypeName(entry->type));
+            ImGui::PopID();
         }
-        const float thumbSize = cell - 36.0f;
-        const ImVec2 thumbPos{position.x + (cell - thumbSize) * 0.5f, position.y + 6.0f};
-        if (entry->thumbnail.valid()) {
-            drawThumbnail(draw, thumbPos, thumbSize, entry->thumbnail);
-        } else {
-            drawAssetIcon(draw, ImVec2(position.x + cell * 0.5f, position.y + 6.0f + thumbSize * 0.5f),
-                thumbSize * 0.4f, entry->type,
-                ImGui::GetColorU32(selected ? ImGuiCol_Text : ImGuiCol_TextDisabled));
-        }
-        ImGui::PopID();
+        ImGui::SetCursorScreenPos(ImVec2(originX, y + height + ImGui::GetStyle().ItemSpacing.y));
     }
-    const int rows = (static_cast<int>(entries.size()) + columns - 1) / columns;
-    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cell + spacing)));
 }
 
 void SceneEditor::drawContentDialogs() {
@@ -1576,9 +1943,12 @@ void SceneEditor::drawContentDialogs() {
             ImGui::CloseCurrentPopup();
         }
         if (create) {
-            const bool valid = !newFolderBuffer_.empty() &&
+            const bool valid = !newFolderBuffer_.empty() && newFolderBuffer_ != "." && newFolderBuffer_ != ".." &&
+                newFolderBuffer_.back() != '.' && newFolderBuffer_.back() != ' ' &&
                 newFolderBuffer_.find_first_of(std::string_view("/\\:*?\"<>|")) == std::string::npos;
-            if (!valid) {
+            if (assets::isEngineContentPath(contentFolder_)) {
+                status_ = "Engine Content is read-only.";
+            } else if (!valid) {
                 status_ = "Folder names cannot be empty or contain path characters.";
             } else {
                 std::error_code code;
@@ -1588,8 +1958,7 @@ void SceneEditor::drawContentDialogs() {
                     status_ = "Cannot create the folder: " + code.message();
                 } else {
                     refreshContent();
-                    contentFolder_ = contentFolder_.empty() ? newFolderBuffer_
-                        : contentFolder_ + "/" + newFolderBuffer_;
+                    selectContentFolder(contentFolder_.empty() ? newFolderBuffer_ : contentFolder_ + "/" + newFolderBuffer_);
                     status_ = "Created folder '" + newFolderBuffer_ + "'.";
                     ImGui::CloseCurrentPopup();
                 }
@@ -1603,6 +1972,7 @@ void SceneEditor::drawContentDialogs() {
         renameOpen_ = false;
     }
     if (ImGui::BeginPopupModal("Rename asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Rename the asset file; its GUID remains unchanged.");
         ImGui::SetNextItemWidth(240.0f);
         textInput("##rename-asset", renameBuffer_);
         const bool rename = ImGui::Button("Rename", ImVec2(90.0f, 0.0f));
@@ -1614,11 +1984,15 @@ void SceneEditor::drawContentDialogs() {
         if (rename && !renameTarget_.empty()) {
             const auto source = project_.contentRoot / utf8Path(renameTarget_);
             std::string extension = pathText(source.extension());
-            const bool valid = !renameBuffer_.empty() &&
+            const bool valid = !renameBuffer_.empty() && renameBuffer_ != "." && renameBuffer_ != ".." &&
+                renameBuffer_.back() != '.' && renameBuffer_.back() != ' ' &&
                 renameBuffer_.find_first_of(std::string_view("/\\:*?\"<>|")) == std::string::npos;
             const auto destination = source.parent_path() / utf8Path(renameBuffer_ + extension);
             std::error_code code;
-            if (!valid) {
+            const auto* entry = registry_.find(renameTarget_);
+            if (!entry || entry->readOnly() || assets::isEngineContentPath(renameTarget_)) {
+                status_ = "Engine Content is read-only.";
+            } else if (!valid) {
                 status_ = "Asset names cannot be empty or contain path characters.";
             } else if (std::filesystem::exists(destination, code)) {
                 status_ = "An asset with that name already exists.";
@@ -1627,9 +2001,20 @@ void SceneEditor::drawContentDialogs() {
                 if (code) {
                     status_ = "Cannot rename the asset: " + code.message();
                 } else {
-                    const auto folder = pathText(source.parent_path().lexically_relative(project_.contentRoot));
+                    auto folder = pathText(source.parent_path().lexically_relative(project_.contentRoot));
+                    if (folder == ".") folder.clear();
+                    const auto renamed = folder.empty() ? renameBuffer_ + extension : folder + "/" + renameBuffer_ + extension;
+                    if (source.lexically_normal() == scenePath_.lexically_normal()) scenePath_ = destination;
+                    if (assetDetailsPath_ == renameTarget_) assetDetailsPath_ = renamed;
+                    // A saved scene thumbnail follows the filename. Failure is reported without hiding it.
+                    auto oldThumbnail = source; oldThumbnail += ".rthumb";
+                    auto newThumbnail = destination; newThumbnail += ".rthumb";
+                    std::error_code thumbnailError;
+                    if (std::filesystem::exists(oldThumbnail, thumbnailError))
+                        std::filesystem::rename(oldThumbnail, newThumbnail, thumbnailError);
                     refreshContent();
-                    selectedAsset_ = folder.empty() ? renameBuffer_ + extension : folder + "/" + renameBuffer_ + extension;
+                    selectedAsset_ = renamed;
+                    if (thumbnailError) contentError_ = "Asset renamed, but thumbnail rename failed: " + thumbnailError.message();
                     status_ = "Renamed to '" + renameBuffer_ + extension + "'.";
                     renameTarget_.clear();
                     ImGui::CloseCurrentPopup();
@@ -1645,6 +2030,11 @@ void SceneEditor::drawContentDialogs() {
     }
     if (ImGui::BeginPopupModal("Delete asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Delete '%s' from disk?", deleteTarget_.c_str());
+        const auto* target = registry_.find(deleteTarget_);
+        const auto reason = target ? contentDeleteReason(*target) : std::string("Asset no longer exists.");
+        if (!reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
+        ImGui::TextUnformatted("References in other saved scenes are not checked.");
+        ImGui::BeginDisabled(!reason.empty());
         if (ImGui::Button("Delete", ImVec2(90.0f, 0.0f))) {
             std::error_code code;
             std::filesystem::remove(project_.contentRoot / utf8Path(deleteTarget_), code);
@@ -1658,6 +2048,7 @@ void SceneEditor::drawContentDialogs() {
             }
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
             deleteTarget_.clear();
@@ -1740,7 +2131,7 @@ void SceneEditor::drawInstanceDetails() {
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##Material", assigned ? assigned->name.c_str() : "<missing>")) {
         for (const auto& candidate : assets_.materials) {
-            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
+            const std::string label = candidate.name + (readOnlyMaterial(candidate) ? " (Engine)" : "") + "##" + std::to_string(candidate.id);
             if (ImGui::Selectable(label.c_str(), actor->mesh.materialId == candidate.id)) {
                 actor->mesh.materialId = candidate.id; sceneDirty_ = true;
             }
@@ -1754,6 +2145,7 @@ void SceneEditor::drawInstanceDetails() {
     // material workspace; it must follow this Actor, not the shared mesh.
     ImGui::SeparatorText("Assigned material");
     if (const auto* material = assets_.findMaterial(actor->mesh.materialId)) {
+        ImGui::TextDisabled("%s", readOnlyMaterial(*material) ? "Engine Content (read-only)" : "Project Content");
         const auto label = material->name + "###InstanceMaterial";
         const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
         const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
@@ -1776,7 +2168,7 @@ void SceneEditor::drawMaterial() {
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     if (ImGui::BeginCombo("Asset", materialDraft_.name.c_str())) {
         for (const auto& material : assets_.materials) {
-            const auto label = material.name + "##" + std::to_string(material.id);
+            const auto label = material.name + (readOnlyMaterial(material) ? " (Engine)" : "") + "##" + std::to_string(material.id);
             if (ImGui::Selectable(label.c_str(), selectedMaterial_ == material.id)) selectMaterial(material.id);
         }
         ImGui::EndCombo();
@@ -1788,8 +2180,17 @@ void SceneEditor::drawMaterial() {
         selectMaterial(id); materialsDirty_ = sceneDirty_ = true;
     }
     ImGui::EndDisabled();
+    if (readOnlyMaterial(materialDraft_)) {
+        continueButtonRow("Copy to Project");
+        if (ImGui::Button("Copy to Project")) {
+            std::string error;
+            if (!copyMaterialToProject(selectedMaterial_, error)) status_ = error;
+        }
+    }
     continueButtonRow("Apply material");
+    ImGui::BeginDisabled(readOnlyMaterial(materialDraft_));
     if (ImGui::Button("Apply material")) applyMaterial();
+    ImGui::EndDisabled();
     continueButtonRow("Discard draft");
     ImGui::BeginDisabled(!materialDraftDirty_);
     if (ImGui::Button("Discard draft")) discardMaterial();
@@ -1822,9 +2223,12 @@ void SceneEditor::drawMaterial() {
         } else status_ = error;
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped("Parameters preview live. Apply confirms the draft; Save writes assets.");
+    const bool readOnly = readOnlyMaterial(materialDraft_);
+    if (readOnly) ImGui::TextWrapped("Engine Content - read-only. Copy to Project to customize this material.");
+    else ImGui::TextWrapped("Project Content. Parameters preview live. Apply confirms the draft; Save writes assets.");
     if (materialDraftDirty_) ImGui::TextColored({1,.7f,.25f,1}, "Live preview: draft not applied or saved.");
     else ImGui::TextDisabled("No unapplied material changes.");
+    ImGui::BeginDisabled(readOnly);
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
     materialDraftDirty_ |= textInput("Name", materialDraft_.name);
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
@@ -1841,7 +2245,8 @@ void SceneEditor::drawMaterial() {
     if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + twoSidedWidth <= contentRight) ImGui::SameLine();
     materialDraftDirty_ |= ImGui::Checkbox("Two-sided", &materialDraft_.twoSided);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render both faces and flip back-face normals. Changes preview immediately.");
-    ImGui::TextDisabled("Shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Project shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
     if (pendingMaterial_) {
         ImGui::OpenPopup("Unapplied material draft");
         if (ImGui::BeginPopupModal("Unapplied material draft", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -1863,6 +2268,7 @@ void SceneEditor::drawMaterial() {
 
 void SceneEditor::drawShader(renderer::SceneRenderer& renderer) {
     const bool unapplied = shaderDraft_ != renderer.shaderSource();
+    ImGui::TextWrapped("Project shared shader. Changes affect every material rendered in this project.");
     ImGui::TextDisabled("%s  |  revision %llu%s", pathText(renderer.materialShaderPath()).c_str(),
         static_cast<unsigned long long>(renderer.shaderRevision()), unapplied ? "  |  unapplied draft" : "");
     if (ImGui::Button("Apply / Compile")) {
@@ -1960,7 +2366,11 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
     }
     if (visible && materialWindowOpen_) {
         // Live GPU preview sphere with orbit interaction.
-        if (const auto* draft = materialPreview()) {
+        // The tool preview is always visible, including clean/read-only assets.
+        // materialPreview() remains reserved for unapplied scene overrides.
+        const auto* previewMaterial = materialPreview();
+        if (!previewMaterial) previewMaterial = assets_.findMaterial(selectedMaterial_);
+        if (const auto* draft = previewMaterial) {
             const float previewSize = 160.0f;
             ImGui::InvisibleButton("##material-preview", ImVec2(previewSize, previewSize),
                 ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
@@ -2039,14 +2449,26 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
 }
 
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
+    // Details may request a copy while Content is hidden. Consume before any
+    // panel borrows registry entries, never during an asset traversal.
+    if (pendingContentCopy_) {
+        const auto source = std::exchange(pendingContentCopy_, 0);
+        if (!copyMaterialToProject(source, contentError_)) status_ = contentError_;
+    }
     actorPanelFocused_ = false;
+    contentFocused_ = false;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) assetDragCancelled_ = false;
+    if (const auto* payload = ImGui::GetDragDropPayload(); payload && payload->IsDataType("RAE_ASSET") &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        // ImGui clears ActiveId on Escape, but can retain the payload until
+        // release. Cancel both scene placement and file moves for this gesture.
+        assetDragCancelled_ = true;
+        ImGui::ClearDragDrop();
+    }
     // Editor-only selection outline: the renderer reads this borrowed list for
     // this frame only. Colour follows the active theme accent so Black and Dark
     // Blue keep a consistent selection language.
     const auto& preferences = imgui::uiPreferences();
-    const bool outlineVisible = preferences.selectionOutline && !selection_.empty();
-    settings.outlineActors = outlineVisible ? selection_.data() : nullptr;
-    settings.outlineActorCount = outlineVisible ? static_cast<std::uint32_t>(selection_.size()) : 0;
     const ImVec4 accent = preferences.outlineThemeColor
         ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark)
         : ImVec4(preferences.outlineColor[0], preferences.outlineColor[1], preferences.outlineColor[2], 1.0f);
@@ -2099,7 +2521,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawOutlineSettings();
 
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer,
-        [this] { duplicateForDrag(); }, materialPreview());
+        [this] { duplicateForDrag(); }, registry_,
+        [this](assets::AssetId mesh, const scene::Transform& transform) {
+            createMeshActor(mesh, transform, "Place Mesh");
+        }, materialPreview());
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
@@ -2131,19 +2556,16 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     });
 
     dockManager_.drawPanel(EditorPanel::Content, [&] {
-        if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
-            if (ImGui::BeginTabItem("Meshes")) { drawAssets(); ImGui::EndTabItem(); }
-            ImGui::EndTabBar();
-        }
+        drawAssets();
     });
     drawMaterialWindow(renderer);
     drawAssetDetails(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -2181,6 +2603,11 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     if (selectedActor_ != sceneInspectorActor_)
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
+    // Placement and the other controls may replace/reallocate selection_. Bind
+    // this borrowed span only after all of this frame's selection edits.
+    const bool outlineVisible = preferences.selectionOutline && !selection_.empty();
+    settings.outlineActors = outlineVisible ? selection_.data() : nullptr;
+    settings.outlineActorCount = outlineVisible ? static_cast<std::uint32_t>(selection_.size()) : 0;
 }
 
 bool SceneEditor::drawCloseDialog(renderer::SceneRenderer& renderer) {
