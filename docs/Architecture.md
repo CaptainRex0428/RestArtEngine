@@ -208,7 +208,7 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 
 当前编辑器和光栅场景使用 DX11，独立 DX12／DXR 1.1 通道已通过共享图像接入场景。OpenGL、DX12、Vulkan、Null 的通用 RHI 仍为骨架，不能切换完整场景后端。原生 DXR 资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，Scene / Assets 不依赖具体图形 API；细节见 [HardwareRayTracing](HardwareRayTracing.md)。
 
-解析式兼容模式使用 GPU Shader 求交：内置 Sphere / Plane / Cube 使用精确解析路径，其余网格使用 `StructuredBuffer<RayTriangle>` 遍历。硬件模式将全部可见网格纳入 GPU BLAS／TLAS，提供逐帧预览和渐进式路径追踪，保留材质草稿与双面语义。`GlobalIlluminationSettings`／`Status` 独立表达算法请求与实际能力；当前 DXR 路径计算漫反射／GGX 多次反弹，累积线性 HDR，曝光在显示阶段处理。配置入口为 `Project → Project Settings... → Rendering`，请求值存于 `.raproject` 的可选 `rendering` 对象；历史失效及预算见 [GlobalIllumination](GlobalIllumination.md)。尚无降噪、发光／透明材质及其他后端 GI。
+解析式兼容模式使用 GPU Shader 求交：内置 Sphere / Plane / Cube 使用精确解析路径，其余网格使用 `StructuredBuffer<RayTriangle>` 遍历。硬件模式将全部可见网格纳入 GPU BLAS／TLAS，提供逐帧预览及渐进／实时路径采样，保留材质草稿与双面语义。`GlobalIlluminationSettings`／`Status` 分开表达算法、更新模式、间接贡献与实际能力。渐进模式累积完整路径追踪画面；实时模式持续输出线性 HDR 间接光，由 Forward／Deferred 的光照 Shader 与各自直接光合成。间接漫反射／GGX 镜面贡献独立控制，曝光在显示阶段处理。配置入口为 `Project → Project Settings... → Rendering`，请求值存于 `.raproject` 的可选 `rendering` 对象；历史失效及预算见 [GlobalIllumination](GlobalIllumination.md)。实时模式有边缘感知空间滤波，尚无运动重投影、发光／透明材质及其他后端 GI。
 
 ### 编辑器选中描边
 
