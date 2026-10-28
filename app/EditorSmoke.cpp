@@ -2605,10 +2605,12 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(findWindow("Scene Viewport##Interaction")->WorkRect.Contains(sceneDestination) &&
             sceneDestination.y > viewportToolbar.y + 50.0f,
             "Canceled-drop fixture is outside the scene image or inside its toolbar.");
-        const auto materialEntry = std::find_if(editor.assetRegistry().entries().begin(),
-            editor.assetRegistry().entries().end(), [](const auto& entry) { return entry.type == assets::AssetType::Material; });
-        require(materialEntry != editor.assetRegistry().entries().end(), "No Material exists for the unsupported drop test.");
-        const std::string materialPath = materialEntry->relativePath;
+        assets::AssetQuery materialQuery;
+        materialQuery.type = assets::AssetType::Material;
+        materialQuery.recursive = true;
+        const auto visibleMaterials = editor.assetRegistry().query(materialQuery);
+        require(!visibleMaterials.empty(), "No visible Material exists for the unsupported drop test.");
+        const std::string materialPath = visibleMaterials.front()->relativePath;
         for (int scenario = 0; scenario < 4; ++scenario) {
             const auto count = world.actors.size(), historySize = editor.undoStack().size(), history = editor.undoStack().cursor();
             const auto selected = editor.selectedActor();
