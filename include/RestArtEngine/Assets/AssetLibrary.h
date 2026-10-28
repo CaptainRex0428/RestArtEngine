@@ -7,6 +7,13 @@
 
 namespace rae::assets {
 using AssetId = std::uint64_t;
+enum class AssetOrigin { Project, Engine };
+// Stable engine identities occupy a small reserved range. Project files cannot
+// redefine them; the origin is assigned by the trusted content mount at load.
+inline constexpr AssetId EngineDefaultMaterialId = 0x0010000000000001ULL;
+[[nodiscard]] inline constexpr bool isEngineAssetId(AssetId id) noexcept {
+    return id >= 0x0010000000000000ULL && id <= 0x0010000000000fffULL;
+}
 enum class MeshPrimitive { Sphere, Plane, Cube, Imported };
 struct MeshVertex { float position[3]; float normal[3]; };
 struct MeshAsset {
@@ -27,6 +34,7 @@ struct MaterialAsset {
     // New materials cull back faces; legacy files without this field retain
     // their previously implicit two-sided visibility when deserialized.
     bool twoSided = false;
+    AssetOrigin origin = AssetOrigin::Project;
 };
 class AssetLibrary {
 public:
@@ -38,9 +46,14 @@ public:
     MaterialAsset* findMaterial(AssetId id);
     const MaterialAsset* findMaterial(AssetId id) const;
     AssetId createMaterial(std::string name);
+    // Copies parameters to a new project identity; throws if source is absent.
+    AssetId cloneMaterial(AssetId sourceId, std::string name);
     bool importObj(const std::filesystem::path& path, AssetId& result, std::string& error);
     bool saveMaterials(const std::filesystem::path& folder, std::string& error) const;
     bool loadMaterials(const std::filesystem::path& folder, std::string& error);
+    // Loads a read-only engine mount; requires the stable default material.
+    // Project reload/save never replace or copy these assets into the project.
+    bool loadEngineMaterials(const std::filesystem::path& folder, std::string& error);
     // Static meshes are persisted as .rasset containers; built-in primitives stay
     // procedural and are skipped. Loading keeps the built-ins already present.
     bool saveMeshes(const std::filesystem::path& folder, std::string& error) const;
@@ -53,6 +66,5 @@ public:
     [[nodiscard]] static std::string materialAssetFileName(const MaterialAsset& material);
 private:
     AssetId nextMeshId_ = 4;
-    AssetId nextMaterialId_ = 3;
 };
 } // namespace rae::assets

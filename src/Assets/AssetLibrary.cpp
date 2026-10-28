@@ -2,6 +2,8 @@
 #include "RestArtEngine/Assets/AssetFile.h"
 #include "RestArtEngine/Assets/AssetThumbnail.h"
 #include "AssetSerialization.h"
+#include "ContentFiles.h"
+#include <unordered_map>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -10,6 +12,64 @@
 namespace rae::assets {
 namespace {
 using Vec3 = std::array<float, 3>;
+
+struct StoredAssetPath {
+    std::filesystem::path path;
+    int priority = 0; // .rasset > .raasset > legacy JSON
+};
+using StoredAssetPaths = std::unordered_map<AssetId, StoredAssetPath>;
+
+StoredAssetPaths storedAssetPaths(const std::filesystem::path& folder, AssetFileType type) {
+    if (detail::contentLink(folder)) throw std::runtime_error("Asset folder must not be a linked directory.");
+    StoredAssetPaths result;
+    for (const auto& path : detail::contentFiles(folder)) {
+        AssetId id = 0;
+        int priority = 0;
+        if (isAssetContainerFile(path)) {
+            AssetFile file;
+            std::string error;
+            if (!readAssetFileHeader(path, file, error) || file.type != type) continue;
+            id = file.id;
+            priority = path.extension() == ".rasset" ? 2 : 1;
+        } else if (type == AssetFileType::Material && path.extension() == ".ramat") {
+            // A malformed unrelated legacy file is never overwritten by saving.
+            try { id = detail::readMaterial(detail::readJson(path).at("material")).id; }
+            catch (const std::exception&) { continue; }
+        } else continue;
+        const auto found = result.find(id);
+        if (found != result.end() && found->second.priority == priority && priority > 0)
+            throw std::runtime_error("Duplicate asset GUID: " + detail::pathUtf8(path));
+        if (found == result.end() || priority > found->second.priority) result[id] = {path, priority};
+    }
+    return result;
+}
+
+std::string pathKey(const std::filesystem::path& path) {
+    auto key = detail::pathUtf8(path.lexically_normal());
+#ifdef _WIN32
+    for (char& value : key) if (value >= 'A' && value <= 'Z') value += 'a' - 'A';
+#endif
+    return key;
+}
+
+std::filesystem::path saveAssetPath(const std::filesystem::path& folder, const std::string& fallback,
+    AssetId id, const StoredAssetPaths& existing, std::unordered_set<std::string>& reserved) {
+    const auto found = existing.find(id);
+    auto path = found == existing.end() ? folder / detail::pathFromUtf8(fallback) : found->second.path;
+    path.replace_extension(".rasset");
+    const auto base = path;
+    unsigned suffix = 0;
+    while (reserved.contains(pathKey(path)) || (std::filesystem::exists(path) &&
+        !(found != existing.end() && found->second.path == path))) {
+        path = base.parent_path() / detail::pathFromUtf8(detail::pathUtf8(base.stem()) + "-" + assetIdText(id) +
+            (suffix ? "-" + std::to_string(suffix) : std::string{}) + ".rasset");
+        ++suffix;
+    }
+    if (detail::contentLink(path)) throw std::runtime_error("Cannot save through a linked asset file.");
+    reserved.insert(pathKey(path));
+    return path;
+}
+
 Vec3 normalOf(const Vec3& a, const Vec3& b, const Vec3& c) {
     const double ux = double(b[0]) - a[0], uy = double(b[1]) - a[1], uz = double(b[2]) - a[2];
     const double vx = double(c[0]) - a[0], vy = double(c[1]) - a[1], vz = double(c[2]) - a[2];
@@ -74,7 +134,7 @@ MeshAsset cubeMesh() {
 } // namespace
 
 void AssetLibrary::createDefaults() {
-    meshes.clear(); materials.clear(); nextMeshId_=4; nextMaterialId_=3;
+    meshes.clear(); materials.clear(); nextMeshId_=4;
     meshes.push_back(sphereMesh()); meshes.push_back(planeMesh()); meshes.push_back(cubeMesh());
     MaterialAsset copper; copper.id=1; copper.name="Copper";
     MaterialAsset ground; ground.id=2; ground.name="Ground";
@@ -100,8 +160,22 @@ const MaterialAsset* AssetLibrary::findMaterial(AssetId id) const {
     return it==materials.end()?nullptr:&*it;
 }
 AssetId AssetLibrary::createMaterial(std::string name) {
-    MaterialAsset material; material.id=detail::nextId(materials,nextMaterialId_);
+    if (findMaterial(EngineDefaultMaterialId))
+        return cloneMaterial(EngineDefaultMaterialId, name.empty() ? "Material" : std::move(name));
+    MaterialAsset material;
+    do { material.id=generateAssetId(); } while (findMaterial(material.id));
     material.name=name.empty()?"Material":std::move(name);
+    materials.push_back(std::move(material));
+    return materials.back().id;
+}
+AssetId AssetLibrary::cloneMaterial(AssetId sourceId, std::string name) {
+    const auto* source = findMaterial(sourceId);
+    if (!source) throw std::runtime_error("Cannot copy a material that is not loaded.");
+    auto material = *source;
+    detail::validateMaterial(material);
+    do { material.id=generateAssetId(); } while (findMaterial(material.id));
+    material.origin = AssetOrigin::Project;
+    material.name = name.empty() ? material.name + " Copy" : std::move(name);
     materials.push_back(std::move(material));
     return materials.back().id;
 }
@@ -174,29 +248,26 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
 }
 bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::string& error) const {
     try {
+        const auto existing = storedAssetPaths(folder, AssetFileType::Material);
         std::unordered_set<AssetId> ids;
-        std::vector<std::filesystem::path> written;
+        std::unordered_set<std::string> reserved;
+        // Validate ownership before any write, so a forged project identity
+        // cannot partially save the project before being rejected.
         for (const auto& material : materials) {
             if (!ids.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
-            const auto path = folder / materialAssetFileName(material);
+            if (isEngineAssetId(material.id) != (material.origin == AssetOrigin::Engine))
+                throw std::runtime_error("Material identity does not match its Engine/Project origin.");
+            detail::validateMaterial(material);
+        }
+        for (const auto& material : materials) {
+            if (material.origin == AssetOrigin::Engine) continue;
+            // GUID owns its existing file, irrespective of browser move/rename.
+            // New assets use a GUID suffix when their display names collide.
+            const auto path = saveAssetPath(folder, materialAssetFileName(material), material.id, existing, reserved);
             if (!writeAssetFile(path, makeMaterialAssetFile(material), error)) return false;
-            written.push_back(path);
         }
-        // A renamed material writes a new file: drop the previous file that still
-        // carries the same GUID, otherwise the next load reports a duplicate.
-        std::error_code code;
-        for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
-            if (code) break;
-            if (!entry.is_regular_file(code)) continue;
-            const auto extension = entry.path().extension();
-            if (!isAssetContainerFile(entry.path())) continue;
-            if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
-            AssetFile stale;
-            std::string readError;
-            if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
-            if (stale.type != AssetFileType::Material || !ids.contains(stale.id)) continue;
-            std::filesystem::remove(entry.path(), code);
-        }
+        // Legacy sources and unrelated files belong to the project. Saving is
+        // not permission to remove them, including old .raasset containers.
         error.clear();
         return true;
     } catch (const std::exception& e) {
@@ -209,42 +280,89 @@ std::string AssetLibrary::materialAssetFileName(const MaterialAsset& material) {
     return sanitizeAssetName(material.name) + ".rasset";
 }
 
-bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error) {
-    try {
-        if (!std::filesystem::is_directory(folder))
-            throw std::runtime_error("Material directory does not exist: " + detail::pathUtf8(folder));
+namespace {
+std::vector<MaterialAsset> readMaterialFolder(const std::filesystem::path& folder, AssetOrigin origin) {
+        std::string error;
+        if (!std::filesystem::is_directory(folder) || detail::contentLink(folder))
+            throw std::runtime_error("Material directory does not exist or is linked: " + detail::pathUtf8(folder));
         std::vector<MaterialAsset> loaded;
         std::unordered_set<AssetId> ids;
-        std::vector<std::filesystem::path> legacy;
-        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
-            if (!entry.is_regular_file()) continue;
-            const auto extension = entry.path().extension();
-            if (isAssetContainerFile(entry.path())) {
-                AssetFile file;
-                if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
-                if (file.type != AssetFileType::Material) continue;
-                if (!readAssetFile(entry.path(), file, error)) throw std::runtime_error(error);
+        const auto files = detail::contentFiles(folder);
+        // Process modern containers first; same-GUID legacy files are fallbacks.
+        for (int pass = 0; pass < 3; ++pass) {
+            const auto preferredIds = ids;
+            for (const auto& path : files) {
+                const auto extension = path.extension();
+                if ((pass == 0 && extension != ".rasset") || (pass == 1 && extension != ".raasset") ||
+                    (pass == 2 && extension != ".ramat")) continue;
                 MaterialAsset material;
-                if (!readMaterialAssetFile(file, material, error)) throw std::runtime_error(error);
+                if (pass < 2) {
+                    AssetFile file;
+                    if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+                    if (file.type != AssetFileType::Material) continue;
+                    if (pass == 1 && preferredIds.contains(file.id)) continue;
+                    if (!readAssetFile(path, file, error) || !readMaterialAssetFile(file, material, error))
+                        throw std::runtime_error(error);
+                } else {
+                    const auto value = detail::readJson(path);
+                    if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
+                        throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(path));
+                    // A superseded JSON file is not the active material payload.
+                    if (preferredIds.contains(detail::readId(value.at("material").at("id")))) continue;
+                    material = detail::readMaterial(value.at("material"));
+                }
+                detail::validateMaterial(material);
+                if (isEngineAssetId(material.id) != (origin == AssetOrigin::Engine))
+                    throw std::runtime_error("Material GUID is not permitted in this " +
+                        std::string(origin == AssetOrigin::Engine ? "Engine" : "Project") +
+                        " Content mount: " + detail::pathUtf8(path));
+                material.origin = origin;
                 if (!ids.insert(material.id).second)
-                    throw std::runtime_error("Duplicate material GUID in directory: " + detail::pathUtf8(entry.path()));
+                    throw std::runtime_error("Duplicate material GUID in directory: " + detail::pathUtf8(path));
                 loaded.push_back(std::move(material));
-            } else if (extension == ".ramat") {
-                legacy.push_back(entry.path());
             }
         }
-        // Legacy .ramat files load only when the same GUID is not already present
-        // as a .rasset; the next save writes the new container.
-        for (const auto& path : legacy) {
-            const auto value = detail::readJson(path);
-            if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
-                throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(path));
-            auto material = detail::readMaterial(value.at("material"));
-            if (!ids.insert(material.id).second) continue;
-            loaded.push_back(std::move(material));
-        }
-        if (loaded.empty()) throw std::runtime_error("No .rasset or .ramat materials found.");
         std::sort(loaded.begin(), loaded.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        return loaded;
+}
+} // namespace
+
+bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error) {
+    try {
+        auto loaded = readMaterialFolder(folder, AssetOrigin::Project);
+        std::unordered_set<AssetId> ids;
+        for (const auto& material : loaded) ids.insert(material.id);
+        for (const auto& material : materials) {
+            if (material.origin != AssetOrigin::Engine) continue;
+            if (!isEngineAssetId(material.id)) throw std::runtime_error("Engine material has an invalid reserved identity.");
+            detail::validateMaterial(material);
+            if (!ids.insert(material.id).second) throw std::runtime_error("Duplicate Engine material ID.");
+            loaded.push_back(material);
+        }
+        materials = std::move(loaded);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std::string& error) {
+    try {
+        auto loaded = readMaterialFolder(folder, AssetOrigin::Engine);
+        if (std::none_of(loaded.begin(), loaded.end(), [](const auto& material) {
+            return material.id == EngineDefaultMaterialId;
+        })) throw std::runtime_error("Engine Content is missing DefaultMaterial (GUID 0010000000000001): " + detail::pathUtf8(folder));
+        std::unordered_set<AssetId> ids;
+        for (const auto& material : loaded) ids.insert(material.id);
+        for (const auto& material : materials) {
+            if (material.origin == AssetOrigin::Engine) continue;
+            if (isEngineAssetId(material.id)) throw std::runtime_error("Project material conflicts with a reserved Engine identity.");
+            detail::validateMaterial(material);
+            if (!ids.insert(material.id).second) throw std::runtime_error("Duplicate Project material ID.");
+            loaded.push_back(material);
+        }
         materials = std::move(loaded);
         error.clear();
         return true;
@@ -256,28 +374,16 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
 
 bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& error) const {
     try {
+        const auto existing = storedAssetPaths(folder, AssetFileType::StaticMesh);
         std::unordered_set<AssetId> ids;
-        std::vector<std::filesystem::path> written;
+        std::unordered_set<std::string> reserved;
         for (const auto& mesh : meshes) {
-            // Built-in primitives are engine data, not project assets.
             if (mesh.primitive != MeshPrimitive::Imported) continue;
             if (!ids.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
-            const auto path = folder / meshAssetFileName(mesh);
+            const auto path = saveAssetPath(folder, meshAssetFileName(mesh), mesh.id, existing, reserved);
             auto file = makeMeshAssetFile(mesh);
             attachThumbnail(file, renderMeshThumbnail(mesh));
             if (!writeAssetFile(path, file, error)) return false;
-            written.push_back(path);
-        }
-        std::error_code code;
-        for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
-            if (code) break;
-            if (!entry.is_regular_file(code) || !isAssetContainerFile(entry.path())) continue;
-            if (std::find(written.begin(), written.end(), entry.path()) != written.end()) continue;
-            AssetFile stale;
-            std::string readError;
-            if (!readAssetFileHeader(entry.path(), stale, readError)) continue;
-            if (stale.type != AssetFileType::StaticMesh || !ids.contains(stale.id)) continue;
-            std::filesystem::remove(entry.path(), code);
         }
         error.clear();
         return true;
@@ -294,32 +400,30 @@ std::string AssetLibrary::meshAssetFileName(const MeshAsset& mesh) {
 bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& error) {
     try {
         if (!std::filesystem::is_directory(folder)) { error.clear(); return true; }
-        std::vector<MeshAsset> loaded;
+        if (detail::contentLink(folder)) throw std::runtime_error("Mesh directory must not be linked.");
+        auto staged = meshes;
         std::unordered_set<AssetId> ids;
-        for (const auto& mesh : meshes) ids.insert(mesh.id);
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
-            if (!entry.is_regular_file() || !isAssetContainerFile(entry.path())) continue;
-            AssetFile file;
-            if (!readAssetFileHeader(entry.path(), file, error)) throw std::runtime_error(error);
-            if (file.type != AssetFileType::StaticMesh) continue;
-            if (!readAssetFile(entry.path(), file, error)) throw std::runtime_error(error);
-            MeshAsset mesh;
-            if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
-            const auto existing = std::find_if(meshes.begin(), meshes.end(),
-                [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
-            if (existing != meshes.end()) {
-                // A file for a built-in primitive replaces the procedural copy; a
-                // second file for an imported mesh is a duplicate.
-                if (existing->primitive == MeshPrimitive::Imported)
-                    throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(entry.path()));
-                *existing = std::move(mesh);
-                continue;
+        const auto files = detail::contentFiles(folder);
+        for (int pass = 0; pass < 2; ++pass) {
+            const auto preferredIds = ids;
+            for (const auto& path : files) {
+                if (path.extension() != (pass == 0 ? ".rasset" : ".raasset")) continue;
+                AssetFile file;
+                if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+                if (file.type != AssetFileType::StaticMesh) continue;
+                if (pass == 1 && preferredIds.contains(file.id)) continue;
+                if (!ids.insert(file.id).second)
+                    throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(path));
+                if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
+                MeshAsset mesh;
+                if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+                const auto existing = std::find_if(staged.begin(), staged.end(),
+                    [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
+                if (existing != staged.end()) *existing = std::move(mesh);
+                else staged.push_back(std::move(mesh));
             }
-            if (!ids.insert(mesh.id).second)
-                throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(entry.path()));
-            loaded.push_back(std::move(mesh));
         }
-        meshes.insert(meshes.end(), std::make_move_iterator(loaded.begin()), std::make_move_iterator(loaded.end()));
+        meshes = std::move(staged);
         error.clear();
         return true;
     } catch (const std::exception& e) {
@@ -330,25 +434,20 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
 
 bool AssetLibrary::ensureBuiltinMeshes(const std::filesystem::path& folder, std::string& error) const {
     try {
-        std::unordered_set<AssetId> present;
-        std::error_code code;
-        if (std::filesystem::is_directory(folder, code)) {
-            for (const auto& entry : std::filesystem::directory_iterator(folder, code)) {
-                if (code || !entry.is_regular_file(code) || !isAssetContainerFile(entry.path())) continue;
-                AssetFile file;
-                std::string readError;
-                if (!readAssetFileHeader(entry.path(), file, readError)) continue;
-                // A file without a thumbnail predates the preview feature: rewrite it
-                // so generated primitives always carry one.
-                if (file.type == AssetFileType::StaticMesh && file.manifest.contains("thumbnail")) present.insert(file.id);
-            }
-        }
+        const auto existing = storedAssetPaths(folder, AssetFileType::StaticMesh);
+        std::unordered_set<std::string> reserved;
         for (const auto& mesh : meshes) {
             if (mesh.primitive == MeshPrimitive::Imported) continue;
-            if (present.contains(mesh.id)) continue;
+            const auto found = existing.find(mesh.id);
+            if (found != existing.end()) {
+                AssetFile file;
+                std::string readError;
+                if (readAssetFileHeader(found->second.path, file, readError) && file.manifest.contains("thumbnail")) continue;
+            }
             auto file = makeMeshAssetFile(mesh);
             attachThumbnail(file, renderMeshThumbnail(mesh));
-            if (!writeAssetFile(folder / meshAssetFileName(mesh), file, error)) return false;
+            const auto path = saveAssetPath(folder, meshAssetFileName(mesh), mesh.id, existing, reserved);
+            if (!writeAssetFile(path, file, error)) return false;
         }
         error.clear();
         return true;

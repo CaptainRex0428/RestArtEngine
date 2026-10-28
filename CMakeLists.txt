@@ -80,6 +80,24 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(EngineContentTests tests/EngineContentTests.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+    target_include_directories(EngineContentTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(EngineContentTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(EngineContentTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME EngineContentTests COMMAND EngineContentTests "${CMAKE_CURRENT_SOURCE_DIR}/Content")
+    add_executable(ContentBrowserTests tests/ContentBrowserTests.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
+    target_include_directories(ContentBrowserTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(ContentBrowserTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(ContentBrowserTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME ContentBrowserTests COMMAND ContentBrowserTests)
     add_executable(GarbageCollectorTests tests/GarbageCollectorTests.cpp src/Core/GarbageCollector.cpp)
     target_include_directories(GarbageCollectorTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(GarbageCollectorTests PRIVATE UNICODE _UNICODE NOMINMAX)
@@ -98,6 +116,7 @@ install(TARGETS RestArtEngine DearImGui EXPORT RestArtEngineTargets
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES Engine.raeengine DESTINATION .)
 install(DIRECTORY Shaders/ DESTINATION Shaders)
+install(DIRECTORY Content/ DESTINATION Content)
 install(DIRECTORY Projects/Sandbox/ DESTINATION Projects/Sandbox)
 install(DIRECTORY assets/load/ DESTINATION assets/load)
 install(DIRECTORY vendor/imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/RestArtEngine/ThirdParty/imgui

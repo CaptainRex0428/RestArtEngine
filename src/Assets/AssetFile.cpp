@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <random>
 
 namespace rae::assets {
@@ -53,11 +54,10 @@ AssetFileType assetFileTypeFromName(std::string_view name) noexcept {
 }
 
 AssetId generateAssetId() {
-    // 64 random bits are enough for per-project uniqueness; the zero value stays
-    // reserved for "no asset".
+    // Project identities never occupy the engine-owned range or sentinel values.
     static std::mt19937_64 engine{std::random_device{}()};
     AssetId id = engine();
-    while (id == 0) id = engine();
+    while (id == 0 || id == std::numeric_limits<AssetId>::max() || isEngineAssetId(id)) id = engine();
     return id;
 }
 

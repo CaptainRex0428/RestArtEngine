@@ -14,6 +14,7 @@ project "RestArtEngine"
 		-- build does not compile them (they are loaded and compiled at runtime).
 		"Shaders/**.hlsl",
 		"Shaders/**.hlsli",
+		"Content/**.rasset",
 		"vendor/ImGuizmo/src/ImGuizmo.cpp",
 		"vendor/ImGuizmo/src/ImGuizmo.h",
 		"RestArtEngine.rc"
@@ -54,6 +55,9 @@ project "RestArtEngine"
 	-- Without this premake maps .hlsl to FxCompile and the build tries to
 	-- compile it with no shader settings.
 	filter "files:Shaders/**.hlsl or files:Shaders/**.hlsli"
+		buildaction "None"
+	filter {}
+	filter "files:Content/**.rasset"
 		buildaction "None"
 	filter {}
 

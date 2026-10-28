@@ -109,6 +109,11 @@ bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& 
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         for (const auto& material:library.materials) {
             if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
+            if (assets::isEngineAssetId(material.id) != (material.origin == assets::AssetOrigin::Engine))
+                throw std::runtime_error("Material identity does not match its Engine/Project origin.");
+            if (material.origin == assets::AssetOrigin::Engine &&
+                std::none_of(actors.begin(), actors.end(), [&](const auto& actor) { return actor.mesh.materialId == material.id; }))
+                continue;
             value["materials"].push_back({{"id",material.id}});
         }
         for (const auto& mesh:library.meshes) {
@@ -145,10 +150,17 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
         }
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         if (version==1) {
-            // Legacy scenes embedded a material snapshot; loading one replaces the
-            // library, matching the old behaviour for existing project files.
+            // Legacy snapshots replace project materials only. Trusted engine
+            // content survives and cannot be impersonated by an embedded payload.
+            for (const auto& material : library.materials) {
+                if (material.origin != assets::AssetOrigin::Engine) continue;
+                if (!assets::isEngineAssetId(material.id)) throw std::runtime_error("Invalid Engine material identity.");
+                if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate Engine material ID.");
+                staged.materials.push_back(material);
+            }
             for (const auto& item:value.at("materials")) {
                 auto material=assets::detail::readMaterial(item);
+                if (assets::isEngineAssetId(material.id)) throw std::runtime_error("Legacy scene cannot redefine a reserved Engine material.");
                 if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
                 staged.materials.push_back(std::move(material));
             }
@@ -161,7 +173,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
                 if (!materialIds.insert(id).second) throw std::runtime_error("Duplicate material reference.");
                 if (!library.findMaterial(id))
                     throw std::runtime_error("Scene references material " + std::to_string(id) +
-                        " that is not loaded from Content/Materials.");
+                        " that is not loaded from Project or Engine Content/Materials.");
             }
         }
         if (version==3) {
