@@ -62,11 +62,21 @@
 | --- | --- | --- |
 | 场景渲染 | `SceneRenderer` 实际使用 D3D11，支持 Forward／Deferred。 | 与后端资源、命令和呈现接口尚未统一。 |
 | 后端接口 | `IRenderBackend` 包含多 API 类型与生命周期占位。 | DX12、Vulkan、OpenGL 没有接入真实场景渲染；枚举切换不等于可用后端切换。 |
-| Shader 热编译 | 材质 Apply 编译并校验全部六个阶段，成功整体替换，失败保留活动版本。 | 新拆分 Shader／Pass 仍需维护相同更新语义，不能假定任意引擎管线都已开放热编译。 |
+| Shader 热编译 | 候选编译 2 个 VS 和 6 个 PS；成功时当前只发布原有六个场景 Shader，失败保留活动版本。 | 两个描边 Shader 未在 Apply 中发布，需补齐热更新及成功/失败回归。 |
+| 选中描边 | 独立遮罩与合成通道，深度区分可见实线和遮挡虚线，前方物体描边可选。 | 最终遮挡形态、多选及缩放需定向画面验证；无选中时跳过 pass 和 mask 分配，但初始化仍创建 Shader 和状态。 |
+| 工具预览 | 材质球、网格和场景复用离屏渲染；材质窗口、资产详情、场景缩略图各持有独立纹理和读回入口。 | 工具取景距离上限 80，不保证任意尺度场景完整入镜。 |
 | 实时参数 | 光照／曝光及 Actor 变换实时编辑；材质有效草稿按帧覆盖渲染参数，拖动中预览，Apply／Save 保持提交与持久化边界。 | 当前只有 DX11 实现，其他后端接入时须维护相同语义。 |
 | 可移植性 | CMake 非 Windows 会拒绝配置；原生窗口、DX11、DirectXMath 和 ImGui DX11 适配存在耦合。 | Linux／macOS、共享渲染接口及编辑器 GPU 适配需要迁移。 |
 
 现有验证入口是 `--editor-self-test` 与 `scripts/Validate-Render.ps1`。后者默认寻找 Premake 输出；验证 CMake 构建时显式传入 `-Executable`，避免测到旧二进制。
+
+### 离屏工具预览
+
+`offscreenTarget=true` 将绘制定向场景目标；仅设置 `editorViewport=false` 会输出到交换链。工具预览借用场景目标角落后复制到独立 SRV，主场景随后重绘。当前用途包括 64px 自测、128px 场景缩略图、160px 材质窗口和 190px Asset Details。
+
+`renderMaterialPreview` 将临时球和独立预览资产库绑定到传入材质的实际 ID，不修改工程资产。`PreviewSlot` 将 `MaterialEditor`、`AssetDetails`、`SceneThumbnail` 分开存储；`previewTexture(slot)` 和 `readPreviewPixels(slot, ...)` 获取对应图像，旧 `materialPreview*` 接口固定访问材质窗口。另一槽的渲染或尺寸变化不会替换本槽 SRV；同槽成功改变尺寸后，旧借用指针失效。新资源创建或渲染失败保留上一份图像。
+
+场景取景按世界包围盒计算距离（1.5–80），工具渲染采用相同范围，主场景仍为 2–30。预览尺寸限制在可用场景目标范围内；工具远裁剪面随距离扩展，但仍不能保证任意大型场景完整入镜。场景 sidecar 保存入口与兼容边界见 [AssetFormat.md](AssetFormat.md)。
 
 ### 材质实时预览验收
 

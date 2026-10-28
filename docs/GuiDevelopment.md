@@ -13,8 +13,8 @@
 | GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11；未接通跨平台 GUI 后端。 |
 | 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
 | 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮及布局恢复；材质编辑器另用系统独立窗口。 |
-| 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数与当前场景切换）、Details（Actor 实例属性）、Viewport settings、Content & Editors（`AssetRegistry` 驱动的文件夹树、列表/网格资产区、`Asset Details` 窗）、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 保留 Meshes，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
-| 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选与 Alt 拖动复制；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，颜色取主题强调色。 |
+| 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数与当前场景切换）、Details（Actor 实例属性）、Viewport settings、Content & Editors（`AssetRegistry` 驱动的文件夹树、列表/网格资产区、`Asset Details` 窗）、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 不再嵌套 Meshes 页签，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
+| 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选、Alt 拖动复制与 Content Mesh 拖入放置；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，默认品牌橙，可选主题强调色或自定义颜色。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
 | 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。`UI` 菜单承载主题子菜单，并以下拉末项 `Selection outline...` 打开独立的小设置窗口（开关、粗细、主题强调色、预设色或自定义颜色）；选择与本机 `RestArtEngine.ui.ini` 同步。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
 
@@ -32,15 +32,32 @@ Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content
 
 选场景／Outliner 的 Actor 显示 Details，浏览／导入 Mesh 资源不改变 Details 目标或强制切页；切页是一次性事件，不按已有选中状态每帧抢焦点。多选标识主实例；无选中、删除后失效选择、缺失 Mesh／Material 均给出明确状态，撤销恢复后重新按 Actor ID 解析。窄 Details 使用纵向信息和换行入口，长来源路径可换行；底部不重复放属性区。
 
-工作区增加为六面板，保留 `Details`、`Content & Editors`、`Meshes` 和 `RestArtEngine.DockSpace.v1` 身份；新 `Scene` 加入旧 Details 所在组，不全局重置用户布局。恢复默认才重建六面板树。验证应覆盖实际 Mesh／Actor 点击联动、手动切页、旧 dock／浮窗迁移及新 context 读回、双主题截图和既有材质／视口／事务回归。
+Content 的 List／Tiles Mesh 共用路径拖拽 payload；场景图像按本帧实际矩形建立接收区，排除工具栏、遮挡窗口和弹窗。拖动仅画包围盒与落点预览，释放投递时由 SceneEditor 创建、选中并记录一条放置历史。拾取与放置共用可见三角面命中规则（含材质双面与负缩放），无表面时使用 Y=0 地面；包围盒支持偏移防止枢轴埋入表面。Esc 取消整次资源拖拽，未投递或无效目标不修改场景和历史；资源拖拽期间抑制相机、Gizmo 和拾取。选中描边借用的 Actor ID 列表在本帧全部选择修改结束后绑定，避免创建实例使旧指针失效。
+
+工作区增加为六面板，保留 `Details`、`Content & Editors` 和 `RestArtEngine.DockSpace.v1` 身份；新 `Scene` 加入旧 Details 所在组，不全局重置用户布局。恢复默认才重建六面板树。验证应覆盖实际 Mesh／Actor 点击联动、手动切页、旧 dock／浮窗迁移及新 context 读回、双主题截图和既有材质／视口／事务回归。
 
 ## 资产浏览与详情窗口
 
-`Content & Editors` 是完整资产浏览器：文件夹树 + 资产区（`List` / `Grid` 两种视图）。列表显示缩略图、名称、类型与大小；网格显示放大缩略图和资产名（超宽截断，悬停看全名）。网格单元格高度取 `clamp(内容区高度 - 8, 64, 96)`，缩略图占 `cell - 36`，名称画在底部：不要依赖 `ImGui::Selectable` 的尺寸参数（当前版本忽略高度），用固定原点手动排布行列。
+`Content & Editors` 采用 Sources／导航／筛选／Asset View 分区，交互组织参考 [UE Content Browser 官方说明](https://dev.epicgames.com/documentation/unreal-engine/content-browser-interface-in-unreal-engine)，配色和控件仍使用本引擎主题。宽面板采用两行工具栏，窄窗换行；Sources 可调整宽度或隐藏，内容宽度小于 500 时自动隐藏，路径导航仍可用。进入目录会展开 Sources 对应祖先，不每帧强制重开用户收起的节点。
+
+List／Tiles 共用 `AssetRegistry::query` 的目录、名称／路径搜索、类型、递归范围与排序结果；文件夹卡片支持双击导航。Tiles 缩略图偏好 48–128px，低高度时进一步收敛，保留两行名称和类型标签；列表保留名称，宽度允许时显示类型与大小。卡片背景、选择与文本复用主题颜色，长名与完整路径通过 tooltip 查看。底部显示资产／文件夹数量及选择状态；空目录与搜索无结果有不同提示。
+
+资产类型色由 `EditorTheme.cpp` 的 `rae::imgui::assetTypeColor` 统一提供，参考 UE 的 [GetTypeColor 类型显示属性](https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Developer/AssetTools/IAssetTypeActions)。本引擎采用下表配色，不宣称与 UE 色值完全一致；Black／Dark Blue 保持同一类型颜色，避免切主题改变含义。
+
+| 类型 | 色值 | 视觉用途 |
+| --- | --- | --- |
+| Mesh | 蓝色 `#50B2EB` | 网格资产 |
+| Material | 绿色 `#64CD85` | 材质资产 |
+| Scene | 琥珀色 `#EEAF4F` | 场景资产 |
+| Shader | 紫色 `#B891EF` | Shader 源文件 |
+| Unknown | 灰色 `#A7AEB8` | 未知类型回退 |
+
+卡片底部色条、列表左侧标记、类型文字、无缩略图时的图标和筛选选项使用同一映射；文件夹保持中性色。实际缩略图不染色，选择／悬停仍用主题反馈，名称与类型文字继续提供非颜色识别。配色是编辑器显示属性，不写入资产或改变材质参数；新增类型时在这一入口补色，目前没有逐资产自定义颜色界面。
 
 - 双击任意资产打开 `Asset Details` 窗口：左侧 GPU 预览（材质球 / 网格），右侧名称、类型、GUID、路径、大小和类型信息；`Open` 再执行类型动作（打开场景、打开材质编辑器、选中网格）。
-- 场景缩略图在保存场景时由 GPU 渲染并写 `<scene>.rthumb`；材质/网格缩略图是保存资产时生成的 64×64 CPU 光栅图，存进容器。
-- 资产区内拖拽移动、右键重命名/删除、`Import OBJ...`、`New folder`、`Refresh` 都在同一面板；文件操作后注册表重建。
+- 场景缩略图在带 renderer 的保存路径（如 Save All）由 GPU 渲染并写 `<scene>.rthumb`；材质/网格缩略图是保存资产时生成的 64×64 CPU 光栅图，存进容器。
+- 资产拖拽和 Open 延迟到注册表遍历结束后执行，避免重扫导致指针失效；文件移动只在对应类型目录内，目录整体移动暂禁。重命名显示文件名，GUID 不变；删除保护已加载资产与当前场景，具体边界见 EditorGuide。
+- 浏览选择与 Actor 选择独立，Content 焦点屏蔽 Actor 快捷键；网格右键创建实例通过 `actor.addFromMesh` 命令进入 UndoStack。双击 Details 和 Open 类型动作保持分离。
 - 材质编辑器是独立 OS 窗口，`--editor-self-test` 的主窗口截图不包含它；验证其预览要用像素回读（staging texture）或窗口级 PrintWindow，不能拿主窗口截图冒充。
 
 
@@ -59,6 +76,8 @@ Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content
 | 尺寸变化 | 按可用内容宽度安排表格列、换行、堆叠、滚动或溢出入口；低频操作可收纳，主要动作仍可达。不能靠每帧强制面板位置挤出用户布局。 |
 
 当前共用几何的参考值为 WindowPadding `(18,18)`、FramePadding `(10,6)`、ItemSpacing `(10,10)`、ItemInnerSpacing `(8,6)`，Window / Child / Frame / Popup 圆角分别为 `9 / 7 / 5 / 7`。这些是源码基线，不是已确认的全局设计 token 标准；正文数值与代码不同则先查明改动。字体为 ImGui 默认拉丁字体，Windows 本机字体可用时合并 16px 微软雅黑中文字符。各面板仍有局部尺寸和提示色，不能声称已经全面统一。
+
+视口移动／缩放 Gizmo 默认开启负方向条纹提示。`UI > Gizmo negative-axis hints` 可以切换提示，即时生效并保存到 `RestArtEngine.ui.ini` 的 `gizmo_negative_axis_hints=on/off`；旧配置缺少该项时默认开启，已有显式 on/off 选择优先。`ViewportInteraction` 按偏好将 ImGuizmo 的 `HatchedAxisLineThickness` 设为原生值 `6` 或 `0`，保留轴翻转、命中测试与变换行为，不修改第三方源码。
 
 新风格需比较布局、密度与可读性对现有工作流的影响；尚未实现的配色、字阶、密度档或 token 表明确标为提案。
 
@@ -83,7 +102,10 @@ Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content
 3. **输入与控件身份。** 平台输入始终传给 ImGui 后端，再仲裁编辑器/场景是否消费；不因捕获标志而停止给 ImGui 送事件。依文本输入、弹窗、活动控件、面板焦点与拖动所有者仲裁输入；不能仅凭鼠标在视口内就接管全部快捷键。拖动由起始命中的所有者保持或明确取消，不能在中途抢占。稳定业务 ID 与显示名分离，列表重排/重命名不改变编辑对象。自绘控件要接入实际命中、键盘焦点和状态反馈，不能仅画图。ImGui 的输入捕获标志与本帧命中状态一起核对，避免错误屏蔽或双重消费。Alt 从 Gizmo 开始表示复制，从手柄外开始表示环绕。
 4. **命令、编辑与保存。** 已接入动作复用 EditorCommandRegistry，菜单/按钮/快捷键共用 enable 条件；输入作用域由调用方正确处理。新操作明确撤销范围和一次手势的历史粒度，保存值快照与稳定 ID，不持有可能因容器扩容失效的 Actor 指针。Scene 连续变换、批量操作和 Gizmo 聚合遵循事务文档，不擅自把全部操作标为可撤销。
 5. **预览与草稿。** 材质实时预览、Apply 内存提交、Save 磁盘保存、Discard 恢复已提交状态各有含义；切换资产和关闭处理未提交/未保存状态。Shader 草稿与最后可用管线分开，编译失败保留可用版本。GUI 的文案、禁用条件和状态反馈必须与真实行为一致。GPU 实时反馈改动需同时验证渲染结果。
+   Engine Content 的参数与文件操作按来源只读，不能仅靠禁用控件保护；Apply、保存、移动等执行入口也检查归属。Copy to Project 生成新 GUID，只发布新文件，成功后再更新库与浏览选择；不自动修改 Actor 引用、不保存其他草稿。Project/Engine 使用不同浏览键，搜索与向上导航不跨来源。
 6. **平台窗口与资源。** 窗口绘制和原生命中区域同步修改，关闭沿用 WM_CLOSE 和未保存提示；保留拖动、缩放、系统菜单和最大化语义。F11 是主窗口全屏，不是独立视口。纹理/字体资源按所属层管理创建和释放。Windows / Linux / macOS 的架构目标不等于已经有各平台 GUI 实现。
+
+资产与工具预览的当前加载/保存限制分别见 [AssetFormat](AssetFormat.md#当前使用限制) 与 [RenderingDevelopment](RenderingDevelopment.md#离屏工具预览)，界面存在不等于这些路径已完整闭环。
 
 ## 验收选择与覆盖边界
 
@@ -101,4 +123,4 @@ Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content
 
 新环境使用 `cmake --preset windows-vs2022` 与 `cmake --build --preset windows-debug-engine`。已有配置优先使用对应本工作区的目录。编辑器自测示例为 `build/cmake-vs2022/Debug/RestArtEngine.exe --editor-self-test --capture-dir artifacts/gui-validation`；窗口脚本须通过 `-Executable` 指向同一产物，`Test-WindowChrome.ps1` 还可指定独立 `-CaptureDirectory`。
 
-截图注明构建、主题、窗口尺寸、字体/样式缩放和场景，前后比较保持条件一致。自测必须使用临时工程副本：测试直接跑在用户工程上会写资产（本项目发生过 `.ramat` 被转成 `.rasset` 的事故）；夹具目录每轮清理。当前测试中的 150% 字体/样式缩放不能证明操作系统跨显示器 DPI 支持。系统吸附弹窗、跨屏、完整键盘路径、中文输入法以及屏幕阅读器等，只有实际检查过才报告通过；不因本页列出目标而视为已覆盖。
+截图注明构建、主题、窗口尺寸、字体/样式缩放和场景，前后比较保持条件一致。自测必须使用临时工程副本：测试直接跑在用户工程上会写资产，包括将已提交材质另存为 `.rasset`；夹具目录每轮清理。当前测试中的 150% 字体/样式缩放不能证明操作系统跨显示器 DPI 支持。系统吸附弹窗、跨屏、完整键盘路径、中文输入法以及屏幕阅读器等，只有实际检查过才报告通过；不因本页列出目标而视为已覆盖。

@@ -19,6 +19,7 @@
 | `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
+| `Content/Materials/DefaultMaterial.rasset` | 引擎发布的共享默认材质。作为只读 Engine Content 挂载，项目场景通过固定 ID 引用；修改时先复制成项目资产。 |
 | `Projects/Sandbox/Sandbox.raproject` | 默认 Sandbox 工程描述，声明引擎、工程资产、工程 Shader 与默认场景的位置。 |
 | `RestArtEngine.exe` | 独立工程管理器和编辑器程序；无 `--project` 时进入 Project Manager。CMake 目标名为 `RestArtEngine`。 |
 | `Engine.raeengine` | 引擎安装身份（版本和发布 / 源码 hash），用于工程绑定和工程管理器兼容检查。 |
@@ -51,14 +52,14 @@ RestArtEngine/                          引擎仓库根目录
    │  ├─ Sandbox.raproject
    │  ├─ Content/                  该工程的资产根目录
    │  │  ├─ Scenes/Default.rascene
-   │  │  ├─ Materials/*.rasset      （旧 .ramat 只读兼容）
-   │  │  └─ Meshes/*.rasset        （内置图元 + OBJ 导入）
+   │  │  ├─ Materials/*.ramat       （随仓库提供；保存时另写 .rasset）
+   │  │  └─ Meshes/*.rasset         （打开工程/导入后生成）
    │  └─ Shaders/Materials/Standard.hlsli
    └─ RayTracing_Simple/           光追测试工程（康奈尔盒 + 镜面球）
       ├─ RayTracing_Simple.raproject
       ├─ Content/
       │  ├─ Scenes/Default.rascene
-      │  └─ Materials/*.rasset
+      │  └─ Materials/*.ramat
       └─ Shaders/Materials/Standard.hlsli
 ```
 
@@ -127,7 +128,7 @@ SceneEditor
 
 当前每个 Actor 有一个 `StaticMeshComponent`，没有通用组件注册、反射或 ECS 调度系统。`Transform` 保存位置、以度为单位的 XYZ 欧拉旋转和缩放。场景采用 Y 轴向上；这与 UE 常见的 Z 轴向上约定不同，不能直接套用 UE 坐标。
 
-`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Scene 面板，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
+`ViewportInteraction` 位于编辑器模块，负责将视口点击映射到网格选择，并通过 ImGuizmo 编辑选中 Actor 的 Transform。手柄提供移动、旋转、缩放与步进吸附；移动和旋转支持世界 / 局部坐标，缩放始终沿局部轴，避免产生当前 Transform 无法表示的剪切。变换同步到 Details 面板，保存时沿用场景序列化。手柄是编辑器工具，不是新的运行时组件类型，Scene / Assets 无需依赖 ImGuizmo。
 
 Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜单与场景上下文中的 Delete 快捷键都只移除 Actor 实例，保留共享资产。文本输入会屏蔽场景快捷键，避免编辑名称、材质或 Shader 时误操作。多选通过 Outliner 的 Ctrl/Shift 点击与视口 Ctrl/Shift 点击扩展，批量删除与批量变换各记一条撤销；仍无组件父子层级（见 [UndoTransactions.md](UndoTransactions.md)）。
 
@@ -139,11 +140,11 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。新增 Scene 时，仅在缺少 Scene 设置的旧布局中把它加入原 Details 所在节点；旧 Details 为自由浮窗时按原位置尺寸创建双页签浮动组。迁移不重建其他节点，后续已有 Scene 配置即尊重用户安排。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。六个工作区面板显式留在主 viewport，保持主窗口内 Docking；材质编辑器使用单独的系统 viewport。
 
-默认左上为 Outliner，左下的 Scene / Details 共用同一个 dock 节点，底部 Content 的 Meshes 保留资源列表与导入／创建入口。Scene 编辑主选中 Actor 的属性；Details 以同一 Actor ID 实时解析实例身份、可见性、当前 Mesh 几何与来源，以及该实例唯一的 Material 引用，不从 Content 的 `selectedMesh_` 取目标，不遍历同 Mesh 实例汇总材质。多选明确主实例，无选中或已删除实例显示空状态，资源失效显示缺失提示；不新增 Mesh 材质绑定。场景／Outliner 选择事件请求显示 Details，Content 选择／导入只更新资源浏览状态；焦点请求按事件消费一次，手动切页后不逐帧抢回。两个实例查看页均归入 Actor 输入作用域，Scene / Details 保留既有窗口身份和原生 Docking 布局。
+默认左上为 Outliner，左下的 Scene / Details 共用同一个 dock 节点，底部 Content 的 Meshes 保留资源列表与导入／创建入口。Scene 编辑场景级背景、光照和阴影；Details 编辑主选中 Actor 的名称、可见性、变换与资产分配，并以同一 Actor ID 实时解析实例身份、可见性、当前 Mesh 几何与来源，以及该实例唯一的 Material 引用，不从 Content 的 `selectedMesh_` 取目标，不遍历同 Mesh 实例汇总材质。多选明确主实例，无选中或已删除实例显示空状态，资源失效显示缺失提示；不新增 Mesh 材质绑定。场景／Outliner 选择事件请求显示 Details，Content 选择／导入只更新资源浏览状态；焦点请求按事件消费一次，手动切页后不逐帧抢回。实例属性页归入 Actor 输入作用域，Scene / Details 保留既有窗口身份和原生 Docking 布局。
 
 场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的主客户区／纹理局部矩形；图像和 Gizmo 使用对应的桌面矩形，拾取鼠标减去主 viewport 原点。两者通过同帧原点转换，移动主窗口后仍使用相同图像区域和投影宽高比。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
 
-材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Scene 的 Actor 材质入口和 Details 中主选中 Actor 实例的当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
+材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Details 的 Actor 材质入口和当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
 
 `ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
 
@@ -167,17 +168,17 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 `EditorCommandRegistry` 位于 Editor 层，集中登记命令 ID、分组、文案、快捷键、回调与可用条件。已接入撤销 / 重做、Actor 新建 / 复制 / 删除、场景保存和布局恢复命令；菜单和相关按钮通过命令执行。渲染切换、F11 等应用级按键仍由 `MinimalApp` 处理，并非所有 UI 动作都已迁入注册表。`SceneEditor` 在文本输入或 Gizmo 使用期间跳过命令快捷键派发。
 
-`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Scene 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条。Ctrl+D 多选复制仍逐个记录；Alt＋拖动由 `ViewportInteraction` 判定手势并回调 `SceneEditor` 复制选中集合，结束时将创建副本与最终变换记成一条事务，同时保存原选择和副本选择。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
+`UndoStack` 保存撤销 / 重做回调及历史游标，默认上限 64 步，新编辑会截断重做分支。回调捕获稳定 ID 和状态值拷贝，不持有 Actor 容器内指针。Gizmo 拖动按开始 / 结束聚合，Details 面板变换按 Actor 与字段在 700ms 窗口内合并；多选删除和整组变换各记一条。Ctrl+D 多选复制仍逐个记录；Alt＋拖动由 `ViewportInteraction` 判定手势并回调 `SceneEditor` 复制选中集合，结束时将创建副本与最终变换记成一条事务，同时保存原选择和副本选择。材质 / Shader 草稿及其他未接入的属性编辑不自动获得撤销能力。详细边界见 [UndoTransactions.md](UndoTransactions.md)。
 
-`EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.theme.ini` 与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。
+`EditorTheme` 集中 Black / Dark Blue 配色及共用几何样式，通过 `UI > Theme` 切换；`MinimalApp` 在创建 ImGui 上下文前读取偏好，`ImGuiLayer` 初始化时应用，字体仍由后者加载。`RestArtEngine.ui.ini` 保存主题、描边和 Gizmo 负方向提示偏好，旧 `RestArtEngine.theme.ini` 仅作兼容读取；偏好与交互式布局 ini 都相对进程工作目录解析，主题文件不存 Dock 树、不写入工程资产。
 
 ## 文件与持久化
 
-场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`。当前写出 **v3**：Actor、变换、可见性，以及按 GUID 引用材质与网格（JSON 里保存数值 ID，容器清单里写成 16 位十六进制）；v1（内嵌材质快照与网格描述）与 v2（材质引用、网格仍内嵌）仍可读取。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。导入网格的 `sourcePath` 相对场景文件记录，加载时重建 CPU 网格；因此场景文件不是把所有 OBJ 数据打包进去的二进制包。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
+场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`。当前写出 **v3**：Actor、变换、可见性，以及按 GUID 引用材质与网格（JSON 里保存数值 ID，容器清单里写成 16 位十六进制）；v1（内嵌材质快照与网格描述）与 v2（材质引用、网格仍内嵌）仍可读取。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。旧 v1/v2 网格描述通过相对场景的 `sourcePath` 重建网格；v3 只引用 GUID，几何在 `.rasset` 内，不依赖原 OBJ 加载。首次启动与 Content 切换场景均先加载材质／网格，再解析场景引用，普通 Load Scene 保持使用当前内存资产；保存与移动边界见 [资产格式的当前限制](AssetFormat.md#当前使用限制)。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
 
-材质存为工程 `Content/Materials/{name}.rasset` 容器：GUID 标识，清单 `payload` 保存 ID、名称、Base Color、Roughness、Metallic、Grid 与 Two-sided。旧 `Content/Materials/*.ramat` 仍可读：加载优先 `.rasset`，同 GUID 的 `.ramat` 跳过；保存写 `.rasset` 且不删除 `.ramat`。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载 v3 场景时按 GUID 从工程材质解析引用（v1 使用场景内材质快照）；使用 `Reload material assets` 可显式读入工程材质文件。`Save material assets` 同时保存当前场景快照，使下次启动恢复保存的外观。
+材质存为工程 `Content/Materials/` 目录树内的 `.rasset` 容器，保存按 GUID 保留已有文件位置，新资产按名称生成文件名并避免同名覆盖：GUID 标识，清单保存 ID 和名称，`payload` 保存 Base Color、Roughness、Metallic、Grid 与 Two-sided。旧 `Content/Materials/*.ramat` 仍可读：加载优先 `.rasset`，同 GUID 的 `.ramat` 跳过；保存写 `.rasset` 且不删除 `.ramat`。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载 v3 场景时按 GUID 从工程材质解析引用（v1 使用场景内材质快照）；使用 `Reload material assets` 可显式读入工程材质文件。`Save material assets` 同时保存当前场景 v3 的资产引用；普通场景保存也会先写已提交的材质与网格容器，再写引用。
 
-加载先构造并验证候选 World 和 AssetLibrary，全部成功后再替换当前场景。JSON 损坏或引用的资产无法加载时，返回诊断并保留当前 World 和 AssetLibrary。场景文件与独立材质文件各自持久化；需要版本管理的成果包括工程描述、场景、材质参数、OBJ 与工程 Shader 源文件。
+加载先构造并验证候选 World 和 AssetLibrary，全部成功后再替换当前场景。JSON 损坏或引用的资产无法加载时，返回诊断并保留当前 World 和 AssetLibrary。场景文件与独立材质文件各自持久化；需要版本管理的成果包括工程描述、场景、材质与网格容器、需要保留的 OBJ 来源文件及工程 Shader 源文件。
 
 ## 与 UE 概念的对应
 
@@ -199,9 +200,9 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在现有 D3D11 深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享同一套资源管理和切换入口。
 
-渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染 64–160px 预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，保存场景时写到同目录 `<scene>.rthumb`，Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
+渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染工具预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，通过带 renderer 的保存路径写到同目录 `<scene>.rthumb`（普通 Save Scene／Ctrl+S 不刷新），Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
-Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不读取几何数据；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
+Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
 当前真实场景渲染只接入 DX11，OpenGL、DX12、Vulkan、Null 的 RHI 仍为骨架。后续支持其他 API 时，在 `Renderer` 中落地资源和命令接口，并保持 Scene / Assets 不依赖具体图形 API。
 
@@ -215,7 +216,9 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 2. 遮罩通道把选中 Actor 画进一张场景尺寸的 RGBA 纹理两次：R 通道写「与场景深度相等」的可见片元（`LESS_EQUAL`），G 通道写「被其他几何挡住」的片元（`GREATER`），两次都不写深度。
 3. 合成通道用像素坐标读取遮罩与场景深度：只有相邻遮罩像素**比当前像素更近**时才画实线，因此同一表面内部的细节（地面网格、共面接缝）不会产生内边框，默认不描前方遮挡物，遮挡物上只画与被遮挡物体相交的那一圈虚线；设置窗口 `Outline front objects` 可开启双向深度比较，让前方物体也获得整圈实线（交线保持虚线）；G 通道只在其**边界**画屏幕空间虚线（内部保持原画面，不做填充），被挡住的部分仍可辨认。遮挡部分不使用填充样式。
 
-渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`（默认品牌橙 `#FD7804`，也可改用主题强调色或自定义颜色）、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色或自定义颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，因此独立运行不承担该通道的开销。描边颜色不写入场景资产，也不参与撤销或保存。
+渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`（默认品牌橙 `#FD7804`，也可改用主题强调色或自定义颜色）、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色或自定义颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，无选中时不执行该通道，也不分配 mask；初始化仍会创建描边 Shader、常量缓冲与状态。描边颜色不写入场景资产，也不参与撤销或保存。
+
+工具预览按实际材质 ID 绑定，并使用独立的材质窗口／资产详情／场景缩略图纹理槽；工具相机采用 1.5–80 的距离范围。预览生命周期、取景上限及描边 Shader 尚未接入 Apply 发布的限制，见 [渲染源码基线](RenderingDevelopment.md#当前源码基线与缺口)。
 
 ## 开发指引
 
@@ -263,7 +266,7 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 ### 必须守住的约定
 
 1. **常量缓冲布局**：`SceneConstants`(144B) / `ObjectConstants`(160B) / `RayConstants`(5136B) / `ShadowConstants`(160B) 由 `static_assert` 与运行时 `D3DReflect` 双向锁定，改字段必须同时改 C++ 与 HLSL。
-2. **资源绑定**：`t0..t4`、`s0/s1` 的语义固定，`validateShader()` 会拒绝不兼容的工程 Shader。
+2. **资源绑定**：基础场景使用 `t0..t4`、`s0/s1`；描边另用 `t5/t6` 与 `b4` 的 32B 常量缓冲。`validateShader()` 检查相应契约；新增 Shader 还必须接入候选发布路径。
 3. **前向 / 延迟一致性**：两条路径共享 `ShadeSurface()`，`--editor-self-test` 会比对两者图像差异。
 4. **场景加载事务性**：先在临时 `World` + `AssetLibrary` 中完成解析与引用校验，成功后才提交；失败保留当前数据。
 5. **工程资产不写回引擎**：编辑器所有保存路径都解析到当前工程的 `contentRoot` / `shaderRoot`。

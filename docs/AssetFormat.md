@@ -6,7 +6,7 @@
 >
 > 已定：**GUID 作身份**（64 位随机，文件里以 16 位十六进制显示，内存仍是 `AssetId = uint64`）；**材质并入 `.rasset`**；旧 `.ramat` 只读兼容，且保存新容器时**不删除**旧文件。
 >
-> 缩略图：保存资产时用 CPU 光栅化生成 64×64 RGBA8（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入清单；Content 面板直接读取绘制，缺失时回退线框图标。场景缩略图不写进场景 JSON：保存场景时用 GPU 渲染 128px 写到同目录 `<scene>.rthumb`（magic `RTHB`，已 gitignore），缺失时回退 Actor 布局的 CPU 示意图。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）。容器读写库在 `src/Assets/AssetFile.cpp`。
+> 缩略图：保存资产时用 CPU 光栅化生成 64×64 RGBA8（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入清单；Content 面板直接读取绘制，缺失时回退线框图标。场景缩略图不写进场景 JSON：通过带 renderer 的保存路径（如 `Save All`）用 GPU 渲染 128px 写到同目录 `<scene>.rthumb`（magic `RTHB`，已 gitignore），缺失时回退 Actor 布局的 CPU 示意图。内置图元（Sphere / Plane / Cube）在工程首次打开时生成到 `Content/Meshes/Builtin/*.rasset`（生成物、已 gitignore；存在文件时文件优先）。容器读写库在 `src/Assets/AssetFile.cpp`。
 
 ## 目标
 
@@ -14,6 +14,16 @@
 - **单一真相**：资产只存一份，场景只引用资产 ID，不再把材质/网格几何抄进 `.rascene`。
 - **可演进**：头部带版本号，清单是 JSON，未知字段可忽略，读不了的版本明确报错。
 - **可快速浏览**：Content 浏览器只读文件头与清单，不解码大数据块；缩略图可选。
+
+## 引擎资产与项目资产
+
+引擎目录的 `Content/Materials/DefaultMaterial.rasset` 提供中性灰默认材质，固定 ID 为 `0010000000000001`。`0010000000000000`～`0010000000000fff` 保留给引擎材质；新项目材质生成随机 ID 并避开此区间。历史 Copper/Ground 的 ID 1/2 和已有项目 GUID 保持兼容，项目文件占用保留区间时报告冲突，不能覆盖引擎资产。
+
+`AssetOrigin` 是挂载器赋予的运行时归属，不从项目文件接受。项目和引擎材质共同进入 AssetLibrary；项目重载保留引擎项，项目保存跳过引擎项。`createMaterial` 在引擎默认材质已挂载时继承其参数并生成项目 ID；纯资产库未挂载引擎时保留原有参数默认值。场景 v3 继续保存数值 ID 引用，只有实际被 Actor 使用的引擎材质才写入引用清单；找不到引用仍然报错。v1 内嵌材质加载保留已挂载的引擎资产，v2/v3 引用加载同样可解析它们。
+
+Content 浏览器保留原有项目相对路径；引擎项使用 `engine://Materials/DefaultMaterial.rasset` 形式的浏览器键。这是来源标识，不是磁盘路径，也不替代场景资产 ID。只读限制覆盖编辑器参数、文件操作与保存入口；`Copy to Project` 生成新项目 GUID 和独立 `.rasset`，共享参数与资产身份分开处理。C++ 资产结构仍可由调用方直接修改，这不是文件系统权限隔离。
+
+当前随引擎分发的是默认材质；Sphere/Plane/Cube 仍按原有兼容路径生成到工程 `Content/Meshes/Builtin`，没有迁移现有网格 ID。标准材质使用工程的共享 Shader；引擎材质只读不意味着禁用工程 Shader 编辑。
 
 ## 容器布局
 
@@ -23,7 +33,7 @@
 |---|---|---|
 | 0 | 4 | magic，ASCII `RAAS` |
 | 4 | 2 | `version`，当前为 `1` |
-| 6 | 2 | `flags`：bit0 = 含缩略图，其余保留为 0 |
+| 6 | 2 | `flags`：保留位，当前写出 `0`；是否有缩略图以清单 `thumbnail` 字段为准 |
 | 8 | 8 | `manifestSize`（字节） |
 | 16 | `manifestSize` | 清单 JSON（UTF-8，无 BOM） |
 | 16 + `manifestSize` | 剩余 | 数据块区，按清单里的 `offset` / `size` 引用 |
@@ -69,7 +79,7 @@
 
 - 顶点布局沿用 `MeshVertex`：`position[3] + normal[3]`，步长 24 字节；索引为 `u32`。
 - `primitive` 标记内置图元类型（`sphere` / `plane` / `cube`，OBJ 导入为空或省略），加载时据此走解析光追或三角形路径。
-- OBJ 导入的网格额外带 `sourcePath`（相对工程 Content 记录，仅作来源信息，不再依赖原 OBJ 加载）。
+- OBJ 导入的网格额外带 `sourcePath`（当前保留导入时的来源路径，可能是绝对路径；仅作来源信息，不再依赖原 OBJ 加载，分享容器前应检查该元数据）。
 
 ### `material` payload
 
@@ -103,7 +113,7 @@
 
 加载 v3 时从 `Content/Materials`、`Content/Meshes` 解析引用；缺失时报 `Scene references material N that is not loaded from Content/Materials.`。v1（内嵌材质快照 + 内嵌网格描述）和 v2（引用材质）仍可读取，用于打开旧工程。
 
-场景缩略图是例外：它不写进 `.rascene`，而是保存场景时由 GPU 渲染 128×128 写到同目录 `<scene>.rthumb`：
+场景缩略图是例外：它不写进 `.rascene`，而是通过带 renderer 的保存路径由 GPU 渲染 128×128 写到同目录 `<scene>.rthumb`：
 
 | 偏移 | 大小 | 字段 |
 |---|---|---|
@@ -113,14 +123,14 @@
 | 12 | 4 | `height` |
 | 16 | 剩余 | RGBA8 像素 |
 
-Content 浏览器优先读该文件；不存在时回退到按 Actor 位置生成的 CPU 布局图。
+Content 浏览器优先读该文件；不存在或读取失败时回退到按 Actor 位置生成的 CPU 布局图。
 
 ## 读写策略
 
 1. **浏览**：`AssetRegistry` 读头部与清单，得到类型、名称、GUID、大小与缩略图；不解码几何。
 2. **加载**：按清单读取数据块，校验边界与长度，失败返回明确错误；场景加载失败不破坏当前场景。
 3. **保存**：直接覆盖写目标文件（尚未做临时文件＋原子替换，中途崩溃可能留下半写文件，属于待改进项）。
-4. **移动**：Content 内拖拽移动资产时更新其相对路径；移动场景时重写场景内网格/材质的相对引用（`moveContentEntry`）。
+4. **移动**：Content 内拖拽移动资产时更新其相对路径；移动旧场景时仅重写 `meshes[].sourcePath` 相对引用（`moveContentEntry`）；v3 的资产 GUID 不随文件位置改变，`.rthumb` 随文件移动；目标冲突会拒绝操作。目录整体移动不支持。
 
 ## 迁移步骤
 
@@ -130,6 +140,13 @@ Content 浏览器优先读该文件；不存在时回退到按 Actor 位置生�
 4. ✅ 材质从 `.ramat` 迁入 `.rasset`；旧文件保留只读兼容，保存时不再删除。
 5. ✅ 场景 v3 删除内嵌材质/几何，只留 GUID 引用；v1/v2 仍可读。
 6. ⬜ 纹理资产（`texture` payload、采样参数与 Content 识别）。
+
+## 当前使用限制
+
+- 材质／网格从各自类型根递归加载，保存按 GUID 查找已有文件路径，保留子目录与改名结果；新资产同名时生成带 GUID 的文件名以免覆盖。资产不能任意移出对应类型根。
+- `initialize` 和 Content 的 `openScene` 均先加载材质和网格再解析场景；加载错误明确返回。普通 `Load Scene` 保持使用当前内存资产的行为。
+- 普通 `Save Scene`／Ctrl+S 调用无 renderer 的保存重载，当前不会生成或刷新 GPU sidecar。旧 sidecar 可能过时；sidecar 缺失或读取失败时回退 CPU 示意图。
+- `.rasset` 与旧 `.ramat`／`.raasset` 同类型同 GUID 时优先现代容器；浏览器默认隐藏已替代旧文件，可在 View 中显示。旧文件仍保留，保存不保证两份同步更新；无替代文件的旧资产仍显示。
 
 ## 未决问题
 

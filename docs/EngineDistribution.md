@@ -11,6 +11,8 @@ RestArtEngine/
 ├─ bin/
 │  └─ RestArtEngine.exe             # CMake install package
 ├─ Engine.raeengine
+├─ Content/
+│  └─ Materials/DefaultMaterial.rasset # 共享、只读的引擎默认材质
 ├─ Shaders/
 │  ├─ Private/                  # 公共渲染管线
 │  └─ Materials/                # 默认材质模板
@@ -87,7 +89,7 @@ cmake --build --preset windows-debug --target RestArtEngine
 
 在 Project Manager 中选择 **New Project**，指定父目录和工程名。工程管理器创建 `.raproject`、`Content/`、工程 Shader 和默认场景，并把当前引擎的 association、版本、hash 和相对路径写入 manifest。工程是纯数据，不生成 `.sln`。案例工程位于引擎仓库的 `Projects/Sandbox`，创建新工程时复制其内容，不会把新工程的保存结果写回案例或引擎公共 Shader。
 
-上传工程时只提交工程目录（`.raproject`、`Content/`、工程 `Shaders/`），不提交引擎目录。接收者安装或解压兼容版本的 RestArtEngine 后，用 `RestArtEngine.exe --project MyProject/MyProject.raproject` 打开。上传引擎本身时则保留 `RestArtEngine.exe`、`Engine.raeengine`、`Shaders/` 以及可选的 `Projects/Sandbox/`，不需要包含任何个人工程。
+上传工程时只提交工程目录（`.raproject`、`Content/`、工程 `Shaders/`），不提交引擎目录。接收者安装或解压兼容版本的 RestArtEngine 后，用 `RestArtEngine.exe --project MyProject/MyProject.raproject` 打开。上传引擎本身时则保留 `RestArtEngine.exe`、`Engine.raeengine`、`Content/`、`Shaders/` 以及可选的 `Projects/Sandbox/`，不需要包含任何个人工程。CMake install 会安装引擎 Content；源码构建直接从绑定的 engineRoot 挂载。引擎默认材质缺失或损坏时明确报错，不在启动时重建文件，也不静默替换成项目同名材质。
 
 ## 发布检查
 
@@ -97,7 +99,7 @@ cmake --build --preset windows-debug --target RestArtEngine
 
 1. `RestArtEngine.exe` 能在目标机器启动 Project Manager。
 2. `Engine.raeengine` 的版本和 hash 与此次构建一致。
-3. `Shaders/Private/Scene.hlsl` 和默认材质模板随包存在。
+3. `Shaders/Private/Scene.hlsl`、默认材质 Shader 模板与 `Content/Materials/DefaultMaterial.rasset` 随包存在。
 4. 若分发案例，`Projects/Sandbox/Sandbox.raproject` 的 `engineRoot`、版本和 hash 指向当前引擎。
 5. 在干净目录中用 `RestArtEngine.exe --project` 打开一个外部工程，确认工程内容不会写回引擎目录。
 

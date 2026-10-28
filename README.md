@@ -62,18 +62,19 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 - Dear ImGui Docking 工作区：Outliner、Scene、Details、Viewport settings、Content & Editors 和 Scene Viewport 六个面板可分割停靠、合并标签及悬浮；左侧 Scene / Details 默认以页签切换。
 - Actor 变换手柄（ImGuizmo）：移动 / 旋转 / 缩放，世界 / 局部坐标，步进吸附。
-- 独立系统材质窗口：从 Scene 或 Details 中当前 Actor 实例的材质入口打开，可移出主窗口，包含材质参数和共享 HLSL 编辑；参数拖动实时预览，Apply 确认、Save 保存，Discard draft 恢复。
+- 独立系统材质窗口：从 Details 中当前 Actor 实例的材质入口打开，可移出主窗口，包含材质参数和共享 HLSL 编辑；参数拖动实时预览，Apply 确认、Save 保存，Discard draft 恢复。
+- Engine Content：引擎目录自带默认灰色材质，项目按固定 ID 共享引用；浏览器区分 Project / Engine，内置资产只读，可 Copy to Project 后独立编辑，新 Actor 默认使用引擎材质。
 - 所有材质统一提供 `Two-sided` 独立开关，控制背面可见性与背面法线，沿用实时预览和保存流程。
 - **引擎内 HLSL 热编译**：编辑 `Standard.hlsli` 后 Apply 立即更新预览，失败保留上一版可用 Shader。
 - Shader 反射校验：常量缓冲布局、资源绑定、入口签名不兼容时直接拒绝，不会留下半更新状态。
 - 相机：环绕、平移、缩放、聚焦选中物体（F）。
 - 编辑事务：Actor 增删 / 复制与 Gizmo 拖拽可撤销重做（Ctrl+Z / Ctrl+Y）；连续数值拖动合并为一条。
-- 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Scene 编辑主 Actor。
+- 多选：Outliner 与视口支持 Ctrl / Shift 点击切换成员，整组 Gizmo 变换和批量删除各记一条撤销；Details 编辑主 Actor。
 - 编辑命令：菜单、按钮与快捷键通过命令注册表执行已接入的动作；双行工具栏按样式计算高度。
 - F11 视口全屏：窗口无边框覆盖当前显示器并隐藏面板，再按 F11 或 Esc 恢复。
 - 自定义窗口标题栏：编辑器与 Project Manager 外观跟随主题，保留窗口拖动、缩放、最小化 / 最大化及关闭确认；F11 同时隐藏标题栏。
 - 资源 GC：可配置检查周期、闲置缓存时间和临时截图保留时间；`UI → Garbage collection...` 调整设置或手动回收，永久截图保留。
-- 启动加载界面：全屏背景 + 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
+- 启动加载界面：独立无边框窗口（主屏宽度 28%，按图片比例居中）+ 底部相对定位的文案 / 百分比 / 进度条，背景图可替换。
 
 **工程与分发**
 
@@ -137,6 +138,8 @@ CMake 目标：
 | `RestArtEngine` | 引擎可执行文件（Project Manager + 编辑器） |
 | `DearImGui` | 随仓库构建的 ImGui 静态库 |
 
+Premake 还会在项目 `.idea/` 下生成 RestArtEngine 与 RefreshConfig 运行配置；C++ 配置启动前构建，并从调试宏选择对应配置的可执行文件。已打开的 Rider 可能需要重新打开 solution 才能加载新增配置。
+
 两种构建方式共享源码，输出目录互相独立（CMake 输出到 `build/`；Premake 输出到 `bin/` 与 `settings/`，solution 由 Premake 生成、不提交）。
 
 修改 Premake 配置后先运行 `scripts/GenerateWIN.bat`，再让 IDE 重新加载工程并执行 Rebuild。静态库只归档自身对象，系统导入库由最终程序链接；依赖与警告处理规范见 [Architecture](docs/Architecture.md#构建依赖与警告)。
@@ -155,13 +158,13 @@ CMake 目标：
 
 进入编辑器后：
 
-- Outliner 或视口选 Actor，切到左侧 Scene 修改变换与 Mesh / Material；
-- 底部 Content 的 Meshes 用于导入和浏览网格；选择场景中的具体 Actor 后，左侧 Details 显示该实例的网格与当前材质。点击材质或 Scene 的 `Edit assigned material`，在独立系统窗口编辑材质与 HLSL；
+- Outliner 或视口选 Actor，在左侧 Details 修改变换与 Mesh / Material；
+- 底部 Content 支持文件夹导航、名称／路径搜索、类型筛选、排序、可调缩略图与 OBJ 导入；选择场景中的具体 Actor 后，左侧 Details 显示该实例的网格与当前材质。点击材质或 Details 的 `Edit assigned material`，在独立系统窗口编辑材质与 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
 编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理六个工作区面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。材质编辑器单独使用系统窗口，可移出主窗口；其他面板仍保持主窗口内工作。
 
-顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左上 Outliner、左下 Scene / Details 页签、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；底部 Content 保留 Meshes，材质参数和 Shader 编辑页位于独立窗口。首次使用 Docking 时建立默认布局；已有五面板布局只在原 Details 所在组补入 Scene，保留其他区域安排。
+顶部左侧 `Layout` 菜单可以聚焦面板，`Restore default layout` 恢复左上 Outliner、左下 Scene / Details 页签、右侧 Viewport settings、底部 Content & Editors 和中央 Scene Viewport。原生 Dock 树及窗口位置、尺寸由本机 `RestArtEngine.imgui.ini` 保存。Scene Viewport 显示场景渲染纹理，拾取和 Gizmo 使用本帧图像内容矩形；底部 Content 提供资产文件夹树和列表/网格浏览，材质参数和 Shader 编辑页位于独立窗口。首次使用 Docking 时建立默认布局；已有五面板布局只在原 Details 所在组补入 Scene，保留其他区域安排。
 
 ## 场景操作
 
@@ -178,6 +181,7 @@ CMake 目标：
 | 中键拖动视口 | 平移相机焦点 |
 | 视口滚轮 | 推拉相机距离 |
 | 选中 Actor 后按 F | 相机聚焦该 Actor 并适配其包围盒 |
+| G / H | 切换选中描边 / 切换选中 Actor 可见性（H 可撤销） |
 | F1 | 显示 / 隐藏控制面板 |
 | F2 | 切换 Forward / Deferred |
 | F3 | 开关光追阴影与反射 |
@@ -187,7 +191,7 @@ CMake 目标：
 
 文本输入时 W / E / R / Space / Delete 不会作用于场景。Outliner 与视口支持多选（Ctrl / Shift 点击切换成员，Shift 当前不做连续范围选择），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y，也支持 Ctrl+Shift+Z 重做）。Ctrl+D 复制选中 Actor，Ctrl+S 保存场景。Ctrl+D 多选复制目前逐个记入撤销历史；Alt＋拖动手柄则将整组复制与最终变换记为一条。
 
-Viewport settings 还可调 Key light、Exposure、VSync、Shadow method，并支持 Reset camera（同时复位焦点）。
+Scene 调整 Key light、背景和 Shadow method；Viewport settings 调整 Exposure、VSync，并支持 Reset camera（同时复位焦点）。
 
 ## 工程与引擎
 
@@ -198,13 +202,13 @@ RestArtEngine.rc                  <- 图标与版本资源
 Projects/Sandbox/            <- 纯数据示例工程
   Sandbox.raproject
   Content/Scenes/Default.rascene
-  Content/Materials/*.rasset      （旧 .ramat 只读兼容）
-  Content/Meshes/*.rasset        （内置图元 + OBJ 导入）
+  Content/Materials/*.ramat       （随仓库提供；保存时另写 .rasset）
+  Content/Meshes/*.rasset         （打开工程/导入后生成）
   Shaders/Materials/Standard.hlsli
 Projects/RayTracing_Simple/ <- 光追测试工程
   RayTracing_Simple.raproject
   Content/Scenes/Default.rascene
-  Content/Materials/*.rasset
+  Content/Materials/*.ramat       （随仓库提供；保存时另写 .rasset）
   Shaders/Materials/Standard.hlsli
 ```
 
@@ -271,15 +275,15 @@ Forward : 背景 + 几何  →  绘制时直接着色
 | Discard draft | 恢复最近 Apply 的材质参数 | 不变 |
 | Save material assets | 不变 | 写 `Content/Materials/*.rasset`（旧 `.ramat` 保留） |
 | 编辑 Shader 草稿 | 不变 | 不变 |
-| Shader Apply / Compile | 成功则整体替换 6 个 shader 阶段 | 不变 |
+| Shader Apply / Compile | 成功替换原有 6 个场景 Shader；新增两个描边 Shader 尚未接入发布 | 不变 |
 | Shader 编译失败 | 保留上一版可用 Shader + 诊断 | 不变 |
 | Save shader | 不变 | 写工程 `Shaders/Materials/Standard.hlsli` |
 
-Apply 的成功是**全有或全无**：任一阶段或反射校验失败都不会改动当前管线的任何部分。
+候选编译或反射校验失败时保留活动 Shader。当前候选共 8 个入口，但 Apply 尚未发布两个描边 Shader；限制见 [渲染开发说明](docs/RenderingDevelopment.md#当前源码基线与缺口)。
 
 ## 启动加载界面
 
-打开工程 / 引擎启动期间，窗口会显示 `assets/load/load.png` 加载界面，完整图片拉伸铺满自定义标题栏下方的主窗口工作区。布局使用主 viewport 的本帧工作区位置与尺寸，支持启用多窗口后的桌面坐标；窗口偏离桌面原点不会裁掉背景或进度文字。底部的文案、百分比与进度条全部按**图片的相对比例**定位，替换图片不需要改代码：
+打开工程 / 引擎启动期间，窗口会显示 `assets/load/load.png` 加载界面，完整图片铺满独立无边框加载窗口；加载完成后切换到按主屏 80% 大小居中的编辑器窗口。布局使用主 viewport 的本帧工作区位置与尺寸，支持启用多窗口后的桌面坐标；窗口偏离桌面原点不会裁掉背景或进度文字。底部的文案、百分比与进度条全部按**图片的相对比例**定位，替换图片不需要改代码：
 
 | 元素 | 相对位置 |
 | --- | --- |
@@ -360,10 +364,11 @@ RestArtEngine.exe --help
 - 光追是**解析求交 + 三角形遍历**，没有 DXR、硬件 RT 核心、通用网格 BVH 或路径追踪。
 - 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
 - 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
-- 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称、可见性及 Mesh / Material 引用修改尚未纳入撤销历史。
+- 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称及 Mesh / Material 引用修改尚未纳入撤销历史；可见性开关和 H 已支持撤销。
 - 六个工作区面板的 Docking 悬浮限于主窗口；材质编辑器可使用独立系统窗口。尚无动态面板插件、命名布局或完整逐显示器字体 DPI 适配。
 - 主题切换（Black / Dark Blue、偏好保存）：`UI → Theme` 切换；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
+- 资产按 GUID 保留子目录与文件名，启动先载入资产再解析场景；保存原子性、场景缩略图刷新和类型目录限制见 [资产格式](docs/AssetFormat.md#当前使用限制)。多窗口独立预览与取景范围见 [渲染说明](docs/RenderingDevelopment.md#离屏工具预览)。
 
 ## 第三方依赖与许可
 
