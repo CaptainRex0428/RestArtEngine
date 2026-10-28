@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Core/GarbageCollector.h>
+#include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
@@ -67,7 +68,9 @@ struct SceneSettings {
     static constexpr float minPitch = -1.55f;
     static constexpr float maxPitch = 1.55f;
     float exposure = 1.0f;
-    // Lit=0, Unlit=1, Albedo=2, World normals=3, World position=4.
+    // 0..4: Lit, Unlit, Albedo, World normals, World position.
+    // 5..10: Roughness, Metallic, Specular F0, Linear depth (0..100m),
+    // Direct diffuse, Direct specular. Data modes bypass exposure/tone mapping.
     int debugView = 0;
     int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
     // Editor panels composite the scene texture through their own window draw
@@ -179,6 +182,24 @@ public:
     // Writes BMP at the current position of a borrowed binary output stream.
     // Caller owns flushing/closing it and checking the final close result.
     bool saveScreenshot(std::FILE* file, std::string& error);
+
+    void setDiagnosticsEnabled(bool enabled);
+    [[nodiscard]] bool diagnosticsEnabled() const;
+    [[nodiscard]] const RenderDiagnosticsFrame& diagnosticsFrame() const;
+    // Captures the next main scene render, never a tool preview. One immutable
+    // resource set, bounded to 256 MiB, retained until clear/replacement/shutdown.
+    void requestFrameCapture();
+    [[nodiscard]] const RenderFrameCapture& frameCapture() const;
+    // Display conversion is generated on demand and cached per resource/channel.
+    // Borrowed until clear/replacement/shutdown; resize and hot reload are safe.
+    void* capturedTexture(std::size_t resourceIndex,
+                          DebugTextureChannel channel = DebugTextureChannel::RGB);
+    // Explicit synchronous GPU readback of one raw texel (can stall the CPU).
+    bool readCapturedPixel(std::size_t resourceIndex, std::uint32_t x, std::uint32_t y,
+                           float (&value)[4], std::string& error) const;
+    void clearFrameCapture();
+    // JSON metadata only: resource image payloads and replay are not exported.
+    bool exportFrameCapture(const std::filesystem::path& path, std::string& error) const;
 
 private:
     struct Impl;

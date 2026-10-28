@@ -14,7 +14,10 @@
 #include "RestArtEngine/Renderer/SelectionOutline.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
+#include "RestArtEngine/Core/TraceProfiler.h"
 #include <d3d11shader.h>
+#include <DirectXPackedVector.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <iostream>
@@ -372,6 +375,9 @@ struct SceneRenderer::Impl {
     static constexpr UINT shadowCascadeCount = 2;
     std::uint32_t width = 0, height = 0;
     std::string adapter;
+
+    // Private DX11 diagnostic resources; public snapshots contain no native handles.
+#include "RenderDiagnostics.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
         DXGI_SWAP_CHAIN_DESC1 description{};
@@ -733,6 +739,8 @@ struct SceneRenderer::Impl {
             context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
             context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
             context->DrawIndexed(gpu.count, 0, 0);
+            recordDraw(actor.id, mesh->id, material->id, gpu.count,
+                static_cast<std::uint32_t>(mesh->vertices.size()));
         }
         return true;
     }
@@ -763,6 +771,8 @@ struct SceneRenderer::Impl {
             context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
             context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
             context->DrawIndexed(gpu.count, 0, 0);
+            recordDraw(actor.id, mesh->id, actor.mesh.materialId, gpu.count,
+                static_cast<std::uint32_t>(mesh->vertices.size()));
         }
         return true;
     }
@@ -775,6 +785,7 @@ struct SceneRenderer::Impl {
         context->PSSetShader(pixelShader, nullptr, 0);
         context->OMSetDepthStencilState(depthDisabled.Get(), 0);
         context->Draw(3, 0);
+        recordDraw(0, 0, 0, 0, 3);
     }
 };
 
@@ -1130,6 +1141,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
     if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
         return clear(editorClear, error);
+    const bool diagnosticMainScene = !settings.offscreenTarget;
+    rae::diagnostics::TraceScope submitTrace(diagnosticMainScene ? "Main scene submit" : "Tool preview submit", "Renderer CPU");
+    state.beginDiagnostics(diagnosticMainScene);
+    struct DiagnosticScope {
+        Impl& state;
+        bool mainScene;
+        ~DiagnosticScope() { if (mainScene) state.finishDiagnostics(); }
+    } diagnosticScope{state, diagnosticMainScene};
     const int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(state.width) - 1) : 0;
     const int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(state.height) - 1) : 0;
     const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(state.width) - viewportX) : static_cast<int>(state.width);
@@ -1281,6 +1300,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         SceneConstants shadowScene = data;
         const UINT cascadeCount = useCsm ? Impl::shadowCascadeCount : 1;
         for (UINT cascade = 0; cascade < cascadeCount; ++cascade) {
+            state.beginDiagnosticPass(cascade == 0 ? "Shadow cascade 0" : "Shadow cascade 1");
             ID3D11DepthStencilView* cascadeDepth = state.shadowDepthSlices[cascade].Get();
             state.context->OMSetRenderTargets(0, nullptr, cascadeDepth);
             state.context->ClearDepthStencilView(cascadeDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -1304,6 +1324,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
     if (settings.path == RenderPath::Deferred) {
+        state.beginDiagnosticPass("GBuffer");
         ID3D11RenderTargetView* targets[3]{};
         const float clear[4]{};
         for (std::size_t i = 0; i < 3; ++i) {
@@ -1312,14 +1333,17 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         }
         state.context->OMSetRenderTargets(3, targets, state.depth.Get());
         if (!state.drawGeometry(state.gbufferPS.Get(), world, assets, error, materialOverride)) return false;
+        state.beginDiagnosticPass("Deferred lighting / debug");
         state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
         ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(), state.gbufferViews[1].Get(), state.gbufferViews[2].Get(), state.shadowView.Get(), state.rayTriangleView.Get()};
         state.context->PSSetShaderResources(0, 5, views);
         state.drawFullscreen(state.deferredPS.Get());
         state.context->PSSetShaderResources(0, 5, emptyViews);
     } else {
+        state.beginDiagnosticPass("Forward background");
         state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
         state.drawFullscreen(state.backgroundPS.Get());
+        state.beginDiagnosticPass("Forward geometry / debug");
         if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
     }
     // Editor-only selection outline. The mask re-draws the selected silhouettes
@@ -1327,6 +1351,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // dilates that mask over the scene colour. Runtime callers leave the outline
     // fields empty, so this block never runs outside the editor.
     if (settings.editorViewport && settings.outlineActors && settings.outlineActorCount > 0) {
+        state.beginDiagnosticPass("Selection masks");
 
         if (!state.outline) { error = "Selection outline is not initialized."; return false; }
         if (!state.outline->prepare(state.width, state.height, error)) return false;
@@ -1336,9 +1361,24 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         if (!state.outline->drawMasks(state.context.Get(), state.depth.Get(), sceneViewport,
                 state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
                 state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
+        state.beginDiagnosticPass("Selection composite");
         state.outline->composite(state.context.Get(), backbuffer, state.depthView.Get(), sceneViewport,
             state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
             settings.outlineColor, settings.outlineThickness, settings.outlineFrontObjects);
+        state.recordDraw(0, 0, 0, 0, 3);
+    }
+    if (diagnosticMainScene) {
+        state.finishDiagnostics();
+        if (state.captureRequested) {
+            // Copy after the final scene pass, before ImGui compositing. Failure
+            // retains the previous immutable snapshot and does not abort rendering.
+            state.context->OMSetRenderTargets(0, nullptr, nullptr);
+            std::string captureError;
+            if (!state.copyFrameCapture(settings, captureError))
+                state.capture.status = "Capture failed: " + captureError + (state.capture.valid ? " Previous capture retained." : "");
+            state.captureRequested = false;
+            state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+        }
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
     if (settings.editorViewport) {
@@ -1359,6 +1399,7 @@ std::string SceneRenderer::shaderSource() const { return impl_->materialSource; 
 std::uint64_t SceneRenderer::shaderRevision() const { return impl_->revision; }
 
 bool SceneRenderer::applyShaderSource(const std::string& source, std::string& diagnostics) {
+    rae::diagnostics::TraceScope trace("Shader Compile / Pipeline Build", "Shader");
     diagnostics.clear();
     if (!impl_->device) { diagnostics = "Initialize the renderer before applying shaders."; return false; }
     Impl candidate;
@@ -1368,18 +1409,20 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     candidate.materialSource = source;
     if (!readText(candidate.shaderRoot / "Private/Scene.hlsl", candidate.sceneSource, diagnostics) ||
         !candidate.createPipeline(diagnostics)) return false;
-    // No live GPU state or source is changed until all six stages and contracts pass.
+    // No live GPU state or source is changed until all eight stages and contracts pass.
     impl_->geometryVS = std::move(candidate.geometryVS);
     impl_->fullscreenVS = std::move(candidate.fullscreenVS);
     impl_->forwardPS = std::move(candidate.forwardPS);
     impl_->gbufferPS = std::move(candidate.gbufferPS);
     impl_->deferredPS = std::move(candidate.deferredPS);
     impl_->backgroundPS = std::move(candidate.backgroundPS);
+    impl_->outlineMaskPS = std::move(candidate.outlineMaskPS);
+    impl_->outlineCompositePS = std::move(candidate.outlineCompositePS);
     impl_->inputLayout = std::move(candidate.inputLayout);
     impl_->materialSource = source;
     impl_->sceneSource = std::move(candidate.sceneSource);
     ++impl_->revision;
-    diagnostics = "Applied all 6 shader stages. Revision " + std::to_string(impl_->revision) + ".";
+    diagnostics = "Applied all 8 shader stages. Revision " + std::to_string(impl_->revision) + ".";
     return true;
 }
 
@@ -1438,7 +1481,11 @@ bool SceneRenderer::rayTracingSupported(const scene::World& world, const assets:
 bool SceneRenderer::present(bool vsync, std::string& error) {
     error.clear();
     if (!impl_->swapChain) { error = "Renderer is not initialized."; return false; }
-    return !failed(impl_->swapChain->Present(vsync ? 1 : 0, 0), "Present", error);
+    const bool result = !failed(impl_->swapChain->Present(vsync ? 1 : 0, 0), "Present", error);
+    // UI submission has consumed any retired capture SRVs. D3D11 owns pending
+    // GPU references, so clearing here needs no idle wait.
+    impl_->retiredCapturedTextures.clear();
+    return result;
 }
 
 RendererCacheStats SceneRenderer::cacheStats() const {
@@ -1605,5 +1652,7 @@ bool SceneRenderer::saveScreenshot(std::FILE* file, std::string& error) {
     if (!written) { error = "Could not write complete screenshot."; return false; }
     return true;
 }
+
+#include "RenderDiagnosticsApi.inl"
 
 } // namespace rae::renderer

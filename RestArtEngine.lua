@@ -9,6 +9,7 @@ project "RestArtEngine"
 		"app/**.h",
 		"src/**.cpp",
 		"src/**.h",
+		"src/**.inl",
 		"include/RestArtEngine/**.h",
 		-- HLSL sources are listed so they can be edited from the solution; the
 		-- build does not compile them (they are loaded and compiled at runtime).

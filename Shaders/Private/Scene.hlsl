@@ -452,7 +452,8 @@ float3 Fresnel(float cosine, float3 reflectance)
     return reflectance + (1.0 - reflectance) * factor;
 }
 
-float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface material, float2 uv, bool deferred)
+float3 ShadeSurfaceContributions(float3 position, float3 normal, float3 view, Surface material, float2 uv,
+    bool deferred, out float3 directDiffuse, out float3 directSpecular)
 {
     float3 light = normalize(lightDirectionIntensity.xyz);
     float3 halfway = normalize(light + view);
@@ -471,7 +472,10 @@ float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface materia
     float3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.001);
     float3 diffuse = (1.0 - fresnel) * (1.0 - material.metallic) * material.albedo / PI;
     float visibility = ShadowVisibility(position, normal, light, uv, deferred);
-    float3 direct = (diffuse + specular) * nl * max(lightDirectionIntensity.w, 0.0) * float3(1.0, 0.87, 0.72) * visibility;
+    float3 irradiance = nl * max(lightDirectionIntensity.w, 0.0) * float3(1.0, 0.87, 0.72) * visibility;
+    directDiffuse = diffuse * irradiance;
+    directSpecular = specular * irradiance;
+    float3 direct = directDiffuse + directSpecular;
 
     float ambientOcclusion = deferred && cascadeParameters.z > 0.5 && cascadeParameters.z < 1.5 ?
         ScreenSpaceGTAO(position, normal, uv) : 1.0;
@@ -479,6 +483,13 @@ float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface materia
     float3 reflection = reflect(-view, normal);
     float3 ambientSpecular = Environment(reflection, material.roughness) * Fresnel(nv, f0) * (1.0 - material.roughness * 0.45);
     return direct + ambientDiffuse + ambientSpecular;
+}
+
+float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface material, float2 uv, bool deferred)
+{
+    float3 directDiffuse, directSpecular;
+    return ShadeSurfaceContributions(position, normal, view, material, uv, deferred,
+        directDiffuse, directSpecular);
 }
 
 float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool deferred)
@@ -520,12 +531,32 @@ float4 OutputSurface(float3 position, float3 normal, Surface material, float2 uv
     // Albedo remains a raw material-buffer inspection (gamma encoding only).
     if (viewportDebug.z > 1.5 && viewportDebug.z < 2.5) return float4(pow(saturate(material.albedo), 1.0 / 2.2), 1.0);
     if (viewportDebug.z > 2.5 && viewportDebug.z < 3.5) return float4(normal * 0.5 + 0.5, 1.0);
-    if (viewportDebug.z > 3.5) return float4(frac(abs(position) * 0.25), 1.0);
+    if (viewportDebug.z > 3.5 && viewportDebug.z < 4.5) return float4(frac(abs(position) * 0.25), 1.0);
+    if (viewportDebug.z > 4.5 && viewportDebug.z < 5.5) return float4(material.roughness.xxx, 1.0);
+    if (viewportDebug.z > 5.5 && viewportDebug.z < 6.5) return float4(material.metallic.xxx, 1.0);
+    if (viewportDebug.z > 6.5 && viewportDebug.z < 7.5)
+        return float4(pow(saturate(lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic)), 1.0 / 2.2), 1.0);
+    if (viewportDebug.z > 7.5 && viewportDebug.z < 8.5)
+    {
+        // clip.w equals positive view-space depth for the RH perspective camera.
+        // White is 100 world units (metres), black is the camera plane.
+        float linearDepth = saturate(mul(float4(position, 1.0), viewProjection).w / 100.0);
+        return float4(linearDepth.xxx, 1.0);
+    }
+    if (viewportDebug.z > 8.5 && viewportDebug.z < 10.5)
+    {
+        float3 directDiffuse, directSpecular;
+        ShadeSurfaceContributions(position, normal, normalize(cameraPosition.xyz - position), material,
+            uv, deferred, directDiffuse, directSpecular);
+        return float4(DisplayColor(viewportDebug.z < 9.5 ? directDiffuse : directSpecular), 1.0);
+    }
     return float4(DisplayColor(Shade(position, normal, material, uv, deferred)), 1.0);
 }
 
 float4 Background(float2 uv)
 {
+    // Diagnostic material/lighting modes have no surface value in the sky.
+    if (viewportDebug.z > 4.5) return float4(0.0, 0.0, 0.0, 1.0);
     // cameraPosition.w is the solid-black backdrop flag written by the renderer
     // (the field is otherwise unused by the shaders). Scenes that ask for a
     // black backdrop skip the sky gradient entirely.
