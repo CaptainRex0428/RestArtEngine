@@ -2,6 +2,7 @@
 param(
     [string]$Executable = '',
     [string]$CaptureDirectory = '',
+    [string]$Project = '',
     [switch]$SkipCapture
 )
 
@@ -16,7 +17,9 @@ $CaptureDirectory = [IO.Path]::GetFullPath($CaptureDirectory)
 if (!$SkipCapture) {
     if (!(Test-Path -LiteralPath $Executable -PathType Leaf)) { throw "Build the sample first: $Executable" }
     $captureStarted = [DateTime]::UtcNow
-    & $Executable --self-test --capture-dir $CaptureDirectory
+    $renderValidationArguments = @('--self-test', '--capture-dir', $CaptureDirectory)
+    if ($Project) { $renderValidationArguments += @('--project', [IO.Path]::GetFullPath($Project)) }
+    & $Executable @renderValidationArguments
     if ($LASTEXITCODE -ne 0) { throw "GPU self-test exited with code $LASTEXITCODE" }
 }
 

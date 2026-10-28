@@ -1,4 +1,6 @@
 #include "EditorSmoke.h"
+#include "DiagnosticsSmoke.h"
+#include <RestArtEngine/Core/TraceProfiler.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -410,6 +412,11 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     std::string renderedUiText;
     const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false,
                              bool useMaterialPreview = true) {
+        struct TraceFrame {
+            TraceFrame() { diagnostics::beginFrame(); }
+            ~TraceFrame() { diagnostics::endFrame(); }
+        } traceFrame;
+        diagnostics::TraceScope trace("Editor smoke frame", "Validation");
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             require(message.message != WM_QUIT, "Closing an editor tool window quit the main application.");
@@ -440,6 +447,10 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             if (recordUiText) {
                 renderedUiText = context->LogBuffer.c_str();
                 ImGui::LogFinish();
+                if (std::string_view(name).starts_with("diagnostics_")) {
+                    std::ofstream textOutput(output / (std::string(name) + ".txt"), std::ios::binary);
+                    textOutput << renderedUiText;
+                }
             }
     
         if (settings.viewportVisible) {
@@ -3066,6 +3077,108 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         saveMaterialCapture("engine_material_copy_native.bmp");
         std::cout << "PASS: Engine Content navigation, read-only material UI, default Actor assignment, "
             "Copy to Project, editable independent parameters, save and unchanged engine file.\n";
+    }
+    runDiagnosticsSmoke(renderer, output / "diagnostics",
+        contents(project.engineRoot / "Shaders/Materials/Standard.hlsli"));
+    {
+        // Use the same real widgets and input routing as the user. Keep capture
+        // texels independent from the scene being edited throughout this block.
+        ImGuiContextScope active(context);
+        const auto originalTheme = imgui::currentTheme();
+        const auto captureFrame = renderer.frameCapture().frameId;
+        const auto diagnosticActorCount = world.actors.size();
+        const auto selected = editor.selectedActor();
+        const auto undoCount = editor.undoStack().size();
+        const char* diagnosticName = "Diagnostics##RestArtEngine.Diagnostics";
+        editor.showDiagnostics(editor::DiagnosticsTab::Profiler);
+        capture("diagnostics_profiler_preroll", true);
+        auto* diagnosticWindow = findWindow(diagnosticName);
+        require(diagnosticWindow && editor.diagnosticsOpen(), "Diagnostics Profiler did not open.");
+        ImGui::SetWindowPos(diagnosticName, {mainOrigin().x + 40, mainOrigin().y + 100}, ImGuiCond_Always);
+        ImGui::SetWindowSize(diagnosticName, {760, 660}, ImGuiCond_Always);
+        capture("diagnostics_profiler_layout", true);
+        const auto diagnosticControl = [&](const char* label) {
+            auto* window = findWindow(diagnosticName);
+            const auto* bar = context->TabBars.GetByKey(ImHashStr("Diagnostics tabs", 0, window->ID));
+            require(bar && bar->SelectedTabId, "Diagnostics has no selected tab.");
+            return itemRect(window, ImHashStr(label, 0, bar->SelectedTabId)).GetCenter();
+        };
+        click(diagnosticControl("Record CPU trace"));
+        capture("diagnostics_recording", true, true);
+        require(diagnostics::profiler().isRecording() && renderedUiText.find("Recording") != std::string::npos,
+            "Record CPU trace did not begin a visible recording.");
+        capture("diagnostics_recording_samples", true);
+        click(diagnosticControl("Stop CPU trace"));
+        capture("diagnostics_profiler_stopped", true, true);
+        require(!diagnostics::profiler().isRecording() && diagnostics::profiler().snapshot().eventCount > 0 &&
+            renderedUiText.find("CPU scopes: frame") != std::string::npos,
+            "Stopping a recording lost its inspectable CPU events.");
+        require(diagnostics::profiler().save(output / "diagnostics/ui-trace.json", error), error);
+        const auto recordedTrace = nlohmann::json::parse(contents(output / "diagnostics/ui-trace.json"));
+        require(!recordedTrace.at("traceEvents").empty(), "GUI trace export is empty.");
+
+        // A diagnostics window retaining keyboard focus must not send scene
+        // shortcuts to the live viewport merely because the mouse is over it.
+        ImGui::FocusWindow(diagnosticWindow);
+        input.mouse = scenePoint(static_cast<float>(settings.viewportWidth - 12),
+            static_cast<float>(settings.viewportHeight) * .4f);
+        capture("diagnostics_hover_live", true);
+        const auto cameraBefore = settings;
+        pressKey(ImGuiKey_F);
+        pressKey(ImGuiKey_Delete);
+        input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_D, true); };
+        capture("diagnostics_shortcut_down", true);
+        input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_D, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); };
+        capture("diagnostics_shortcut_up", true);
+        require(world.actors.size() == diagnosticActorCount && editor.selectedActor() == selected &&
+            editor.undoStack().size() == undoCount && settings.cameraDistance == cameraBefore.cameraDistance &&
+            std::equal(std::begin(settings.cameraTarget), std::end(settings.cameraTarget),
+                std::begin(cameraBefore.cameraTarget)), "Diagnostics focus allowed scene keyboard edits.");
+
+        for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+            imgui::setTheme(theme);
+            const std::string suffix = theme == imgui::EditorTheme::Black ? "black" : "blue";
+            editor.showDiagnostics(editor::DiagnosticsTab::Profiler);
+            ImGui::SetWindowSize(diagnosticName, {760, 660}, ImGuiCond_Always);
+            ImGui::SetScrollY(diagnosticWindow, 0);
+            // ImGui applies a requested tab selection on the following frame.
+            capture(("diagnostics_profiler_" + suffix + "_preroll").c_str(), true);
+            capture(("diagnostics_profiler_" + suffix).c_str(), true, true);
+            require(renderedUiText.find("CPU frame") != std::string::npos &&
+                !renderer.diagnosticsFrame().passes.empty(),
+                "Profiler has no renderer pass statistics. Recorded UI bytes=" +
+                    std::to_string(renderedUiText.size()) + "; actual passes=" +
+                    std::to_string(renderer.diagnosticsFrame().passes.size()));
+            editor.showDiagnostics(editor::DiagnosticsTab::FrameInspector);
+            capture(("diagnostics_frame_" + suffix + "_preroll").c_str(), true);
+            capture(("diagnostics_frame_" + suffix).c_str(), true, true);
+            require(renderedUiText.find("Captured frame") != std::string::npos &&
+                renderedUiText.find("Metadata export contains no images") != std::string::npos,
+                "Frame Inspector lacks captured-frame identity or export scope.");
+            click(diagnosticControl("Read pixel"));
+            capture(("diagnostics_pixel_" + suffix).c_str(), true, true);
+            require(renderedUiText.find("RGBA =") != std::string::npos &&
+                renderer.frameCapture().frameId == captureFrame,
+                "Captured pixel control failed or consumed a new live frame.");
+            ImGui::SetWindowSize(diagnosticName, {300, 640}, ImGuiCond_Always);
+            ImGui::SetScrollY(diagnosticWindow, 0);
+            capture(("diagnostics_narrow_" + suffix).c_str(), true);
+            // Navigation scrolls the real control into view before clicking.
+            click(diagnosticControl("Read pixel"));
+            capture(("diagnostics_narrow_pixel_" + suffix).c_str(), true, true);
+            require(renderedUiText.find("RGBA =") != std::string::npos,
+                "Narrow Frame Inspector made pixel readback unreachable.");
+        }
+        require(world.actors.size() == diagnosticActorCount && editor.selectedActor() == selected &&
+            editor.undoStack().size() == undoCount, "Captured-image inspection changed scene selection or undo.");
+        imgui::setTheme(originalTheme);
+        editor.closeDiagnostics();
+        capture("diagnostics_closed", true);
+        require(!editor.diagnosticsOpen() && !renderer.diagnosticsEnabled(),
+            "Closing stopped diagnostics left continuous collection enabled.");
+        renderer.clearFrameCapture();
+        std::cout << "PASS: Diagnostics Record/Stop, retained events, trace export, frozen Frame Inspector pixel reads, "
+            "both themes, 300px window, keyboard ownership and unchanged scene/undo.\n";
     }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);
     input.detach();

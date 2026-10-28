@@ -30,6 +30,7 @@ target_link_libraries(DearImGui INTERFACE d3d11 dxgi d3dcompiler dwmapi)
 add_executable(RestArtEngine
     app/MinimalApp.cpp
     app/EditorSmoke.cpp
+    app/DiagnosticsSmoke.cpp
     app/GarbageCollectionSmoke.cpp
     src/Core/Engine.cpp
     src/Core/GarbageCollector.cpp
