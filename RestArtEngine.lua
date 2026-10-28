@@ -35,7 +35,9 @@ project "RestArtEngine"
 	{
 		"DearImGui",
 		"d3d11",
+		"d3d12",
 		"dxgi",
+		"dxguid",
 		"d3dcompiler",
 		"dwmapi",
 		"comdlg32"
@@ -76,6 +78,9 @@ project "RestArtEngine"
 	filter "system:windows"
 		systemversion "latest"
 		defines { "_WINDOWS", "_CONSOLE" }
+		postbuildcommands {
+			'powershell -NoProfile -ExecutionPolicy Bypass -File "' .. path.getabsolute("scripts/Copy-DxcRuntime.ps1") .. '" -Destination "%{cfg.targetdir}" -SdkVersion "$(WindowsTargetPlatformVersion)"'
+		}
 
 	filter "configurations:Debug"
 		runtime "Debug"

@@ -2,6 +2,7 @@
 
 #include <RestArtEngine/Core/GarbageCollector.h>
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
+#include <RestArtEngine/Renderer/GlobalIllumination.h>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
@@ -53,6 +54,12 @@ struct SceneSettings {
     // Analytic GPU ray tracing for every visible MeshAsset (exact built-in
     // intersections plus structured mesh triangles), not hardware DXR.
     bool rayTracing = false;
+    // Project-level request. The active state also depends on the selected
+    // device, compiler and pipeline; unsupported requests retain their value.
+    bool hardwareRayTracing = false;
+    bool hardwareRayTracingReflections = true;
+    bool hardwareRayTracingShadows = true;
+    GlobalIlluminationSettings globalIllumination;
     float roughness = 0.25f;
     float metallic = 0.65f;
     float baseColor[3] = {0.85f, 0.28f, 0.08f};
@@ -161,6 +168,14 @@ public:
     bool saveShaderSource(std::string& error);
     bool rayTracingSupported(const scene::World& world, const assets::AssetLibrary& assets) const;
     std::string rayTracingStatus(const scene::World& world, const assets::AssetLibrary& assets) const;
+    [[nodiscard]] bool hardwareRayTracingSupported() const;
+    [[nodiscard]] bool hardwareRayTracingActive() const;
+    [[nodiscard]] std::string hardwareRayTracingStatus() const;
+    [[nodiscard]] std::uint64_t hardwareRayTracingDispatchCount() const;
+    [[nodiscard]] GlobalIlluminationStatus globalIlluminationStatus() const;
+    // Invalidates only the main scene's progressive history, never assets or
+    // offscreen tool previews. The next visible frame starts new samples.
+    void resetGlobalIllumination();
     bool present(bool vsync, std::string& error);
     // Main/render thread only, after UI submission/capture/Present (or between
     // frames while minimized). Retains caches used by the latest scene frame.

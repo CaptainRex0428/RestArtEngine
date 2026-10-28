@@ -141,6 +141,9 @@ float3 Environment(float3 direction, float roughness)
     return sky;
 }
 
+#if defined(RAE_HARDWARE_RAYTRACING)
+#include "HardwareTrace.hlsli"
+#else
 // Keep local ray directions unnormalized to preserve world-distance t under scale.
 bool TraceScene(float3 origin, float3 direction, out float distance, out float3 hitNormal, out int hitObject,
                 bool shadowRay)
@@ -281,6 +284,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
     }
     return hitObject != -1;
 }
+#endif
 
 bool TraceSceneAny(float3 origin, float3 direction)
 {
@@ -424,6 +428,10 @@ float ScreenSpaceContact(float3 position, float3 normal, float3 light)
 
 float ShadowVisibility(float3 position, float3 normal, float3 light, float2 uv, bool deferred)
 {
+#if defined(RAE_HARDWARE_RAYTRACING)
+    if (outputInfo.w == 0) return 1.0;
+    return TraceSceneAny(position + normal * RAY_EPSILON, light) ? 0.0 : 1.0;
+#else
     if (viewportDebug.w > 1.5) return 1.0;
     if (viewportDebug.w > 0.5) {
         // Analytic rays are selected explicitly; this remains independent of
@@ -444,6 +452,7 @@ float ShadowVisibility(float3 position, float3 normal, float3 light, float2 uv, 
     if (deferred && cascadeParameters.z > 1.5)
         visibility *= ScreenSpaceContact(position, normal, light);
     return visibility;
+#endif
 }
 
 float3 Fresnel(float cosine, float3 reflectance)
@@ -477,8 +486,12 @@ float3 ShadeSurfaceContributions(float3 position, float3 normal, float3 view, Su
     directSpecular = specular * irradiance;
     float3 direct = directDiffuse + directSpecular;
 
+#if defined(RAE_HARDWARE_RAYTRACING)
+    float ambientOcclusion = 1.0;
+#else
     float ambientOcclusion = deferred && cascadeParameters.z > 0.5 && cascadeParameters.z < 1.5 ?
         ScreenSpaceGTAO(position, normal, uv) : 1.0;
+#endif
     float3 ambientDiffuse = Environment(normal, 1.0) * material.albedo * (1.0 - material.metallic) * 0.58 * ambientOcclusion;
     float3 reflection = reflect(-view, normal);
     float3 ambientSpecular = Environment(reflection, material.roughness) * Fresnel(nv, f0) * (1.0 - material.roughness * 0.45);
@@ -496,15 +509,24 @@ float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool d
 {
     float3 view = normalize(cameraPosition.xyz - position);
     float3 color = ShadeSurface(position, normal, view, material, uv, deferred);
+#if defined(RAE_HARDWARE_RAYTRACING)
+    if (traceOptions.x > 0.5)
+#else
     if (parameters.w > 0.5)
+#endif
     {
         float3 ray = reflect(-view, normal);
         float distance; float3 hitNormal; int hitObject;
         if (TraceScene(position + normal * RAY_EPSILON, ray, distance, hitNormal, hitObject, false))
         {
             float3 hitPosition = position + normal * RAY_EPSILON + ray * distance;
+#if defined(RAE_HARDWARE_RAYTRACING)
+            float4 hitColor = rayTriangles[-hitObject - 2].color;
+            float4 hitProperties = rayTriangles[-hitObject - 2].properties;
+#else
             float4 hitColor = hitObject >= 0 ? rayObjects[hitObject].color : rayTriangles[-hitObject - 2].color;
             float4 hitProperties = hitObject >= 0 ? rayObjects[hitObject].properties : rayTriangles[-hitObject - 2].properties;
+#endif
             Surface hitMaterial = MaterialAt(hitPosition, hitNormal, hitColor, hitProperties);
             float3 reflectedColor = ShadeSurface(hitPosition, hitNormal, -ray, hitMaterial, uv, deferred);
             float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);

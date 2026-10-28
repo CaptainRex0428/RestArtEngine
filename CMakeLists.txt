@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(RestArtEngine VERSION 0.2.0 LANGUAGES CXX RC)
+include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -32,12 +33,15 @@ add_executable(RestArtEngine
     app/EditorSmoke.cpp
     app/DiagnosticsSmoke.cpp
     app/GarbageCollectionSmoke.cpp
+    app/HardwareRayTracingSmoke.cpp
+    app/GlobalIlluminationSmoke.cpp
     src/Core/Engine.cpp
     src/Core/GarbageCollector.cpp
     src/Core/TraceProfiler.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
     src/Renderer/SelectionOutline.cpp
+    src/Renderer/D3D12/HardwareRayTracing.cpp
     src/Assets/AssetLibrary.cpp
     src/Assets/AssetRegistry.cpp
     src/Assets/AssetFile.cpp
@@ -50,6 +54,7 @@ add_executable(RestArtEngine
     src/Editor/EditorDockManager.cpp
     src/Editor/EditorCommands.cpp
     src/Editor/SceneEditor.cpp
+    src/Editor/ProjectSettings.cpp
     src/Editor/DiagnosticsPanel.cpp
     src/Editor/UndoStack.cpp
     src/Editor/ViewportInteraction.cpp
@@ -69,7 +74,36 @@ target_include_directories(RestArtEngine PRIVATE
     vendor/imgui
     vendor/imgui/backends
     vendor/ImGuizmo/src)
-target_link_libraries(RestArtEngine PRIVATE DearImGui d3d11 dxgi d3dcompiler dwmapi comdlg32)
+target_link_libraries(RestArtEngine PRIVATE DearImGui d3d11 d3d12 dxgi dxguid d3dcompiler dwmapi comdlg32)
+
+# DXC is loaded dynamically: devices without DXR retain the DX11 renderer.
+# Ship the compiler and its matching validator beside the executable so a
+# released engine does not depend on the user's PATH or SDK installation.
+get_filename_component(WINDOWS_KITS_ROOT
+    "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
+set(DXC_RUNTIME_DIRECTORY "" CACHE PATH "Directory containing matching x64 dxcompiler.dll and dxil.dll")
+if(NOT DXC_RUNTIME_DIRECTORY)
+    file(GLOB DXC_RUNTIME_CANDIDATES "${WINDOWS_KITS_ROOT}/bin/*/x64/dxcompiler.dll")
+    list(SORT DXC_RUNTIME_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+    foreach(DXC_COMPILER IN LISTS DXC_RUNTIME_CANDIDATES)
+        get_filename_component(DXC_CANDIDATE_DIR "${DXC_COMPILER}" DIRECTORY)
+        if(EXISTS "${DXC_CANDIDATE_DIR}/dxil.dll")
+            set(DXC_RUNTIME_DIRECTORY "${DXC_CANDIDATE_DIR}")
+            break()
+        endif()
+    endforeach()
+endif()
+if(EXISTS "${DXC_RUNTIME_DIRECTORY}/dxcompiler.dll" AND EXISTS "${DXC_RUNTIME_DIRECTORY}/dxil.dll")
+    add_custom_command(TARGET RestArtEngine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DXC_RUNTIME_DIRECTORY}/dxcompiler.dll" "${DXC_RUNTIME_DIRECTORY}/dxil.dll"
+            "$<TARGET_FILE_DIR:RestArtEngine>"
+        COMMENT "Copy DXC runtime and DXIL validator")
+    install(FILES "${DXC_RUNTIME_DIRECTORY}/dxcompiler.dll" "${DXC_RUNTIME_DIRECTORY}/dxil.dll"
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
+    message(WARNING "DXC runtime not found. Set DXC_RUNTIME_DIRECTORY to enable hardware ray tracing in the built engine.")
+endif()
 target_compile_definitions(RestArtEngine PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 if(MSVC)
     target_compile_options(RestArtEngine PRIVATE /W4 /permissive- /utf-8)
@@ -83,6 +117,13 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(ProjectSettingsTests tests/ProjectSettingsTests.cpp src/Project/Project.cpp)
+    target_include_directories(ProjectSettingsTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(ProjectSettingsTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(ProjectSettingsTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME ProjectSettingsTests COMMAND ProjectSettingsTests)
     add_executable(TraceProfilerTests tests/TraceProfilerTests.cpp src/Core/TraceProfiler.cpp)
     target_include_directories(TraceProfilerTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(TraceProfilerTests PRIVATE UNICODE _UNICODE NOMINMAX)
@@ -118,7 +159,6 @@ if(BUILD_TESTING)
     add_test(NAME LoadingScreenTests COMMAND LoadingScreenTests "${CMAKE_CURRENT_SOURCE_DIR}/assets/load/load.png")
 endif()
 
-include(GNUInstallDirs)
 install(TARGETS RestArtEngine DearImGui EXPORT RestArtEngineTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

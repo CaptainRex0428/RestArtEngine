@@ -12,6 +12,7 @@
 
 #include "RestArtEngine/Renderer/SceneRenderer.h"
 #include "RestArtEngine/Renderer/SelectionOutline.h"
+#include "D3D12/HardwareRayTracing.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
 #include "RestArtEngine/Core/TraceProfiler.h"
@@ -313,6 +314,12 @@ struct SceneRenderer::Impl {
     ComPtr<IDXGISwapChain> swapChain;
     ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D11InfoQueue> infoQueue;
+    std::unique_ptr<d3d12::HardwareRayTracing> hardwareRayTracing;
+    bool hardwarePipelineReady = false, hardwareActive = false;
+    bool hardwareRuntimeFailed = false, hardwareRequested = false;
+    std::string hardwareStatus = "Hardware ray tracing has not been initialized.";
+    GlobalIlluminationStatus giStatus;
+    std::uint64_t giHistoryEpoch = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
     ComPtr<ID3D11Texture2D> sceneTexture;
@@ -894,6 +901,16 @@ bool SceneRenderer::initializePipeline(std::string& error) {
         !state.createPipeline(error))
         return false;
     state.revision = 1;
+    state.hardwareRayTracing = std::make_unique<d3d12::HardwareRayTracing>();
+    std::string hardwareError;
+    if (state.hardwareRayTracing->initialize(state.device.Get(), state.context.Get(), hardwareError)) {
+        state.hardwarePipelineReady = state.hardwareRayTracing->preparePipeline(state.shaderRoot,
+            state.materialPath(), state.sceneSource, state.materialSource, hardwareError);
+        state.hardwareStatus = state.hardwarePipelineReady ? "DXR 1.1 ready; disabled by project settings."
+            : "Hardware pipeline unavailable: " + hardwareError;
+    } else {
+        state.hardwareStatus = "Hardware ray tracing unavailable: " + hardwareError;
+    }
     return true;
 }
 
@@ -1142,6 +1159,22 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
         return clear(editorClear, error);
     const bool diagnosticMainScene = !settings.offscreenTarget;
+    if (diagnosticMainScene) {
+        state.hardwareActive = false;
+        if (settings.hardwareRayTracing && !state.hardwareRequested) {
+            state.hardwareRuntimeFailed = false;
+            ++state.giHistoryEpoch;
+        }
+        state.hardwareRequested = settings.hardwareRayTracing;
+        state.giStatus.requested = settings.globalIllumination.method;
+        state.giStatus.effective = GlobalIlluminationMethod::Disabled;
+        state.giStatus.accumulatedSamples = 0;
+        state.giStatus.targetSamples = settings.globalIllumination.targetSamples;
+        state.giStatus.reason = settings.globalIllumination.method == GlobalIlluminationMethod::Disabled
+            ? "Global illumination disabled."
+            : !settings.hardwareRayTracing ? "Progressive path tracing requires hardware ray tracing."
+            : state.hardwareStatus;
+    }
     rae::diagnostics::TraceScope submitTrace(diagnosticMainScene ? "Main scene submit" : "Tool preview submit", "Renderer CPU");
     state.beginDiagnostics(diagnosticMainScene);
     struct DiagnosticScope {
@@ -1346,6 +1379,46 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.beginDiagnosticPass("Forward geometry / debug");
         if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
     }
+    // The native hardware scene pass shares material/lighting source with raster.
+    // Raster depth and G-buffers remain valid for editor overlays and inspection.
+    // Tool previews deliberately retain their own inexpensive raster path.
+    if (diagnosticMainScene && settings.hardwareRayTracing && state.hardwarePipelineReady &&
+        state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
+        state.beginDiagnosticPass("DXR 1.1 hardware scene");
+        d3d12::Frame frame;
+        std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
+        frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
+        // Material footprint calculations need the actual viewport extent.
+        frame.sceneConstants[32] = static_cast<float>(viewportWidth);
+        frame.sceneConstants[33] = static_cast<float>(viewportHeight);
+        XMFLOAT4X4 inverseViewProjection;
+        XMStoreFloat4x4(&inverseViewProjection, XMMatrixInverse(nullptr, view * projection));
+        std::memcpy(frame.inverseViewProjection.data(), &inverseViewProjection, sizeof(inverseViewProjection));
+        frame.width = static_cast<std::uint32_t>(viewportWidth);
+        frame.height = static_cast<std::uint32_t>(viewportHeight);
+        frame.reflections = settings.hardwareRayTracingReflections;
+        frame.shadows = settings.hardwareRayTracingShadows;
+        frame.globalIllumination = settings.globalIllumination;
+        frame.historyEpoch = state.giHistoryEpoch;
+        state.context->OMSetRenderTargets(0, nullptr, nullptr);
+        state.context->PSSetShaderResources(0, 5, emptyViews);
+        std::string hardwareError;
+        if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
+            ComPtr<ID3D11Resource> destination;
+            backbuffer->GetResource(&destination);
+            state.context->CopySubresourceRegion(destination.Get(), 0,
+                static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
+                state.hardwareRayTracing->output(), 0, nullptr);
+            state.hardwareActive = true;
+            state.hardwareStatus = state.hardwareRayTracing->status();
+            state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
+        } else {
+            state.hardwareRuntimeFailed = true;
+            state.hardwareStatus = "Hardware ray tracing failed; raster retained. " + hardwareError;
+            state.giStatus.reason = state.hardwareStatus;
+        }
+        state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+    }
     // Editor-only selection outline. The mask re-draws the selected silhouettes
     // against the scene depth (occluded parts are skipped), then the composite
     // dilates that mask over the scene colour. Runtime callers leave the outline
@@ -1409,6 +1482,23 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     candidate.materialSource = source;
     if (!readText(candidate.shaderRoot / "Private/Scene.hlsl", candidate.sceneSource, diagnostics) ||
         !candidate.createPipeline(diagnostics)) return false;
+    // The DX12 pipeline is also a candidate. It publishes only after validation;
+    // from this point the DX11 swaps below cannot fail, so both APIs advance once.
+    std::string hardwareWarning;
+    if (impl_->hardwareRayTracing && impl_->hardwareRayTracing->supported()) {
+        if (!impl_->hardwareRayTracing->preparePipeline(candidate.shaderRoot, candidate.materialPath(),
+            candidate.sceneSource, source, diagnostics)) {
+            if (impl_->hardwareRequested) return false;
+            // Pixel-derivative materials remain valid for raster-only projects.
+            // Never run the previous hardware pipeline against new raster source.
+            hardwareWarning = diagnostics;
+            impl_->hardwarePipelineReady = false;
+            impl_->hardwareStatus = "Hardware pipeline unavailable for this material: " + diagnostics;
+        } else {
+            impl_->hardwarePipelineReady = true;
+            impl_->hardwareRuntimeFailed = false;
+        }
+    }
     // No live GPU state or source is changed until all eight stages and contracts pass.
     impl_->geometryVS = std::move(candidate.geometryVS);
     impl_->fullscreenVS = std::move(candidate.fullscreenVS);
@@ -1422,7 +1512,10 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     impl_->materialSource = source;
     impl_->sceneSource = std::move(candidate.sceneSource);
     ++impl_->revision;
-    diagnostics = "Applied all 8 shader stages. Revision " + std::to_string(impl_->revision) + ".";
+    diagnostics = "Applied all 8 raster shader stages";
+    if (impl_->hardwarePipelineReady) diagnostics += " and the DXR hardware pipeline";
+    diagnostics += ". Revision " + std::to_string(impl_->revision) + ".";
+    if (!hardwareWarning.empty()) diagnostics += " Hardware mode unavailable: " + hardwareWarning;
     return true;
 }
 
@@ -1476,6 +1569,26 @@ std::string SceneRenderer::rayTracingStatus(const scene::World& world, const ass
 }
 bool SceneRenderer::rayTracingSupported(const scene::World& world, const assets::AssetLibrary& assets) const {
     return rayTracingStatus(world, assets).starts_with("Analytic");
+}
+
+bool SceneRenderer::hardwareRayTracingSupported() const {
+    return impl_->hardwareRayTracing && impl_->hardwareRayTracing->supported();
+}
+bool SceneRenderer::hardwareRayTracingActive() const { return impl_->hardwareActive; }
+std::string SceneRenderer::hardwareRayTracingStatus() const {
+    if (impl_->hardwareActive) return impl_->hardwareStatus;
+    if (!impl_->hardwareRequested && impl_->hardwarePipelineReady)
+        return "DXR 1.1 ready; disabled by project settings.";
+    return impl_->hardwareStatus;
+}
+std::uint64_t SceneRenderer::hardwareRayTracingDispatchCount() const {
+    return impl_->hardwareRayTracing ? impl_->hardwareRayTracing->dispatchCount() : 0;
+}
+GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const { return impl_->giStatus; }
+void SceneRenderer::resetGlobalIllumination() {
+    ++impl_->giHistoryEpoch;
+    impl_->giStatus.accumulatedSamples = 0;
+    impl_->giStatus.reason = "Progressive history reset; waiting for the next main scene frame.";
 }
 
 bool SceneRenderer::present(bool vsync, std::string& error) {
@@ -1574,8 +1687,8 @@ std::string SceneRenderer::adapterName() const { return impl_->adapter; }
 bool SceneRenderer::validationEnabled() const { return impl_->infoQueue != nullptr; }
 
 std::uint32_t SceneRenderer::validationErrorCount() const {
-    if (!impl_->infoQueue) return 0;
-    std::uint32_t count = 0;
+    std::uint32_t count = impl_->hardwareRayTracing ? impl_->hardwareRayTracing->validationErrorCount() : 0;
+    if (!impl_->infoQueue) return count;
     const auto total = impl_->infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
     for (UINT64 i = 0; i < total; ++i) {
         SIZE_T size = 0;

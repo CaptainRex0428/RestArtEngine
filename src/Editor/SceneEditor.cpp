@@ -122,6 +122,9 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
 }
 bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
     project_ = project;
+    projectRenderingDraft_ = project_.rendering;
+    projectSettingsDirty_ = false;
+    projectSettingsMessage_.clear();
     assets_.createDefaults();
     if (!assets_.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
     // Materials are the single source of truth for scene v2 references: load the
@@ -354,12 +357,13 @@ bool SceneEditor::saveAll(renderer::SceneRenderer& renderer) {
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) { status_ = error; return false; }
     materialsDirty_ = false;
     if (!saveScene(&renderer)) return false;
-    status_ = "Saved scene, material assets and applied shader source.";
+    if (projectSettingsDirty_ && !saveProjectSettings()) return false;
+    status_ = "Saved scene, material assets, applied shader source and project settings.";
     return true;
 }
 
 bool SceneEditor::dirty(const renderer::SceneRenderer& renderer) const {
-    return sceneDirty_ || materialsDirty_ || materialDraftDirty_ ||
+    return sceneDirty_ || materialsDirty_ || materialDraftDirty_ || projectSettingsDirty_ ||
         shaderDraft_ != renderer.shaderSource() || renderer.shaderSource() != shaderSaved_;
 }
 
@@ -2466,6 +2470,9 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
 }
 
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
+    // Capture requested feature values even while Project Settings is closed.
+    // Save All and the close prompt share the same configuration draft.
+    syncProjectSettings(settings);
     // Details may request a copy while Content is hidden. Consume before any
     // panel borrows registry entries, never during an asset traversal.
     if (pendingContentCopy_) {
@@ -2515,6 +2522,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         drawEditMenu();
         drawUiMenu();
         drawDebugMenu(renderer);
+        drawProjectMenu();
         commandButton("scene.save");
         if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
         if (ImGui::Button("Save All")) saveAll(renderer);
@@ -2529,15 +2537,16 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     ImGui::SameLine(); ImGui::SetNextItemWidth(135);
     ImGui::Combo("##view", &settings.debugView,
         "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
-    ImGui::SameLine(); ImGui::Checkbox("Ray tracing", &settings.rayTracing);
     ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
     ImGui::SameLine();
-    ImGui::TextDisabled("Project: %s | DX11 / %s | %.0f FPS | F1 UI, F2 pipeline, F3 rays, F11 fullscreen",
-        project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
+    ImGui::TextDisabled("Project: %s | %s / %s | %.0f FPS | F1 UI, F2 pipeline, F11 fullscreen",
+        project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
+        renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
     ImGui::End();
 
     drawGarbageCollection();
     drawOutlineSettings();
+    drawProjectSettings(settings, renderer);
     // Resolve diagnostic keyboard ownership in this frame before the viewport
     // handles hover shortcuts. Captured-image input never edits the live scene.
     diagnosticsPanel_.draw(renderer);
@@ -2546,7 +2555,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         [this] { duplicateForDrag(); }, registry_,
         [this](assets::AssetId mesh, const scene::Transform& transform) {
             createMeshActor(mesh, transform, "Place Mesh");
-        }, materialPreview(), diagnosticsPanel_.isFocused());
+        }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_);
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
@@ -2601,10 +2610,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawAssetDetails(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!diagnosticsPanel_.isFocused() && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!diagnosticsPanel_.isFocused() && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -2655,7 +2664,7 @@ bool SceneEditor::drawCloseDialog(renderer::SceneRenderer& renderer) {
     bool exit = false;
     ImGui::OpenPopup("Unsaved editor changes");
     if (ImGui::BeginPopupModal("Unsaved editor changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("There are unsaved scene, material or shader changes.");
+        ImGui::TextUnformatted("There are unsaved scene, material, shader or project settings changes.");
         if (ImGui::Button("Save All & Exit")) {
             exit = saveAll(renderer);
             if (exit) ImGui::CloseCurrentPopup();

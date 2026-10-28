@@ -11,11 +11,89 @@
 #include <stdexcept>
 #include <string_view>
 #include <vector>
+#include <atomic>
+#include <chrono>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace rae::project {
 namespace {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
+
+void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& settings) {
+    using renderer::GlobalIlluminationMethod;
+    if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing)
+        throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+    const auto range = [](const char* key, std::uint32_t value, std::uint32_t maximum) {
+        if (value < 1 || value > maximum)
+            throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                " must be an integer from 1 to " + std::to_string(maximum) + ".");
+    };
+    range("samplesPerFrame", settings.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
+    range("targetSamples", settings.targetSamples, renderer::kGiMaxTargetSamples);
+    range("maxBounces", settings.maxBounces, renderer::kGiMaxBounces);
+}
+
+RenderingSettings readRenderingSettings(const Json& value) {
+    RenderingSettings settings;
+    if (!value.contains("rendering")) return settings;
+    const auto& rendering = value.at("rendering");
+    if (!rendering.is_object()) throw std::runtime_error("rendering must be an object.");
+    const auto read = [&rendering](const char* key, bool& result) {
+        if (!rendering.contains(key)) return;
+        if (!rendering.at(key).is_boolean())
+            throw std::runtime_error(std::string("rendering.") + key + " must be a boolean.");
+        result = rendering.at(key).get<bool>();
+    };
+    read("hardwareRayTracing", settings.hardwareRayTracing);
+    read("hardwareRayTracingReflections", settings.hardwareRayTracingReflections);
+    read("hardwareRayTracingShadows", settings.hardwareRayTracingShadows);
+    if (rendering.contains("globalIllumination")) {
+        const auto& gi = rendering.at("globalIllumination");
+        if (!gi.is_object()) throw std::runtime_error("rendering.globalIllumination must be an object.");
+        if (gi.contains("method")) {
+            if (!gi.at("method").is_string())
+                throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+            const auto& method = gi.at("method").get_ref<const std::string&>();
+            if (method == "disabled") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
+            else if (method == "pathTracing") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+            else throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+        }
+        const auto readCount = [&gi](const char* key, std::uint32_t& result, std::uint32_t maximum) {
+            if (!gi.contains(key)) return;
+            const auto& count = gi.at(key);
+            const auto reject = [key, maximum] {
+                throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                    " must be an integer from 1 to " + std::to_string(maximum) + ".");
+            };
+            if (!count.is_number_integer()) reject();
+            std::uint64_t integer = 0;
+            if (count.is_number_unsigned()) integer = count.get<std::uint64_t>();
+            else {
+                const auto signedInteger = count.get<std::int64_t>();
+                if (signedInteger < 1) reject();
+                integer = static_cast<std::uint64_t>(signedInteger);
+            }
+            if (integer < 1 || integer > maximum) reject();
+            result = static_cast<std::uint32_t>(integer);
+        };
+        readCount("samplesPerFrame", settings.globalIllumination.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
+        readCount("targetSamples", settings.globalIllumination.targetSamples, renderer::kGiMaxTargetSamples);
+        readCount("maxBounces", settings.globalIllumination.maxBounces, renderer::kGiMaxBounces);
+    }
+    return settings;
+}
+
 std::string pathUtf8(const fs::path& path) {
     const auto text = path.generic_u8string();
     return {reinterpret_cast<const char*>(text.data()), text.size()};
@@ -654,6 +732,7 @@ bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& re
             throw std::runtime_error("Unsupported project format or version.");
         ProjectPaths staged;
         staged.manifest = manifest;
+        staged.rendering = readRenderingSettings(value);
         staged.name = value.at("name").get<std::string>();
         if (staged.name.empty()) throw std::runtime_error("Project name cannot be empty.");
         staged.projectRoot = manifest.parent_path();
@@ -722,6 +801,99 @@ bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& re
         error.clear();
         return true;
     } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
+                                  const RenderingSettings& settings, std::string& error) {
+    fs::path temporary;
+    bool temporaryOwned = false;
+    try {
+        validateGlobalIllumination(settings.globalIllumination);
+        fs::path manifest;
+        if (!resolveManifest(folderOrManifest, manifest, error)) return false;
+        std::ifstream input(manifest, std::ios::binary);
+        if (!input) throw std::runtime_error("Cannot read project manifest: " + pathUtf8(manifest));
+        auto value = Json::parse(input);
+        input.close();
+        if (value.at("format") != "RAEngine.Project" ||
+            (value.at("version") != 1 && value.at("version") != 2 && value.at("version") != 3))
+            throw std::runtime_error("Unsupported project format or version.");
+        // Validate the existing object before editing it; a malformed document
+        // must not be silently converted into a different project schema.
+        (void)readRenderingSettings(value);
+        auto& rendering = value["rendering"];
+        if (rendering.is_null()) rendering = Json::object();
+        rendering["hardwareRayTracing"] = settings.hardwareRayTracing;
+        rendering["hardwareRayTracingReflections"] = settings.hardwareRayTracingReflections;
+        rendering["hardwareRayTracingShadows"] = settings.hardwareRayTracingShadows;
+        auto& gi = rendering["globalIllumination"];
+        if (gi.is_null()) gi = Json::object();
+        gi["method"] = settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing
+            ? "pathTracing" : "disabled";
+        gi["samplesPerFrame"] = settings.globalIllumination.samplesPerFrame;
+        gi["targetSamples"] = settings.globalIllumination.targetSamples;
+        gi["maxBounces"] = settings.globalIllumination.maxBounces;
+        const auto text = value.dump(2) + '\n';
+        static std::atomic<std::uint64_t> sequence{0};
+        temporary = manifest;
+        temporary += ".tmp-settings-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
+            std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+#ifdef _WIN32
+        const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("Cannot create temporary project settings file (Win32 " +
+                std::to_string(GetLastError()) + ").");
+        temporaryOwned = true;
+        bool written = true;
+        std::size_t offset = 0;
+        while (offset < text.size()) {
+            const auto amount = static_cast<DWORD>(std::min<std::size_t>(text.size() - offset, 1u << 20));
+            DWORD count = 0;
+            if (!WriteFile(file, text.data() + offset, amount, &count, nullptr) || count != amount) {
+                written = false;
+                break;
+            }
+            offset += count;
+        }
+        if (written) written = FlushFileBuffers(file) != FALSE;
+        const auto writeError = written ? ERROR_SUCCESS : GetLastError();
+        const bool closed = CloseHandle(file) != FALSE;
+        if (!written || !closed)
+            throw std::runtime_error("Cannot write project settings (Win32 " +
+                std::to_string(written ? GetLastError() : writeError) + ").");
+        if (!MoveFileExW(temporary.c_str(), manifest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Cannot replace project settings (Win32 " +
+                std::to_string(GetLastError()) + "). Original project retained.");
+#else
+        const auto file = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (file < 0) throw std::runtime_error("Cannot create temporary project settings file.");
+        temporaryOwned = true;
+        bool written = true;
+        std::size_t offset = 0;
+        while (offset < text.size()) {
+            const auto count = ::write(file, text.data() + offset, text.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) { written = false; break; }
+            offset += static_cast<std::size_t>(count);
+        }
+        if (written) written = ::fsync(file) == 0;
+        const bool closed = ::close(file) == 0;
+        if (!written || !closed) throw std::runtime_error("Cannot write project settings.");
+        fs::rename(temporary, manifest);
+#endif
+        temporary.clear();
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        if (temporaryOwned && !temporary.empty()) {
+            std::error_code ignored;
+            fs::remove(temporary, ignored);
+        }
         error = exception.what();
         return false;
     }

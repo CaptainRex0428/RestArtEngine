@@ -48,6 +48,10 @@ public:
     void showDiagnostics(DiagnosticsTab tab = DiagnosticsTab::Profiler) { diagnosticsPanel_.show(tab); }
     void closeDiagnostics() { diagnosticsPanel_.close(); }
     [[nodiscard]] bool diagnosticsOpen() const noexcept { return diagnosticsPanel_.isOpen(); }
+    void showProjectSettings() { projectSettingsOpen_ = true; projectSettingsFocusRequested_ = true; }
+    void closeProjectSettings() { projectSettingsOpen_ = false; projectSettingsFocused_ = false; }
+    [[nodiscard]] bool projectSettingsOpen() const noexcept { return projectSettingsOpen_; }
+    [[nodiscard]] bool projectSettingsDirty() const noexcept { return projectSettingsDirty_; }
     // Switches the Content browser between the list and the thumbnail grid.
     void setContentGridView(bool grid) { contentGridView_ = grid; }
     void setContentSearch(std::string search) { contentQuery_.search = std::move(search); }
@@ -96,6 +100,10 @@ private:
     void toggleSelectedVisibility();
     void drawUiMenu();
     void drawDebugMenu(renderer::SceneRenderer& renderer);
+    void drawProjectMenu();
+    void drawProjectSettings(renderer::SceneSettings&, renderer::SceneRenderer&);
+    void syncProjectSettings(const renderer::SceneSettings&);
+    bool saveProjectSettings();
     void drawGarbageCollection();
     void drawOutlineSettings();
     bool commandButton(std::string_view id);
@@ -189,6 +197,10 @@ private:
     // Editor-only selection outline settings window, opened from the UI menu.
     bool outlineSettingsOpen_ = false, outlineSettingsFocused_ = false;
     bool garbageCollectionFocused_ = false;
+    project::RenderingSettings projectRenderingDraft_;
+    bool projectSettingsOpen_ = false, projectSettingsFocusRequested_ = false;
+    bool projectSettingsFocused_ = false, projectSettingsDirty_ = false;
+    std::string projectSettingsMessage_;
     bool garbageCollectionRequested_ = false;
     std::uint64_t garbageCollectionRequestCount_ = 0;
     std::string garbageCollectionMessage_;

@@ -1,8 +1,11 @@
 #pragma once
 
+#include <RestArtEngine/Renderer/GlobalIllumination.h>
+
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rae::project {
 // Every engine installation has one small identity manifest at its root.  The
@@ -40,6 +43,16 @@ struct EngineCompatibilityReport {
     }
 };
 
+// Requested project features, independent of the device that opens the project.
+// Capability detection must not rewrite these values when a feature is unavailable.
+struct RenderingSettings {
+    bool hardwareRayTracing = false;
+    bool hardwareRayTracingReflections = true;
+    bool hardwareRayTracingShadows = true;
+    renderer::GlobalIlluminationSettings globalIllumination;
+    bool operator==(const RenderingSettings&) const = default;
+};
+
 struct ProjectPaths {
     std::filesystem::path projectRoot;
     std::filesystem::path engineRoot;
@@ -48,6 +61,7 @@ struct ProjectPaths {
     std::filesystem::path defaultScene;
     std::filesystem::path manifest;
     std::string name;
+    RenderingSettings rendering;
     // The identity discovered at engineRoot.  Legacy engines may not have a
     // manifest, in which case manifestPresent is false and the project still
     // loads for backwards compatibility.
@@ -148,6 +162,11 @@ bool writeProjectBuildFiles(const ProjectPaths& project, ProjectBuildFiles& resu
 // All project paths are absolute. Manifest strings (including paths/name) are UTF-8.
 // Failure leaves result unchanged.
 bool loadProject(const std::filesystem::path& folderOrManifest, ProjectPaths& result, std::string& error);
+
+// Atomically updates only the rendering settings in an existing manifest.
+// Unknown project/rendering fields are preserved. Failure retains the original file.
+bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
+                                  const RenderingSettings& settings, std::string& error);
 
 // Reads only the manifest identity/link fields (name, association, version,
 // hash) without resolving or validating engineRoot. Returns false for a broken
