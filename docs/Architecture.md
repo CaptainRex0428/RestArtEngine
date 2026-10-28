@@ -6,7 +6,7 @@
 
 ## 目录约定
 
-资源回收入口见 [GarbageCollection.md](GarbageCollection.md)：Core 负责可配置调度和受管临时截图，Renderer／ImGui 各自回收闲置缓存；实际调用位于 Project Manager／编辑器的帧末。场景、CPU 资产、草稿和撤销历史继续按其原有生命周期管理。用户 Capture／F9 由应用层打开原生保存对话框，Renderer 只接收选定路径；取消不导出，用户图片不登记到 GC。批量／测试截图通过显式输出参数单独路由，不恢复默认项目截图目录。
+资源回收入口见 [GarbageCollection.md](GarbageCollection.md)：Core 负责可配置调度和受管临时截图，Renderer／ImGui 各自回收闲置缓存；实际调用位于 Project Manager／编辑器的帧末。场景、CPU 资产、草稿和撤销历史继续按其原有生命周期管理。用户 Screenshot／F9 由应用层打开原生保存对话框，Renderer 只接收选定路径；取消不导出，用户图片不登记到 GC。批量／测试截图通过显式输出参数单独路由，不恢复默认项目截图目录。Frame Inspector 的帧资源捕获另有独立生命周期，见 [Diagnostics.md](Diagnostics.md)。
 
 | 目录 | 职责与放置规则 |
 | --- | --- |
@@ -196,6 +196,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 ## 渲染边界与扩展位置
 
+性能 Trace、帧事件/资源检查和视口数据可视化共用诊断语义，模块分工、捕获生命周期与实施边界见 [Diagnostics.md](Diagnostics.md)。Core 负责 CPU Trace，Renderer 负责真实渲染数据，Editor 负责工具界面；诊断状态不写入场景或材质资产。
+
 前向和延迟两条路径共享材质表达。延迟路径写入三个 G-buffer：Albedo / Roughness、World Normal / Metallic、World Position / Coverage，再进行光照。Lit、Unlit 和调试视图均从该基础上工作。
 
 光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在现有 D3D11 深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享同一套资源管理和切换入口。
@@ -218,7 +220,7 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 
 渲染器只接收 `SceneSettings` 的编辑器字段：`outlineActors` / `outlineActorCount`（借用编辑器当前选中列表，只对本次调用有效）、`outlineColor`（默认品牌橙 `#FD7804`，也可改用主题强调色或自定义颜色）、`outlineThickness`（像素半径）。这些值由编辑器从 `UI > Selection outline...` 打开的独立设置窗口填入（开关、粗细、是否用主题强调色、预设颜色或自定义颜色），窗口关闭后选择仍保留；偏好与主题一起保存在本机 `RestArtEngine.ui.ini`。运行时 `render(settings, error)` 不填这些字段，遮罩纹理也只在编辑器第一次有选中时创建，无选中时不执行该通道，也不分配 mask；初始化仍会创建描边 Shader、常量缓冲与状态。描边颜色不写入场景资产，也不参与撤销或保存。
 
-工具预览按实际材质 ID 绑定，并使用独立的材质窗口／资产详情／场景缩略图纹理槽；工具相机采用 1.5–80 的距离范围。预览生命周期、取景上限及描边 Shader 尚未接入 Apply 发布的限制，见 [渲染源码基线](RenderingDevelopment.md#当前源码基线与缺口)。
+工具预览按实际材质 ID 绑定，并使用独立的材质窗口／资产详情／场景缩略图纹理槽；工具相机采用 1.5–80 的距离范围。预览生命周期及取景上限见 [渲染源码基线](RenderingDevelopment.md#当前源码基线与缺口)。描边 Shader 与其余六个场景 Shader 共用完整候选发布与失败保留流程。
 
 ## 开发指引
 

@@ -58,11 +58,19 @@ Content 的 Sources 区分 **Project Content** 和 **Engine Content**。`View > 
 
 切换通过 `EditorTheme` 更新 ImGui 配色，两种主题共享间距和圆角等几何样式。选择与描边偏好保存到进程工作目录下的 `RestArtEngine.ui.ini`，启动时读取；旧 `RestArtEngine.theme.ini` 仅作兼容读取；文件缺失或内容无法识别时回退 Black。这是本机偏好，不属于工程资产，也不是系统用户目录中的全局设置。字体加载仍由 `ImGuiLayer` 负责，尚无字体 / DPI 配置界面。
 
-## Capture 截图
+## Screenshot 截图
 
-点击工具栏 `Capture` 或按 `F9`，系统弹出“另存为”对话框，由用户选择保存位置和文件名，格式为 BMP。初次默认打开系统“图片”目录，同次会话记住上次选址；保存到已有文件时系统要求确认覆盖。取消不会生成文件，保存失败会提示并保留编辑器，不自动写入引擎或工程的 `screenshots` 目录。截图内容仍为当前渲染窗口画面（包括当前显示的编辑器 UI）。
+点击工具栏 `Screenshot` 或按 `F9`，系统弹出“另存为”对话框，由用户选择保存位置和文件名，格式为 BMP。初次默认打开系统“图片”目录，同次会话记住上次选址；保存到已有文件时系统要求确认覆盖。取消不会生成文件，保存失败会提示并保留编辑器，不自动写入引擎或工程的 `screenshots` 目录。截图内容仍为当前渲染窗口画面（包括当前显示的编辑器 UI）。
 
-`--capture-dir` 仅用于批量／自测，手动 Capture 始终弹框。`--frames N` 本身只运行 N 帧，需要自动导出时显式搭配 `--capture-dir PATH` 或 `--capture-temp`。用户选择保存的图片不参与 GC。
+`--capture-dir` 仅用于批量／自测，手动 Screenshot 始终弹框。`--frames N` 本身只运行 N 帧，需要自动导出时显式搭配 `--capture-dir PATH` 或 `--capture-temp`。用户选择保存的图片不参与 GC。
+
+## Debug 诊断
+
+`Debug > Profiler...` 打开 Diagnostics：`Record CPU trace` 开始新的有界录制，`Stop CPU trace` 保留已录数据，`Clear trace` 清空事件；`Export trace JSON...` 选择文件保存。帧曲线是主循环 wall time，CPU 提交和 GPU Pass 耗时分别显示。GPU 结果延迟返回并显示其原 Frame ID；Pending / Unavailable 不表示零耗时。
+
+`Debug > Capture next scene frame` 或 Frame Inspector 内的同名按钮捕获下一有效主场景帧。选择冻结资源、RGB/R/G/B/A 通道，点击图片选择坐标，再按 `Read pixel` 读取该帧的原始数值；该操作可以等待 GPU，不影响实时场景选择或 Undo。Deferred 含三张真实 GBuffer，Forward 只列 SceneColor 与 Depth。`Clear capture` 释放捕获；`Export metadata JSON...` 仅导出事件和资源描述，不包含图像，也不能重放。
+
+工具栏 View 下拉新增 Roughness、Metallic、Specular F0、Linear depth、Direct diffuse / specular，Viewport settings 显示各模式的来源和显示范围。材质数据模式不受美术曝光影响，F0 有显示 gamma；直射贡献使用当前曝光和色调映射。完整数据契约与后续能力见 [Diagnostics.md](Diagnostics.md)。
 
 ## 资源回收设置
 
@@ -187,7 +195,7 @@ Apply 与 Save 的区别：
 | Reload from disk | 确认后读入磁盘源码并重新编译；失败时保留运行版 | 不变 |
 | Revert draft | 不变；文本恢复为最近成功 Apply 的版本 | 不变 |
 
-编译器重新生成前向与延迟等所需入口。所有入口编译和 GPU 对象创建成功后才发布原有六个场景 Shader；单个入口失败保留原活动版本。当前新增的两个描边 Shader 虽参与候选编译，却未在 Apply 中发布，描边代码修改暂不能依赖热更新生效。失败草稿仍可继续修改，不会因为编译错误而黑屏或关闭程序。
+编译器重新生成前向、延迟及描边所需的八个入口。所有入口编译、反射校验和 GPU 对象创建成功后才整体发布；单个入口失败保留原活动版本。失败草稿仍可继续修改，不会因为编译错误而黑屏或关闭程序。
 
 关闭窗口时如有未保存的场景、材质或 Shader 修改，会提供 `Save All & Exit`、`Discard & Exit` 和 Cancel。Shader 编译失败时不能通过保存退出，需修正草稿或明确丢弃修改。
 

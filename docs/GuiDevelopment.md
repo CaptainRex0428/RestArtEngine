@@ -63,6 +63,8 @@ List／Tiles 共用 `AssetRegistry::query` 的目录、名称／路径搜索、�
 
 ## 默认设计方向与视觉规则
 
+Diagnostics 是按需打开的可关闭、可停靠工具窗，复用既有主题与 DockSpace，不重置原六面板布局。Profiler 与 Frame Inspector 共用工具窗；冻结图像的取像素不消费 Live 视口输入。Diagnostics 获得焦点时抑制场景快捷键（包括鼠标悬停 Live 视口时的 F/W/E/R/Space），关闭录制和捕获不写入工程资产；工具行为见 [Diagnostics.md](Diagnostics.md)。
+
 面向技术美术的桌面工具：以场景视口和高频编辑为中心，使用稳定的停靠面板、清晰分组、紧凑但可读的属性控件。借鉴 Godot 的职责和交互，不引入其 GUI 运行时，也不把其他引擎的品牌图标当本项目资源。Project Manager 和加载页可使用不同的信息密度，仍应保持主题、术语和反馈一致。
 
 | 设计方面 | 任务中的要求 |

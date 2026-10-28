@@ -56,7 +56,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - 9 种直接光阴影方案：2×2 PCF、硬比较、3×3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追、禁用。全部共享同一张 2048² 深度图，靠常量位切换。
 - 解析式 GPU 光追：内置 Sphere / Plane / Cube 用精确求交，其余网格走 `StructuredBuffer` 三角形路径，用于阴影与反射。**不是 DXR**。
 - 单方向光 + 程序化环境光；GGX 高光、Schlick Fresnel、ACES 近似色调映射。
-- 检查视图：Lit、Unlit、Albedo、World normals、World position。
+- 检查视图：Lit、Unlit、Albedo、World normals、World position、Roughness、Metallic、Specular F0、Linear depth、Direct diffuse / specular。
+- `Debug` 中的 Profiler 提供 CPU Trace / JSON 导出与异步 GPU Pass 计时；Frame Inspector 冻结单帧事件和真实渲染资源，支持通道及原始像素检查。具体范围见 [诊断工具](docs/Diagnostics.md)。
 
 **编辑器**
 
@@ -186,7 +187,7 @@ Premake 还会在项目 `.idea/` 下生成 RestArtEngine 与 RefreshConfig 运�
 | F2 | 切换 Forward / Deferred |
 | F3 | 开关光追阴影与反射 |
 | F11 | 视口全屏（无边框覆盖显示器并隐藏编辑器面板；再按或 Esc 恢复） |
-| F9 / Capture 按钮 | 保存当前画面 |
+| F9 / Screenshot 按钮 | 保存当前画面 |
 | Esc / 关闭窗口 | 退出（有未保存修改时会询问） |
 
 文本输入时 W / E / R / Space / Delete 不会作用于场景。Outliner 与视口支持多选（Ctrl / Shift 点击切换成员，Shift 当前不做连续范围选择），Actor 增删与 Gizmo 变换可撤销重做（Ctrl+Z / Ctrl+Y，也支持 Ctrl+Shift+Z 重做）。Ctrl+D 复制选中 Actor，Ctrl+S 保存场景。Ctrl+D 多选复制目前逐个记入撤销历史；Alt＋拖动手柄则将整组复制与最终变换记为一条。
@@ -275,11 +276,11 @@ Forward : 背景 + 几何  →  绘制时直接着色
 | Discard draft | 恢复最近 Apply 的材质参数 | 不变 |
 | Save material assets | 不变 | 写 `Content/Materials/*.rasset`（旧 `.ramat` 保留） |
 | 编辑 Shader 草稿 | 不变 | 不变 |
-| Shader Apply / Compile | 成功替换原有 6 个场景 Shader；新增两个描边 Shader 尚未接入发布 | 不变 |
+| Shader Apply / Compile | 完整候选成功后替换 8 个场景与描边 Shader | 不变 |
 | Shader 编译失败 | 保留上一版可用 Shader + 诊断 | 不变 |
 | Save shader | 不变 | 写工程 `Shaders/Materials/Standard.hlsli` |
 
-候选编译或反射校验失败时保留活动 Shader。当前候选共 8 个入口，但 Apply 尚未发布两个描边 Shader；限制见 [渲染开发说明](docs/RenderingDevelopment.md#当前源码基线与缺口)。
+候选编译、反射校验或 GPU 对象创建失败时保留活动 Shader；8 个入口成功后整体发布。范围见 [渲染开发说明](docs/RenderingDevelopment.md#当前源码基线与缺口)。
 
 ## 启动加载界面
 
@@ -356,7 +357,7 @@ RestArtEngine.exe --frames 8 --capture-temp # 最后帧截图写入受管临时�
 RestArtEngine.exe --help
 ```
 
-手动点击 Capture 或按 F9 会打开系统“另存为”对话框，选择位置与文件名后保存 BMP；取消不生成文件，也不默认写入项目。初次默认打开系统“图片”目录，同次会话记住上次选择的目录。`--capture-dir` 只控制批量／自测输出，不能跳过手动保存对话框；单独 `--frames N` 只运行并退出，不自动截图。自测未指定目录时输出到系统临时目录的 `RestArtEngine/Validation`。
+手动点击 Screenshot 或按 F9 会打开系统“另存为”对话框，选择位置与文件名后保存 BMP；取消不生成文件，也不默认写入项目。初次默认打开系统“图片”目录，同次会话记住上次选择的目录。`--capture-dir` 只控制批量／自测输出，不能跳过手动保存对话框；单独 `--frames N` 只运行并退出，不自动截图。自测未指定目录时输出到系统临时目录的 `RestArtEngine/Validation`。`Debug > Capture next scene frame` 则捕获帧事件及资源，与窗口截图分开。
 
 ## 当前边界
 
@@ -386,6 +387,7 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 
 - [资源 GC](docs/GarbageCollection.md)：回收范围、配置、临时截图保护及验证入口
 - [渲染开发要求](docs/RenderingDevelopment.md)：热编译、实时参数、跨平台目标与现状缺口
+- [引擎诊断工具](docs/Diagnostics.md)：Profiler / Trace、Frame Inspector、GBuffer 与视口诊断设计和边界
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
 - [GUI 设计规范](docs/GuiDevelopment.md)：面板职责、视觉规则、交互契约与验收方法
