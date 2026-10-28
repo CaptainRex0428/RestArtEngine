@@ -10,6 +10,7 @@
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/Editor/LoadingScreen.h>
 #include <RestArtEngine/Core/GarbageCollector.h>
+#include <RestArtEngine/Core/TraceProfiler.h>
 #include "EditorSmoke.h"
 #include "GarbageCollectionSmoke.h"
 #include <imgui.h>
@@ -30,6 +31,10 @@
 
 namespace {
 using namespace rae::renderer;
+struct DiagnosticsFrameScope {
+    DiagnosticsFrameScope() { rae::diagnostics::beginFrame(); }
+    ~DiagnosticsFrameScope() { rae::diagnostics::endFrame(); }
+};
 struct WindowState {
     rae::imgui::WindowChrome chrome;
     unsigned width = 1440, height = 900;
@@ -341,6 +346,7 @@ rae::GarbageCollectionMemoryStats collectMemory(SceneRenderer& renderer,
 
 void updateGarbageCollection(rae::GarbageCollector& gc, SceneRenderer& renderer,
     rae::imgui::ImGuiLayer& ui, std::chrono::steady_clock::time_point& previous) {
+    rae::diagnostics::TraceScope trace("GC Service", "GC");
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(now - previous).count();
     previous = now;
@@ -883,10 +889,14 @@ int wmain(int argc, wchar_t** argv) {
         auto previous = std::chrono::steady_clock::now();
         auto previousGc = previous;
         while (running) {
-            MSG msg{};
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                if (msg.message == WM_QUIT) running = false;
-                TranslateMessage(&msg); DispatchMessageW(&msg);
+            DiagnosticsFrameScope diagnosticFrame;
+            {
+                rae::diagnostics::TraceScope trace("Window Messages", "Platform");
+                MSG msg{};
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    if (msg.message == WM_QUIT) running = false;
+                    TranslateMessage(&msg); DispatchMessageW(&msg);
+                }
             }
             if (!running) break;
             // A taskbar close request must still expose the main editor's dirty
@@ -895,6 +905,7 @@ int wmain(int argc, wchar_t** argv) {
                 ShowWindow(window.handle, SW_RESTORE);
             if (windowState.minimized) {
                 if (ui.hasVisiblePlatformWindows() || ui.hasPendingPlatformWindowRequests()) {
+                    rae::diagnostics::TraceScope trace("Minimized Tool Windows", "UI");
                     const auto now = std::chrono::steady_clock::now();
                     const float dt = std::chrono::duration<float>(now - previous).count();
                     previous = now;
@@ -908,9 +919,14 @@ int wmain(int argc, wchar_t** argv) {
                     ui.endFrame(false);
                 }
                 updateGarbageCollection(gc, renderer, ui, previousGc);
-                Sleep(16); continue;
+                {
+                    rae::diagnostics::TraceScope trace("Minimized Wait", "Wait");
+                    Sleep(16);
+                }
+                continue;
             }
             if (windowState.resized) {
+                rae::diagnostics::TraceScope trace("Resize Targets", "Renderer");
                 if (!renderer.resize(windowState.width, windowState.height, error)) throw std::runtime_error(error);
                 windowState.resized = false;
             }
@@ -939,7 +955,10 @@ int wmain(int argc, wchar_t** argv) {
                     ui.endFrame();
                 }
             }
-            ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
+            {
+                rae::diagnostics::TraceScope trace("UI Begin", "UI");
+                ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
+            }
             auto& io = ImGui::GetIO();
             const bool mainWindowFocused = GetForegroundWindow() == window.handle;
             if (mainWindowFocused && !io.WantTextInput) {
@@ -1001,19 +1020,31 @@ int wmain(int argc, wchar_t** argv) {
             settings.viewportX = settings.viewportY = settings.viewportWidth = settings.viewportHeight = 0;
             settings.editorViewport = false;
             settings.viewportVisible = true;
-            if (showUI && (!selfTest || frame == 9)) editor.draw(settings, renderer, vsync, capture);
-            else if (!selfTest) editor.drawMaterialWindow(renderer);
-            if (windowState.closeRequested) { editor.requestClose(); windowState.closeRequested = false; }
-            if (editor.drawCloseDialog(renderer)) running = false;
-            const bool rendered = selfTest ? renderer.render(settings, error)
-                : renderer.render(settings, editor.world(), editor.assets(), error, editor.materialPreview());
+            {
+                rae::diagnostics::TraceScope trace("Editor UI", "UI");
+                if (showUI && (!selfTest || frame == 9)) editor.draw(settings, renderer, vsync, capture);
+                else if (!selfTest) editor.drawMaterialWindow(renderer);
+                if (windowState.closeRequested) { editor.requestClose(); windowState.closeRequested = false; }
+                if (editor.drawCloseDialog(renderer)) running = false;
+            }
+            bool rendered = false;
+            {
+                rae::diagnostics::TraceScope trace("Scene Submit", "Renderer");
+                rendered = selfTest ? renderer.render(settings, error)
+                    : renderer.render(settings, editor.world(), editor.assets(), error, editor.materialPreview());
+            }
             if (!rendered) throw std::runtime_error(error);
-            ui.endFrame();
+            {
+                rae::diagnostics::TraceScope trace("UI Submit / Platform Present", "UI");
+                ui.endFrame();
+            }
             if (capture && !selfTest) {
+                rae::diagnostics::TraceScope trace("Screenshot Dialog / Readback", "Capture");
                 saveUserCapture(renderer, window.handle, lastUserCaptureFolder);
                 previous = std::chrono::steady_clock::now();
             } else if (selfTest || (frameLimit > 0 && frame == frameLimit - 1 &&
                 (explicitCaptureDir || temporaryCaptures))) {
+                rae::diagnostics::TraceScope trace("Screenshot Readback / Save", "Capture");
                 const bool temporary = temporaryCaptures;
                 if (!temporary) std::filesystem::create_directories(captureDir);
                 std::string name;
@@ -1031,7 +1062,10 @@ int wmain(int argc, wchar_t** argv) {
                 } else if (!renderer.saveScreenshot(file.c_str(), error)) throw std::runtime_error(error);
                 std::cout << (temporary ? "Temporary capture " : "Captured ") << file.string() << '\n';
             }
-            if (!renderer.present(vsync, error)) throw std::runtime_error(error);
+            {
+                rae::diagnostics::TraceScope trace("Present CPU / Wait", "Present");
+                if (!renderer.present(vsync, error)) throw std::runtime_error(error);
+            }
             if (!selfTest) updateGarbageCollection(gc, renderer, ui, previousGc);
             ++frame;
             if (frameLimit && frame >= frameLimit) running = false;

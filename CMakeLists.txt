@@ -33,6 +33,7 @@ add_executable(RestArtEngine
     app/GarbageCollectionSmoke.cpp
     src/Core/Engine.cpp
     src/Core/GarbageCollector.cpp
+    src/Core/TraceProfiler.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
     src/Renderer/SelectionOutline.cpp
@@ -80,6 +81,13 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(TraceProfilerTests tests/TraceProfilerTests.cpp src/Core/TraceProfiler.cpp)
+    target_include_directories(TraceProfilerTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(TraceProfilerTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(TraceProfilerTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME TraceProfilerTests COMMAND TraceProfilerTests)
     add_executable(EngineContentTests tests/EngineContentTests.cpp
         src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
