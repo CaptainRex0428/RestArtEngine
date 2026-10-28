@@ -307,7 +307,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                const std::function<void()>& duplicateForDrag,
                                const assets::AssetRegistry& registry,
                                const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
-                               const assets::MaterialAsset* materialOverride) {
+                               const assets::MaterialAsset* materialOverride, bool keyboardBlocked) {
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
     settings.editorViewport = true;
@@ -363,7 +363,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     // can already have deactivated the text field drawn earlier this frame, so
     // use live item ownership for pointer input and retain the flag for keys.
     const bool blocked = popup || assetDragging || (!usingGizmo_ && ImGui::IsAnyItemActive());
-    if (!blocked && !io.WantTextInput && !usingGizmo_ && (hovered_ || focused_)) {
+    if (!keyboardBlocked && !blocked && !io.WantTextInput && !usingGizmo_ && (hovered_ || focused_)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W, false)) operation_ = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) operation_ = 1;
         if (ImGui::IsKeyPressed(ImGuiKey_R, false)) operation_ = 2;

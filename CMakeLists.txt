@@ -49,6 +49,7 @@ add_executable(RestArtEngine
     src/Editor/EditorDockManager.cpp
     src/Editor/EditorCommands.cpp
     src/Editor/SceneEditor.cpp
+    src/Editor/DiagnosticsPanel.cpp
     src/Editor/UndoStack.cpp
     src/Editor/ViewportInteraction.cpp
     src/Editor/LoadingScreen.cpp

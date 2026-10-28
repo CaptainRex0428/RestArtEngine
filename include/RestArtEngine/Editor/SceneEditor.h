@@ -10,6 +10,7 @@
 #include <RestArtEngine/Editor/EditorDockManager.h>
 #include <RestArtEngine/Editor/UndoStack.h>
 #include <RestArtEngine/Editor/EditorCommands.h>
+#include <RestArtEngine/Editor/DiagnosticsPanel.h>
 #include <RestArtEngine/Assets/AssetRegistry.h>
 
 namespace rae::editor {
@@ -44,6 +45,9 @@ public:
     // tests to verify the inspector without double-clicking).
     void showAssetDetails(std::string relativePath);
     void closeAssetDetails() { assetDetailsOpen_ = false; assetDetailsFocused_ = false; }
+    void showDiagnostics(DiagnosticsTab tab = DiagnosticsTab::Profiler) { diagnosticsPanel_.show(tab); }
+    void closeDiagnostics() { diagnosticsPanel_.close(); }
+    [[nodiscard]] bool diagnosticsOpen() const noexcept { return diagnosticsPanel_.isOpen(); }
     // Switches the Content browser between the list and the thumbnail grid.
     void setContentGridView(bool grid) { contentGridView_ = grid; }
     void setContentSearch(std::string search) { contentQuery_.search = std::move(search); }
@@ -91,6 +95,7 @@ private:
     // Flips visibility for every selected Actor as one undoable edit (H).
     void toggleSelectedVisibility();
     void drawUiMenu();
+    void drawDebugMenu(renderer::SceneRenderer& renderer);
     void drawGarbageCollection();
     void drawOutlineSettings();
     bool commandButton(std::string_view id);
@@ -189,6 +194,7 @@ private:
     std::string garbageCollectionMessage_;
     EditorDockManager dockManager_;
     EditorCommandRegistry commands_;
+    DiagnosticsPanel diagnosticsPanel_;
     UndoStack undo_;
     std::vector<scene::ActorId> selection_;
     struct ActorSnapshot { scene::ActorId id = 0; scene::Transform transform; };

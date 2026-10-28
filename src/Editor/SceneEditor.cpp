@@ -221,6 +221,10 @@ void SceneEditor::registerCommands() {
         [this] { return !selection_.empty() && !viewport_.isUsing(); });
     commands_.add("layout.restore", "layout", "Restore Default Layout", "", 0,
         [this] { dockManager_.resetLayout(); });
+    commands_.add("debug.profiler", "debug", "Profiler...", "", 0,
+        [this] { showDiagnostics(DiagnosticsTab::Profiler); });
+    commands_.add("debug.frameInspector", "debug", "Frame Inspector...", "", 0,
+        [this] { showDiagnostics(DiagnosticsTab::FrameInspector); });
 }
 
 bool SceneEditor::commandButton(std::string_view id) {
@@ -578,6 +582,19 @@ void SceneEditor::drawUiMenu() {
         outlineSettingsOpen_ = true;
         ImGui::SetWindowFocus("Selection Outline");
     }
+    ImGui::EndMenu();
+}
+
+void SceneEditor::drawDebugMenu(renderer::SceneRenderer& renderer) {
+    if (!ImGui::BeginMenu("Debug")) return;
+    for (const char* id : {"debug.profiler", "debug.frameInspector"}) {
+        const auto* command = commands_.info(id);
+        if (command && ImGui::MenuItem(command->label.c_str(), nullptr, false, commands_.enabled(id)))
+            commands_.invoke(id);
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Capture next scene frame")) diagnosticsPanel_.requestCapture(renderer);
+    ImGui::TextDisabled("F9 saves a screenshot; frame capture stores renderer resources.");
     ImGui::EndMenu();
 }
 
@@ -2497,6 +2514,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         dockManager_.drawLayoutMenu();
         drawEditMenu();
         drawUiMenu();
+        drawDebugMenu(renderer);
         commandButton("scene.save");
         if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
         if (ImGui::Button("Save All")) saveAll(renderer);
@@ -2509,9 +2527,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     if (ImGui::Combo("##pipeline", &path, "Forward\0Deferred\0"))
         settings.path = path ? renderer::RenderPath::Deferred : renderer::RenderPath::Forward;
     ImGui::SameLine(); ImGui::SetNextItemWidth(135);
-    ImGui::Combo("##view", &settings.debugView, "Lit\0Unlit\0Albedo\0World normals\0World position\0");
+    ImGui::Combo("##view", &settings.debugView,
+        "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
     ImGui::SameLine(); ImGui::Checkbox("Ray tracing", &settings.rayTracing);
-    ImGui::SameLine(); capture |= ImGui::Button("Capture");
+    ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
     ImGui::SameLine();
     ImGui::TextDisabled("Project: %s | DX11 / %s | %.0f FPS | F1 UI, F2 pipeline, F3 rays, F11 fullscreen",
         project_.name.c_str(), renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
@@ -2519,12 +2538,15 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
 
     drawGarbageCollection();
     drawOutlineSettings();
+    // Resolve diagnostic keyboard ownership in this frame before the viewport
+    // handles hover shortcuts. Captured-image input never edits the live scene.
+    diagnosticsPanel_.draw(renderer);
 
     sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer,
         [this] { duplicateForDrag(); }, registry_,
         [this](assets::AssetId mesh, const scene::Transform& transform) {
             createMeshActor(mesh, transform, "Place Mesh");
-        }, materialPreview());
+        }, materialPreview(), diagnosticsPanel_.isFocused());
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
@@ -2548,6 +2570,23 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         ImGui::SeparatorText("View");
         ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##Exposure", &settings.exposure, .25f, 3, "Exposure %.2f");
         ImGui::TextDisabled("Final exposure applied after lighting and post processing.");
+        ImGui::SeparatorText("Viewport debug");
+        static constexpr const char* legends[] = {
+            "Lit: complete shaded scene.",
+            "Unlit: material color without scene lighting.",
+            "Albedo: evaluated material base color.",
+            "World normals: XYZ encoded as RGB in [0, 1].",
+            "World position: fractional world XYZ mapped to RGB.",
+            "Roughness: evaluated material value; black 0, white 1.",
+            "Metallic: evaluated material value; black 0, white 1.",
+            "Specular F0: derived normal-incidence reflectance, RGB with display gamma; not specular light intensity.",
+            "Linear depth: positive view-space Z; black 0 m, white 100 m (clamped).",
+            "Direct diffuse: direct-light diffuse contribution with current exposure and tone mapping; excludes ambient and reflections.",
+            "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections."
+        };
+        const int mode = std::clamp(settings.debugView, 0, static_cast<int>(std::size(legends)) - 1);
+        ImGui::TextWrapped("%s", legends[mode]);
+        ImGui::TextWrapped("Data views inspect renderer values; editor display settings do not change material assets.");
         ImGui::Checkbox("VSync", &vsync);
         if (ImGui::Button("Reset camera")) {
             settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;
@@ -2562,10 +2601,10 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawAssetDetails(renderer);
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();

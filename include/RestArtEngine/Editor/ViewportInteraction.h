@@ -17,12 +17,15 @@ public:
     // the editor owns creation/undo, while this class owns gesture arbitration.
     // A content drop stays a transient bounds preview until delivery; the
     // editor creates and records the final instance through createFromMesh.
+    // keyboardBlocked is this frame's external tool keyboard ownership. Mouse
+    // drags keep their existing camera / gizmo / asset ownership independently.
     bool draw(renderer::SceneSettings&, scene::World&, const assets::AssetLibrary&,
               std::vector<scene::ActorId>& selection, scene::ActorId& selected,
               renderer::SceneRenderer& renderer, const std::function<void()>& duplicateForDrag,
               const assets::AssetRegistry& registry,
               const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
-              const assets::MaterialAsset* materialOverride = nullptr);
+              const assets::MaterialAsset* materialOverride = nullptr,
+              bool keyboardBlocked = false);
     bool isUsing() const { return usingGizmo_; }
     bool isHovered() const { return hovered_; }
     bool isFocused() const { return focused_; }
