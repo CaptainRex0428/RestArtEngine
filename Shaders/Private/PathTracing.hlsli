@@ -46,7 +46,7 @@ float PathSmithG1(float normalDirection, float alphaSquared)
 }
 
 float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
-    bool includeSpecular, out float specularPdf)
+    bool includeDiffuse, bool includeSpecular, out float specularPdf)
 {
     specularPdf = 0.0;
     float nv = dot(normal, view);
@@ -63,6 +63,7 @@ float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
     float3 fresnel = Fresnel(vh, f0);
     float3 diffuse = (1.0 - fresnel) * (1.0 - material.metallic) * material.albedo / PI;
+    if (!includeDiffuse) diffuse = 0.0;
     if (!includeSpecular) return diffuse;
     float geometry = PathSmithG1(nv, alphaSquared) * PathSmithG1(nl, alphaSquared);
     specularPdf = distribution * nh / max(4.0 * vh, 1e-8);
@@ -70,15 +71,15 @@ float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
 }
 
 bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
-    Surface material, inout uint randomState, out float3 incoming, out float3 weight)
+    Surface material, bool includeDiffuse, bool includeSpecular,
+    inout uint randomState, out float3 incoming, out float3 weight)
 {
     incoming = normal;
     weight = 0.0;
-    bool includeSpecular = traceOptions.x > 0.5;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
     float specularEnergy = includeSpecular
         ? PathLuminance(Fresnel(saturate(dot(normal, view)), f0)) : 0.0;
-    float diffuseEnergy = PathLuminance(material.albedo) * (1.0 - material.metallic);
+    float diffuseEnergy = includeDiffuse ? PathLuminance(material.albedo) * (1.0 - material.metallic) : 0.0;
     if (specularEnergy + diffuseEnergy <= 1e-8) return false;
     float specularProbability = includeSpecular
         ? (diffuseEnergy <= 1e-8 ? 1.0 : clamp(specularEnergy / (specularEnergy + diffuseEnergy), 0.05, 0.95))
@@ -107,7 +108,7 @@ bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
     float nl = dot(normal, incoming);
     if (nl <= 1e-6 || dot(geometricNormal, incoming) <= 1e-6) return false;
     float specularPdf;
-    float3 brdf = PathBrdf(normal, view, incoming, material, includeSpecular, specularPdf);
+    float3 brdf = PathBrdf(normal, view, incoming, material, includeDiffuse, includeSpecular, specularPdf);
     float pdf = specularProbability * specularPdf + (1.0 - specularProbability) * nl / PI;
     if (pdf <= 1e-12) return false;
     weight = brdf * nl / pdf;
@@ -122,9 +123,9 @@ float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
     if (nl <= 0.0 || dot(geometricNormal, light) <= 0.0) return 0.0;
     if (outputInfo.w != 0 && TraceSceneAny(position + geometricNormal * RAY_EPSILON, light)) return 0.0;
     float unusedPdf;
-    // The reflection switch controls indirect specular transport. Direct
-    // highlights remain part of the material's direct lighting in both modes.
-    float3 brdf = PathBrdf(normal, view, light, material, true, unusedPdf);
+    // GI lobe switches control indirect transport. Direct highlights remain
+    // part of the material's direct lighting in both modes.
+    float3 brdf = PathBrdf(normal, view, light, material, true, true, unusedPdf);
     return brdf * nl * max(lightDirectionIntensity.w, 0.0) * float3(1.0, 0.87, 0.72);
 }
 
@@ -141,13 +142,19 @@ void PathPrimaryRay(uint2 pixel, float2 jitter, out float3 origin,
     farDistance = length(farPosition - origin);
 }
 
-float3 PathRadiance(uint2 pixel, uint sampleIndex)
+float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, out float4 primaryMaterial)
 {
+    primaryGeometry = 0.0;
+    primaryMaterial = 0.0;
+    bool realtime = giOptions.x == 1;
     uint randomState = PathHash(pixel.x + pixel.y * outputInfo.x)
         ^ PathHash(sampleIndex + 0x9e3779b9u);
     float2 jitter;
     jitter.x = PathRandom(randomState);
     jitter.y = PathRandom(randomState);
+    // Match the raster surface at the pixel centre. Progressive reference
+    // rendering retains stochastic primary antialiasing.
+    if (realtime) jitter = 0.5;
     float3 origin, direction;
     float farDistance;
     PathPrimaryRay(pixel, jitter, origin, direction, farDistance);
@@ -167,7 +174,7 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex)
         {
             // Black backdrop is a camera-visibility preference, matching the
             // preview contract; it does not remove environment illumination.
-            if (depth != 0 || cameraPosition.w < 0.5)
+            if (depth != 0 || (!realtime && cameraPosition.w < 0.5))
                 radiance += throughput * Environment(direction, 0.0);
             break;
         }
@@ -182,9 +189,22 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex)
         // Albedo is a reflectance in the path integrator. Emission has a
         // separate physical meaning and is not currently a material field.
         material.albedo = saturate(material.albedo);
-        radiance += throughput * PathDirectLight(position, normal, geometricNormal, -direction, material);
+        if (depth == 0)
+        {
+            primaryGeometry = float4(normal, distance);
+            primaryMaterial = float4(material.albedo, material.roughness);
+        }
+        // Realtime exports only indirect radiance; the raster lighting pass
+        // owns the primary direct light, shadows and background.
+        if (depth != 0 || !realtime)
+            radiance += throughput * PathDirectLight(position, normal, geometricNormal, -direction, material);
         float3 incoming, weight;
-        if (!PathSampleBrdf(normal, geometricNormal, -direction, material, randomState, incoming, weight)) break;
+        // Classify contributions at the receiving surface. Subsequent path
+        // vertices retain both lobes, including diffuse GI seen in a mirror.
+        bool includeDiffuse = depth != 0 || (giOptions.y & 1u) != 0;
+        bool includeSpecular = depth != 0 || (giOptions.y & 2u) != 0;
+        if (!PathSampleBrdf(normal, geometricNormal, -direction, material, includeDiffuse, includeSpecular,
+            randomState, incoming, weight)) break;
         throughput *= weight;
         if (!all(isfinite(throughput)) || !any(throughput > 0.0)) break;
         if (depth >= 3)

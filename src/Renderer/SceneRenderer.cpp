@@ -68,6 +68,8 @@ struct alignas(16) RayObject {
     XMFLOAT4 color, properties;
 };
 struct alignas(16) RayConstants { XMFLOAT4 info; RayObject objects[32]; };
+struct alignas(16) GlobalIlluminationConstants { XMFLOAT4 viewport; };
+static_assert(sizeof(GlobalIlluminationConstants) == 16);
 struct alignas(16) RayTriangle {
     XMFLOAT3 position0;
     XMFLOAT3 position1;
@@ -165,11 +167,13 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"RayConstants", D3D_SIT_CBUFFER, 2, sizeof(RayConstants)},
         {"ShadowConstants", D3D_SIT_CBUFFER, 3, sizeof(ShadowConstants)},
         {"OutlineConstants", D3D_SIT_CBUFFER, 4, sizeof(OutlineConstants)},
+        {"GlobalIlluminationConstants", D3D_SIT_CBUFFER, 6, sizeof(GlobalIlluminationConstants)},
         {"albedoBuffer", D3D_SIT_TEXTURE, 0, 0}, {"normalBuffer", D3D_SIT_TEXTURE, 1, 0}, {"positionBuffer", D3D_SIT_TEXTURE, 2, 0},
         {"shadowMap", D3D_SIT_TEXTURE, 3, 0}, {"gbufferSampler", D3D_SIT_SAMPLER, 0, 0},
         {"shadowSampler", D3D_SIT_SAMPLER, 1, 0},
         {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0},
-        {"depthBuffer", D3D_SIT_TEXTURE, 6, 0}
+        {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
+        {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0}
     };
     for (UINT i = 0; i < desc.BoundResources; ++i) {
         D3D11_SHADER_INPUT_BIND_DESC binding{}; reflection->GetResourceBindingDesc(i, &binding);
@@ -212,7 +216,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ShadowConstants","shadowParameters",128,16},
         {"ShadowConstants","cascadeParameters",144,16},
         {"OutlineConstants","outlineColor",0,16},
-        {"OutlineConstants","outlineParams",16,16}
+        {"OutlineConstants","outlineParams",16,16},
+        {"GlobalIlluminationConstants","giViewport",0,16}
     };
     for (const auto& variable : variables) {
         auto* cb = reflection->GetConstantBufferByName(variable.buffer);
@@ -348,7 +353,7 @@ struct SceneRenderer::Impl {
     // never allocate the mask.
     std::unique_ptr<SelectionOutlinePass> outline;
     ComPtr<ID3D11InputLayout> inputLayout;
-    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants;
+    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants, giConstants;
     ComPtr<ID3D11Buffer> rayTriangleBuffer;
     ComPtr<ID3D11ShaderResourceView> rayTriangleView;
     std::uint64_t rayTriangleHash = 0;
@@ -527,6 +532,8 @@ struct SceneRenderer::Impl {
         if (failed(device->CreateBuffer(&buffer, nullptr, &rayConstants), "Create ray constants", error)) return false;
         buffer.ByteWidth = sizeof(ShadowConstants);
         if (failed(device->CreateBuffer(&buffer, nullptr, &shadowConstants), "Create shadow constants", error)) return false;
+        buffer.ByteWidth = sizeof(GlobalIlluminationConstants);
+        if (failed(device->CreateBuffer(&buffer, nullptr, &giConstants), "Create GI constants", error)) return false;
         D3D11_RASTERIZER_DESC raster{};
         raster.FillMode = D3D11_FILL_SOLID;
         raster.CullMode = D3D11_CULL_NONE;
@@ -1158,6 +1165,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
     if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
         return clear(editorClear, error);
+    ID3D11ShaderResourceView* noIndirect = nullptr;
+    state.context->PSSetShaderResources(9, 1, &noIndirect);
     const bool diagnosticMainScene = !settings.offscreenTarget;
     if (diagnosticMainScene) {
         state.hardwareActive = false;
@@ -1168,11 +1177,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.hardwareRequested = settings.hardwareRayTracing;
         state.giStatus.requested = settings.globalIllumination.method;
         state.giStatus.effective = GlobalIlluminationMethod::Disabled;
+        state.giStatus.requestedMode = settings.globalIllumination.mode;
+        state.giStatus.effectiveMode = GlobalIlluminationMode::Progressive;
         state.giStatus.accumulatedSamples = 0;
         state.giStatus.targetSamples = settings.globalIllumination.targetSamples;
         state.giStatus.reason = settings.globalIllumination.method == GlobalIlluminationMethod::Disabled
             ? "Global illumination disabled."
-            : !settings.hardwareRayTracing ? "Progressive path tracing requires hardware ray tracing."
+            : !settings.hardwareRayTracing ? "Path tracing requires hardware ray tracing."
             : state.hardwareStatus;
     }
     rae::diagnostics::TraceScope submitTrace(diagnosticMainScene ? "Main scene submit" : "Tool preview submit", "Renderer CPU");
@@ -1347,6 +1358,54 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.context->OMSetRenderTargets(0, nullptr, nullptr);
         state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
     }
+    // Transport runs before raster shading. Realtime GI publishes an indirect
+    // image consumed by either raster path; progressive/reference and legacy
+    // hardware modes publish a final image copied after raster depth creation.
+    const bool realtimeGiRequested = settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
+        settings.globalIllumination.mode == GlobalIlluminationMode::Realtime;
+    bool hardwareFrameReady = false;
+    ID3D11ShaderResourceView* indirectView = nullptr;
+    if (diagnosticMainScene && settings.hardwareRayTracing && state.hardwarePipelineReady &&
+        state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
+        state.beginDiagnosticPass(realtimeGiRequested ? "DXR realtime GI transport / resolve" : "DXR hardware scene");
+        d3d12::Frame frame;
+        std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
+        frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
+        // Material footprint calculations need the actual viewport extent.
+        frame.sceneConstants[32] = static_cast<float>(viewportWidth);
+        frame.sceneConstants[33] = static_cast<float>(viewportHeight);
+        XMFLOAT4X4 inverseViewProjection;
+        XMStoreFloat4x4(&inverseViewProjection, XMMatrixInverse(nullptr, view * projection));
+        std::memcpy(frame.inverseViewProjection.data(), &inverseViewProjection, sizeof(inverseViewProjection));
+        frame.width = static_cast<std::uint32_t>(viewportWidth);
+        frame.height = static_cast<std::uint32_t>(viewportHeight);
+        frame.reflections = settings.hardwareRayTracingReflections;
+        frame.shadows = settings.hardwareRayTracingShadows;
+        frame.globalIllumination = settings.globalIllumination;
+        frame.historyEpoch = state.giHistoryEpoch;
+        state.context->OMSetRenderTargets(0, nullptr, nullptr);
+        state.context->PSSetShaderResources(0, 5, emptyViews);
+        std::string hardwareError;
+        if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
+            hardwareFrameReady = true;
+            if (realtimeGiRequested && settings.debugView == 0)
+                indirectView = state.hardwareRayTracing->indirectLighting();
+            state.hardwareActive = true;
+            state.hardwareStatus = state.hardwareRayTracing->status();
+            state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
+        } else {
+            state.hardwareRuntimeFailed = true;
+            state.hardwareStatus = "Hardware ray tracing failed; raster retained. " + hardwareError;
+            state.giStatus.reason = state.hardwareStatus;
+        }
+    }
+    GlobalIlluminationConstants giData{};
+    giData.viewport = XMFLOAT4(indirectView ? 1.0f : 0.0f,
+        static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0.0f);
+    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
+    ID3D11Buffer* giBuffer = state.giConstants.Get();
+    state.context->PSSetConstantBuffers(6, 1, &giBuffer);
+    state.context->PSSetShaderResources(9, 1, &indirectView);
     const D3D11_VIEWPORT sceneViewport{static_cast<float>(viewportX), static_cast<float>(viewportY), static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0, 1};
     state.context->RSSetViewports(1, &sceneViewport);
     ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
@@ -1379,44 +1438,17 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.beginDiagnosticPass("Forward geometry / debug");
         if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
     }
-    // The native hardware scene pass shares material/lighting source with raster.
-    // Raster depth and G-buffers remain valid for editor overlays and inspection.
-    // Tool previews deliberately retain their own inexpensive raster path.
-    if (diagnosticMainScene && settings.hardwareRayTracing && state.hardwarePipelineReady &&
-        state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
-        state.beginDiagnosticPass("DXR 1.1 hardware scene");
-        d3d12::Frame frame;
-        std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
-        frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
-        // Material footprint calculations need the actual viewport extent.
-        frame.sceneConstants[32] = static_cast<float>(viewportWidth);
-        frame.sceneConstants[33] = static_cast<float>(viewportHeight);
-        XMFLOAT4X4 inverseViewProjection;
-        XMStoreFloat4x4(&inverseViewProjection, XMMatrixInverse(nullptr, view * projection));
-        std::memcpy(frame.inverseViewProjection.data(), &inverseViewProjection, sizeof(inverseViewProjection));
-        frame.width = static_cast<std::uint32_t>(viewportWidth);
-        frame.height = static_cast<std::uint32_t>(viewportHeight);
-        frame.reflections = settings.hardwareRayTracingReflections;
-        frame.shadows = settings.hardwareRayTracingShadows;
-        frame.globalIllumination = settings.globalIllumination;
-        frame.historyEpoch = state.giHistoryEpoch;
+    // Release the shared SRV before any next DX12 write, including tool previews.
+    ID3D11ShaderResourceView* emptyIndirect = nullptr;
+    state.context->PSSetShaderResources(9, 1, &emptyIndirect);
+    if (hardwareFrameReady && !realtimeGiRequested) {
+        state.beginDiagnosticPass("Hardware image resolve");
         state.context->OMSetRenderTargets(0, nullptr, nullptr);
-        state.context->PSSetShaderResources(0, 5, emptyViews);
-        std::string hardwareError;
-        if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
-            ComPtr<ID3D11Resource> destination;
-            backbuffer->GetResource(&destination);
-            state.context->CopySubresourceRegion(destination.Get(), 0,
-                static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
-                state.hardwareRayTracing->output(), 0, nullptr);
-            state.hardwareActive = true;
-            state.hardwareStatus = state.hardwareRayTracing->status();
-            state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
-        } else {
-            state.hardwareRuntimeFailed = true;
-            state.hardwareStatus = "Hardware ray tracing failed; raster retained. " + hardwareError;
-            state.giStatus.reason = state.hardwareStatus;
-        }
+        ComPtr<ID3D11Resource> destination;
+        backbuffer->GetResource(&destination);
+        state.context->CopySubresourceRegion(destination.Get(), 0,
+            static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
+            state.hardwareRayTracing->output(), 0, nullptr);
         state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
     }
     // Editor-only selection outline. The mask re-draws the selected silhouettes

@@ -38,7 +38,8 @@ void write(const std::filesystem::path& path, const std::string& value) {
     stream.close();
     require(stream.good(), "Cannot write validation output.");
 }
-Pixels readScene(rae::renderer::SceneRenderer& renderer) {
+Pixels readScene(rae::renderer::SceneRenderer& renderer,
+                 std::uint32_t* actualWidth = nullptr, std::uint32_t* actualHeight = nullptr) {
     auto* view = static_cast<ID3D11ShaderResourceView*>(renderer.sceneTexture());
     require(view != nullptr, "Scene image is unavailable.");
     ComPtr<ID3D11Resource> resource;
@@ -48,6 +49,8 @@ Pixels readScene(rae::renderer::SceneRenderer& renderer) {
     D3D11_TEXTURE2D_DESC desc{};
     texture->GetDesc(&desc);
     require(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM, "Unexpected scene format.");
+    if (actualWidth) *actualWidth = desc.Width;
+    if (actualHeight) *actualHeight = desc.Height;
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = desc.MiscFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -62,6 +65,19 @@ Pixels readScene(rae::renderer::SceneRenderer& renderer) {
             static_cast<std::size_t>(desc.Width) * 4);
     renderer.context()->Unmap(staging.Get(), 0);
     return pixels;
+}
+Pixels readSceneRegion(rae::renderer::SceneRenderer& renderer, std::uint32_t x, std::uint32_t y,
+                       std::uint32_t width, std::uint32_t height) {
+    std::uint32_t textureWidth = 0, textureHeight = 0;
+    const auto image = readScene(renderer, &textureWidth, &textureHeight);
+    require(x <= textureWidth && y <= textureHeight && width <= textureWidth - x && height <= textureHeight - y,
+        "Requested viewport region is outside the actual scene texture.");
+    Pixels region(static_cast<std::size_t>(width) * height * 4);
+    for (std::uint32_t row = 0; row < height; ++row)
+        std::memcpy(region.data() + static_cast<std::size_t>(row) * width * 4,
+            image.data() + (static_cast<std::size_t>(y + row) * textureWidth + x) * 4,
+            static_cast<std::size_t>(width) * 4);
+    return region;
 }
 void savePixels(const std::filesystem::path& path, const Pixels& rgba,
                 std::uint32_t width, std::uint32_t height) {
@@ -145,6 +161,13 @@ std::size_t changedPixels(const Pixels& first, const Pixels& second, int toleran
     }
     return result;
 }
+std::size_t visiblePixels(const Pixels& image, int threshold = 3) {
+    std::size_t result = 0;
+    for (std::size_t pixel = 0; pixel < image.size(); pixel += 4)
+        if (std::max({static_cast<int>(image[pixel]), static_cast<int>(image[pixel + 1]),
+                      static_cast<int>(image[pixel + 2])}) > threshold) ++result;
+    return result;
+}
 struct TraceFrame {
     TraceFrame() { rae::diagnostics::beginFrame(); }
     ~TraceFrame() { rae::diagnostics::endFrame(); }
@@ -155,6 +178,7 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
     const std::filesystem::path& outputDirectory) {
     using namespace rae;
     using Method = renderer::GlobalIlluminationMethod;
+    using Mode = renderer::GlobalIlluminationMode;
     const auto output = std::filesystem::absolute(outputDirectory);
     std::filesystem::create_directories(output);
     const auto oldSource = renderer.shaderSource();
@@ -236,9 +260,12 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         settings.cameraYaw = .35f; settings.cameraPitch = .3f; settings.cameraDistance = 7.0f;
         settings.cameraTarget[1] = 1.0f;
         settings.hardwareRayTracing = true;
-        settings.hardwareRayTracingReflections = false; // Isolate diffuse interreflection.
+        settings.hardwareRayTracingReflections = false; // Independent preview-only reflection option.
         settings.hardwareRayTracingShadows = true;
         settings.globalIllumination.method = Method::PathTracing;
+        settings.globalIllumination.mode = Mode::Progressive;
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.indirectSpecular = false; // Isolate diffuse interreflection.
         settings.globalIllumination.samplesPerFrame = 1;
         settings.globalIllumination.targetSamples = 256;
         settings.globalIllumination.maxBounces = 4;
@@ -266,6 +293,8 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
             return;
         }
         require(renderer.hardwareRayTracingActive() && renderer.globalIlluminationStatus().effective == Method::PathTracing &&
+            renderer.globalIlluminationStatus().requestedMode == Mode::Progressive &&
+            renderer.globalIlluminationStatus().effectiveMode == Mode::Progressive &&
             renderer.hardwareRayTracingDispatchCount() > dispatchStart,
             "Actual path tracing did not activate: " + renderer.globalIlluminationStatus().reason);
 
@@ -353,6 +382,7 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         settings.viewportWidth = 320; settings.viewportHeight = 240;
         settings.cameraDistance = 4.8f; settings.cameraTarget[1] = .7f; settings.cameraPitch = .22f;
         settings.hardwareRayTracingReflections = true;
+        settings.globalIllumination.indirectSpecular = true;
         std::copy(red.begin(), red.end(), assets.findMaterial(leftMaterial)->baseColor);
         auto* metal = assets.findMaterial(sphereMaterial);
         metal->baseColor[0] = metal->baseColor[1] = metal->baseColor[2] = .88f;
@@ -374,6 +404,7 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         *assets.findMaterial(sphereMaterial) = diffuseSphere;
         std::copy(blue.begin(), blue.end(), assets.findMaterial(leftMaterial)->baseColor);
         settings.hardwareRayTracingReflections = false;
+        settings.globalIllumination.indirectSpecular = false;
         settings.cameraDistance = 7; settings.cameraTarget[1] = 1; settings.cameraPitch = .3f;
         require(renderer.resize(width, height, error), error);
         settings.viewportWidth = width; settings.viewportHeight = height;
@@ -521,6 +552,402 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         require(changedPixels(beforeShader, advanceTo(16), 0) == 0,
             "Repairing the shader did not restore the same-seed converged image.");
         pass("valid shader changes reset progressive lighting; invalid hardware candidates preserve source, history and pixels");
+
+        // Realtime is a separate consumer contract: an indirect-light buffer is
+        // combined with the selected raster path's direct light. It keeps
+        // sampling after its bounded history fills, rather than freezing a
+        // complete progressive camera image.
+        require(renderer.resize(width, height, error), error);
+        settings.viewportWidth = width; settings.viewportHeight = height;
+        settings.cameraYaw = .35f; settings.cameraPitch = .3f; settings.cameraDistance = 7;
+        settings.cameraTarget[1] = 1;
+        settings.exposure = 1; settings.lightIntensity = 5;
+        settings.path = renderer::RenderPath::Deferred;
+        settings.hardwareRayTracingReflections = false;
+        settings.globalIllumination.mode = Mode::Realtime;
+        settings.globalIllumination.method = Method::PathTracing;
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.indirectSpecular = false;
+        settings.globalIllumination.samplesPerFrame = 16;
+        settings.globalIllumination.targetSamples = 256;
+        settings.globalIllumination.maxBounces = 4;
+        std::copy(red.begin(), red.end(), assets.findMaterial(leftMaterial)->baseColor);
+        const auto realtimeFrames = [&](std::uint32_t frames, bool reset = false,
+                                         const assets::MaterialAsset* draft = nullptr) {
+            require(frames > 0, "Realtime fixture requires at least one rendered frame.");
+            if (reset) renderer.resetGlobalIllumination();
+            Pixels image;
+            for (std::uint32_t frame = 0; frame < frames; ++frame) image = render(draft);
+            if (settings.globalIllumination.indirectDiffuse || settings.globalIllumination.indirectSpecular)
+                require(renderer.globalIlluminationStatus().effective == Method::PathTracing &&
+                    renderer.globalIlluminationStatus().requestedMode == Mode::Realtime &&
+                    renderer.globalIlluminationStatus().effectiveMode == Mode::Realtime,
+                    "Realtime transport became unavailable: " + renderer.globalIlluminationStatus().reason);
+            return image;
+        };
+        const auto realtimeRed = realtimeFrames(16, true);
+        std::copy(blue.begin(), blue.end(), assets.findMaterial(leftMaterial)->baseColor);
+        const auto realtimeBlue = realtimeFrames(16, true);
+        const auto realtimeRedMean = meanColour(realtimeRed, mask);
+        const auto realtimeBlueMean = meanColour(realtimeBlue, mask);
+        const auto realtimeTransfer = (realtimeRedMean[0] - realtimeRedMean[2]) -
+            (realtimeBlueMean[0] - realtimeBlueMean[2]);
+        report["metrics"]["realtimeRedWallFloorMeanRgb"] = realtimeRedMean;
+        report["metrics"]["realtimeBlueWallFloorMeanRgb"] = realtimeBlueMean;
+        report["metrics"]["realtimeDiffuseRedBlueTransfer"] = realtimeTransfer;
+        savePixels(output / "realtime-red-wall.bmp", realtimeRed, width, height);
+        savePixels(output / "realtime-blue-wall.bmp", realtimeBlue, width, height);
+        require(realtimeTransfer > .002,
+            "Realtime diffuse transport did not transfer wall colour to the GPU-selected neutral floor.");
+
+        settings.globalIllumination.indirectDiffuse = false;
+        const auto realtimeBlueDirect = realtimeFrames(16, true);
+        std::copy(red.begin(), red.end(), assets.findMaterial(leftMaterial)->baseColor);
+        const auto realtimeRedDirect = realtimeFrames(16, true);
+        const auto realtimeDirectError = meanError(realtimeBlueDirect, realtimeRedDirect, mask);
+        const auto realtimeDiffuseEffect = meanError(realtimeBlue, realtimeBlueDirect, mask);
+        report["metrics"]["realtimeDirectWallChangeFloorMae"] = realtimeDirectError;
+        report["metrics"]["realtimeDiffuseContributionFloorMae"] = realtimeDiffuseEffect;
+        require(realtimeDirectError < .0005 && realtimeDiffuseEffect > .001,
+            "Realtime diffuse contribution switch failed to isolate wall-colour transport from direct light.");
+        require(visiblePixels(realtimeRedDirect) > 100,
+            "Disabling both indirect contributions removed the raster path's direct lighting.");
+        settings.lightIntensity = 0;
+        const auto realtimeNoLight = realtimeFrames(1);
+        report["metrics"]["realtimeBothContributionsOffNoLightVisiblePixels"] = visiblePixels(realtimeNoLight);
+        require(visiblePixels(realtimeNoLight) == 0,
+            "Disabling both GI contributions fell back to local ambient/environment lighting.");
+        settings.lightIntensity = 5;
+        settings.globalIllumination.indirectDiffuse = true;
+        (void)realtimeFrames(16, true);
+        pass("realtime neutral-floor colour transfer follows indirect diffuse; both contributions off preserve direct light without ambient fallback");
+
+        // Continue from a full 256-sample window. New estimates must still
+        // arrive while the history count stays bounded and the camera is still.
+        const auto fullRealtimeStatus = renderer.globalIlluminationStatus();
+        const auto fullRealtimeImage = readScene(renderer);
+        const auto realtimeDispatches = renderer.hardwareRayTracingDispatchCount();
+        const auto rollingRealtime = realtimeFrames(4);
+        const auto rollingStatus = renderer.globalIlluminationStatus();
+        const auto rollingPixels = changedPixels(fullRealtimeImage, rollingRealtime, 0);
+        report["metrics"]["realtimeRollingChangedPixels"] = rollingPixels;
+        require(fullRealtimeStatus.accumulatedSamples == 256 && rollingStatus.accumulatedSamples == 256 &&
+            rollingStatus.historyRevision == fullRealtimeStatus.historyRevision &&
+            renderer.hardwareRayTracingDispatchCount() >= realtimeDispatches + 4 && rollingPixels > 8,
+            "Realtime GI stopped producing new samples/images after filling its history window.");
+        savePixels(output / "realtime-rolling-history.bmp", rollingRealtime, width, height);
+        pass("realtime continues real dispatches and GPU image updates after its bounded history reaches the cap");
+        settings.exposure = .5f;
+        const auto realtimeDarker = render();
+        require(renderer.globalIlluminationStatus().historyRevision == rollingStatus.historyRevision &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 256 &&
+            changedPixels(rollingRealtime, realtimeDarker) > 100,
+            "Realtime exposure editing reset radiance history or failed to change the GPU output.");
+        settings.exposure = 1;
+        (void)render();
+        require(renderer.globalIlluminationStatus().historyRevision == rollingStatus.historyRevision,
+            "Restoring realtime exposure invalidated indirect history.");
+        pass("realtime exposure updates the final image while continuing the existing indirect history");
+
+        // A primary metal surface has no diffuse lobe. Its indirect-specular
+        // switch can therefore be checked without confusing diffuse colour
+        // transfer with reflections or the legacy hardware preview checkbox.
+        const auto realtimeDiffuseSphere = *assets.findMaterial(sphereMaterial);
+        require(renderer.resize(320, 240, error), error);
+        settings.viewportWidth = 320; settings.viewportHeight = 240;
+        settings.cameraDistance = 4.8f; settings.cameraTarget[1] = .7f; settings.cameraPitch = .22f;
+        auto* realtimeMetal = assets.findMaterial(sphereMaterial);
+        realtimeMetal->metallic = 1; realtimeMetal->roughness = .12f;
+        realtimeMetal->baseColor[0] = realtimeMetal->baseColor[1] = realtimeMetal->baseColor[2] = .88f;
+        settings.globalIllumination.indirectDiffuse = false;
+        settings.globalIllumination.indirectSpecular = true;
+        settings.hardwareRayTracingReflections = false;
+        const auto realtimeSpecular = realtimeFrames(16, true);
+        savePixels(output / "realtime-indirect-specular-on.bmp", realtimeSpecular, 320, 240);
+        settings.hardwareRayTracingReflections = true;
+        const auto realtimeLegacySwitch = realtimeFrames(16, true);
+        require(changedPixels(realtimeSpecular, realtimeLegacySwitch, 0) == 0,
+            "Legacy preview reflection setting unexpectedly controls realtime GI specular transport.");
+        settings.globalIllumination.indirectSpecular = false;
+        const auto realtimeSpecularOff = realtimeFrames(16, true);
+        const auto realtimeSpecularPixels = changedPixels(realtimeSpecular, realtimeSpecularOff);
+        report["metrics"]["realtimeIndirectSpecularChangedPixels"] = realtimeSpecularPixels;
+        require(realtimeSpecularPixels > 100,
+            "Disabling GI indirect specular did not remove indirect reflections from the metal fixture.");
+        savePixels(output / "realtime-indirect-specular-off.bmp", realtimeSpecularOff, 320, 240);
+        settings.globalIllumination.indirectSpecular = true;
+        require(changedPixels(realtimeSpecular, realtimeFrames(16, true), 0) == 0,
+            "Restoring indirect specular did not restore its same-seed realtime image.");
+        *assets.findMaterial(sphereMaterial) = realtimeDiffuseSphere;
+        settings.hardwareRayTracingReflections = false;
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.indirectSpecular = false;
+        settings.cameraDistance = 7; settings.cameraTarget[1] = 1; settings.cameraPitch = .3f;
+        require(renderer.resize(width, height, error), error);
+        settings.viewportWidth = width; settings.viewportHeight = height;
+        pass("realtime GI indirect specular controls metal transport independently of diffuse and the legacy reflection switch");
+
+        settings.globalIllumination.samplesPerFrame = 2;
+        settings.globalIllumination.targetSamples = 16;
+        (void)realtimeFrames(8, true);
+        const auto realtimeFreshAfter = [&](const char* name, auto change,
+                                             const assets::MaterialAsset* draft = nullptr) {
+            const auto before = renderer.globalIlluminationStatus().historyRevision;
+            change();
+            const auto moved = render(draft);
+            const auto automatic = renderer.globalIlluminationStatus();
+            require(automatic.historyRevision > before && automatic.accumulatedSamples == 2,
+                std::string("Realtime ") + name + " did not clear obsolete samples on its first frame.");
+            renderer.resetGlobalIllumination();
+            const auto clean = render(draft);
+            require(changedPixels(moved, clean, 0) == 0,
+                std::string("Realtime ") + name + " blended old history into the changed scene.");
+            report["metrics"]["realtimeFreshHistory"][name] = automatic.historyRevision;
+            return moved;
+        };
+        Pixels movingCamera;
+        for (int step = 1; step <= 3; ++step)
+            movingCamera = realtimeFreshAfter(("camera step " + std::to_string(step)).c_str(), [&] {
+                settings.cameraYaw = .35f + .06f * static_cast<float>(step);
+            });
+        savePixels(output / "realtime-camera-moving-first-frame.bmp", movingCamera, width, height);
+        const auto stoppedCamera = renderer.globalIlluminationStatus();
+        (void)render();
+        require(renderer.globalIlluminationStatus().historyRevision == stoppedCamera.historyRevision &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 4,
+            "Realtime camera history failed to continue when motion stopped.");
+        (void)realtimeFreshAfter("camera restore", [&] { settings.cameraYaw = .35f; });
+        Pixels movingObject;
+        for (int step = 1; step <= 3; ++step)
+            movingObject = realtimeFreshAfter(("object step " + std::to_string(step)).c_str(), [&] {
+                world.findActor(sphere)->transform.position[0] = .15f * static_cast<float>(step);
+            });
+        savePixels(output / "realtime-object-moving-first-frame.bmp", movingObject, width, height);
+        (void)realtimeFreshAfter("object restore", [&] { world.findActor(sphere)->transform.position[0] = 0; });
+        const auto normalLighting = realtimeFrames(8, true);
+        const auto dimLighting = realtimeFreshAfter("light change", [&] { settings.lightIntensity = 1.5f; });
+        require(changedPixels(normalLighting, dimLighting) > 100, "Realtime light editing failed to update actual scene pixels.");
+        (void)realtimeFreshAfter("light restore", [&] { settings.lightIntensity = 5; });
+        const auto realtimeCommitted = *assets.findMaterial(floorMaterial);
+        auto realtimeDraft = realtimeCommitted;
+        realtimeDraft.baseColor[0] = .12f; realtimeDraft.baseColor[1] = .8f; realtimeDraft.baseColor[2] = .2f;
+        const auto beforeRealtimeDraft = realtimeFrames(8, true);
+        const auto realtimeDraftImage = realtimeFreshAfter("material draft", [] {}, &realtimeDraft);
+        require(changedPixels(beforeRealtimeDraft, realtimeDraftImage) > 100 &&
+            assets.findMaterial(floorMaterial)->baseColor[0] == realtimeCommitted.baseColor[0],
+            "Realtime material preview did not update GPU pixels or modified the committed asset.");
+        (void)realtimeFreshAfter("discard material draft", [] {});
+        (void)realtimeFreshAfter("hide object", [&] { world.findActor(sphere)->visible = false; });
+        (void)realtimeFreshAfter("show object", [&] { world.findActor(sphere)->visible = true; });
+        (void)realtimeFreshAfter("indirect specular enabled", [&] { settings.globalIllumination.indirectSpecular = true; });
+        (void)realtimeFreshAfter("indirect diffuse disabled", [&] { settings.globalIllumination.indirectDiffuse = false; });
+        (void)realtimeFreshAfter("indirect diffuse restored", [&] { settings.globalIllumination.indirectDiffuse = true; });
+        (void)realtimeFreshAfter("indirect specular disabled", [&] { settings.globalIllumination.indirectSpecular = false; });
+        (void)realtimeFreshAfter("bounce depth", [&] { settings.globalIllumination.maxBounces = 1; });
+        (void)realtimeFreshAfter("bounce depth restore", [&] { settings.globalIllumination.maxBounces = 4; });
+        pass("realtime camera/object motion, stopped motion, lighting, material preview/discard and visibility produce fresh first-frame images without old history");
+
+        // Debug data and tool previews are separate consumers. Neither is a
+        // radiance sample, and neither may corrupt the main camera's history.
+        (void)realtimeFrames(3, true);
+        const auto beforeRealtimeDebug = renderer.globalIlluminationStatus();
+        settings.debugView = 3;
+        const auto realtimeNormals = render();
+        require(renderer.globalIlluminationStatus().accumulatedSamples == beforeRealtimeDebug.accumulatedSamples &&
+            renderer.globalIlluminationStatus().historyRevision == beforeRealtimeDebug.historyRevision,
+            "Realtime debug output consumed or replaced radiance history.");
+        settings.debugView = 0;
+        (void)render();
+        require(renderer.globalIlluminationStatus().accumulatedSamples == beforeRealtimeDebug.accumulatedSamples + 2 &&
+            renderer.globalIlluminationStatus().historyRevision == beforeRealtimeDebug.historyRevision,
+            "Returning from realtime debug did not resume the main history.");
+        const auto beforeRealtimeTool = renderer.globalIlluminationStatus();
+        require(renderer.renderMaterialPreview(realtimeCommitted, 64, error), error);
+        require(renderer.globalIlluminationStatus().accumulatedSamples == beforeRealtimeTool.accumulatedSamples &&
+            renderer.globalIlluminationStatus().historyRevision == beforeRealtimeTool.historyRevision,
+            "Tool preview changed realtime main-scene samples.");
+        (void)render();
+        require(renderer.globalIlluminationStatus().accumulatedSamples == beforeRealtimeTool.accumulatedSamples + 2 &&
+            renderer.globalIlluminationStatus().historyRevision == beforeRealtimeTool.historyRevision,
+            "Realtime history failed to continue after the tool preview.");
+        settings.debugView = 3;
+        settings.globalIllumination.indirectDiffuse = false;
+        require(changedPixels(realtimeNormals, render(), 0) == 0,
+            "GI contribution toggles contaminated the world-normal debug image.");
+        settings.debugView = 0;
+        settings.globalIllumination.indirectDiffuse = true;
+        pass("realtime debug images and offscreen previews remain isolated from radiance history and lighting contributions");
+
+        settings.globalIllumination.samplesPerFrame = 16;
+        settings.globalIllumination.targetSamples = 64;
+        for (const auto path : {renderer::RenderPath::Forward, renderer::RenderPath::Deferred}) {
+            settings.path = path;
+            settings.globalIllumination.indirectDiffuse = true;
+            const auto withIndirect = realtimeFrames(4, true);
+            settings.globalIllumination.indirectDiffuse = false;
+            const auto directOnly = realtimeFrames(4, true);
+            const auto pathError = meanError(withIndirect, directOnly, mask);
+            const auto pathName = path == renderer::RenderPath::Forward ? "forward" : "deferred";
+            report["metrics"][std::string("realtimeRasterConsumerFloorMae_") + pathName] = pathError;
+            require(pathError > .001, std::string("The ") + pathName + " path did not consume actual realtime indirect lighting.");
+            savePixels(output / (std::string("realtime-") + pathName + "-gi.bmp"), withIndirect, width, height);
+            savePixels(output / (std::string("realtime-") + pathName + "-direct.bmp"), directOnly, width, height);
+        }
+        settings.path = renderer::RenderPath::Deferred;
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.samplesPerFrame = 2;
+        settings.globalIllumination.targetSamples = 16;
+        (void)realtimeFrames(8, true);
+        const auto beforeModeChange = renderer.globalIlluminationStatus().historyRevision;
+        settings.globalIllumination.mode = Mode::Progressive;
+        (void)render();
+        require(renderer.globalIlluminationStatus().historyRevision > beforeModeChange &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 2,
+            "Changing realtime to progressive mode reused incompatible history.");
+        const auto progressiveRoundtrip = advanceTo(16);
+        require(changedPixels(progressiveRoundtrip, render(), 0) == 0,
+            "Progressive mode did not stop at its sample cap after a realtime roundtrip.");
+        const auto beforeRealtimeReturn = renderer.globalIlluminationStatus().historyRevision;
+        settings.globalIllumination.mode = Mode::Realtime;
+        const auto realtimeRoundtrip = render();
+        require(renderer.globalIlluminationStatus().historyRevision > beforeRealtimeReturn &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 2,
+            "Returning to realtime mode reused a progressive camera image as indirect history.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(realtimeRoundtrip, render(), 0) == 0,
+            "Realtime mode roundtrip produced a stale first-frame image.");
+        pass("Forward and Deferred each consume realtime indirect light; realtime/progressive roundtrips reset incompatible histories");
+
+        const auto beforeRealtimeResize = renderer.globalIlluminationStatus().historyRevision;
+        require(renderer.resize(192, 128, error), error);
+        settings.viewportWidth = 192; settings.viewportHeight = 128;
+        const auto resizedRealtime = render();
+        require(renderer.globalIlluminationStatus().historyRevision > beforeRealtimeResize &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 2,
+            "Realtime resize retained an incompatible indirect-light image.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(resizedRealtime, render(), 0) == 0,
+            "Resized realtime output contains radiance from the old image dimensions.");
+        const auto realtimeBeforeShader = realtimeFrames(8, true);
+        const auto realtimeShaderHistory = renderer.globalIlluminationStatus().historyRevision;
+        require(renderer.applyShaderSource(changedSource, error), error);
+        const auto realtimeChangedShader = render();
+        require(renderer.globalIlluminationStatus().historyRevision > realtimeShaderHistory &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 2 &&
+            changedPixels(realtimeBeforeShader, realtimeChangedShader) > 100,
+            "Realtime shader update failed to discard stale indirect lighting and update actual pixels.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(realtimeChangedShader, render(), 0) == 0,
+            "Realtime shader replacement blended the old shader's indirect-light history.");
+        const auto realtimeWorkingHistory = renderer.globalIlluminationStatus();
+        const auto realtimeWorkingRevision = renderer.shaderRevision();
+        const bool invalidRealtimeApplied = renderer.applyShaderSource(changedSource +
+            "\n#ifdef RAE_HARDWARE_RAYTRACING\n#error Intentional realtime GI candidate failure\n#endif\n", error);
+        require(!invalidRealtimeApplied && !error.empty() && renderer.shaderRevision() == realtimeWorkingRevision &&
+            renderer.shaderSource() == changedSource &&
+            renderer.globalIlluminationStatus().historyRevision == realtimeWorkingHistory.historyRevision &&
+            renderer.globalIlluminationStatus().accumulatedSamples == realtimeWorkingHistory.accumulatedSamples,
+            "Invalid realtime shader candidate changed active source or history.");
+        (void)render();
+        require(renderer.globalIlluminationStatus().historyRevision == realtimeWorkingHistory.historyRevision &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 4,
+            "Realtime history did not continue after a rejected shader candidate.");
+        require(renderer.applyShaderSource(oldSource, error), error);
+        (void)render();
+        require(renderer.globalIlluminationStatus().historyRevision > realtimeWorkingHistory.historyRevision &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 2,
+            "Repairing the realtime shader did not start compatible indirect history.");
+        pass("realtime resize and valid shader updates start clean GPU history; failed candidates leave the active shader and history running");
+
+        const auto boundarySettings = settings;
+        const auto boundaryWidth = renderer.sceneTextureWidth(), boundaryHeight = renderer.sceneTextureHeight();
+        require(renderer.resize(width, height, error), error);
+        settings.viewportX = settings.viewportY = 0;
+        settings.viewportWidth = width; settings.viewportHeight = height;
+        settings.globalIllumination.samplesPerFrame = 16;
+        settings.globalIllumination.targetSamples = 1;
+        renderer.resetGlobalIllumination();
+        const auto oneSampleDispatches = renderer.hardwareRayTracingDispatchCount();
+        std::array<Pixels, 3> requestedBatch16;
+        std::uint64_t oneSampleHistory = 0;
+        for (std::size_t frame = 0; frame < requestedBatch16.size(); ++frame) {
+            requestedBatch16[frame] = render();
+            const auto status = renderer.globalIlluminationStatus();
+            require(status.effective == Method::PathTracing && status.effectiveMode == Mode::Realtime &&
+                status.accumulatedSamples == 1 && (frame == 0 || status.historyRevision == oneSampleHistory),
+                "Realtime SPF=16/target=1 failed to maintain a bounded one-sample history.");
+            oneSampleHistory = status.historyRevision;
+        }
+        const auto oneSampleChanged = changedPixels(requestedBatch16.front(), requestedBatch16.back(), 0);
+        report["metrics"]["realtimeOneSampleWindowChangedPixels"] = oneSampleChanged;
+        require(renderer.hardwareRayTracingDispatchCount() >= oneSampleDispatches + requestedBatch16.size() && oneSampleChanged > 8,
+            "Realtime one-sample history stopped dispatching or updating its image.");
+        // With a one-sample window a requested batch of sixteen must behave
+        // exactly like a batch of one, including its deterministic sequence.
+        settings.globalIllumination.samplesPerFrame = 1;
+        renderer.resetGlobalIllumination();
+        for (std::size_t frame = 0; frame < requestedBatch16.size(); ++frame)
+            require(changedPixels(requestedBatch16[frame], render(), 0) == 0 &&
+                renderer.globalIlluminationStatus().accumulatedSamples == 1,
+                "A batch larger than the realtime history window changed its sample weighting or sequence.");
+        settings.globalIllumination.samplesPerFrame = 16;
+        const auto beforeOneSampleMotion = renderer.globalIlluminationStatus().historyRevision;
+        const auto boundaryYaw = settings.cameraYaw;
+        settings.cameraYaw += .08f;
+        const auto oneSampleMotion = render();
+        require(renderer.globalIlluminationStatus().historyRevision > beforeOneSampleMotion &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 1,
+            "Motion did not reset a realtime one-sample history with a larger requested batch.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(oneSampleMotion, render(), 0) == 0,
+            "Realtime one-sample motion blended old history instead of producing its fresh same-seed image.");
+        settings.cameraYaw = boundaryYaw;
+        savePixels(output / "realtime-one-sample-window.bmp", requestedBatch16.back(), width, height);
+        pass("realtime SPF larger than a one-sample target stays bounded, continues new samples and resets motion without invalid weights");
+
+        // Compare actual scene readbacks, cropped using the texture's queried
+        // dimensions rather than assuming that the viewport owns the texture.
+        // Keeping Grid disabled removes resolution-dependent material footprints
+        // from this test; geometry, direct light and GI must otherwise align.
+        require(std::all_of(assets.materials.begin(), assets.materials.end(), [](const auto& material) { return !material.grid; }),
+            "Viewport alignment fixture must not contain pixel-footprint grid shading.");
+        constexpr std::uint32_t largerWidth = 257, largerHeight = 193, offsetX = 37, offsetY = 29;
+        settings.globalIllumination.samplesPerFrame = 16;
+        settings.globalIllumination.targetSamples = 64;
+        for (const auto path : {renderer::RenderPath::Forward, renderer::RenderPath::Deferred}) {
+            const auto pathName = path == renderer::RenderPath::Forward ? "forward" : "deferred";
+            settings.path = path;
+            settings.viewportX = settings.viewportY = 0;
+            settings.viewportWidth = width; settings.viewportHeight = height;
+            require(renderer.resize(width, height, error), error);
+            (void)realtimeFrames(4, true);
+            const auto origin = readSceneRegion(renderer, 0, 0, width, height);
+            require(renderer.resize(largerWidth, largerHeight, error), error);
+            (void)realtimeFrames(4, true);
+            const auto largerOrigin = readSceneRegion(renderer, 0, 0, width, height);
+            settings.viewportX = offsetX; settings.viewportY = offsetY;
+            (void)realtimeFrames(4, true);
+            const auto offset = readSceneRegion(renderer, offsetX, offsetY, width, height);
+            const auto largerOriginChanges = changedPixels(origin, largerOrigin, 0);
+            const auto offsetChanges = changedPixels(largerOrigin, offset, 0);
+            report["metrics"][std::string("realtimeLargerTargetOriginChangedPixels_") + pathName] = largerOriginChanges;
+            report["metrics"][std::string("realtimeViewportOffsetChangedPixels_") + pathName] = offsetChanges;
+            savePixels(output / (std::string("realtime-viewport-origin-") + pathName + ".bmp"), origin, width, height);
+            savePixels(output / (std::string("realtime-viewport-larger-origin-") + pathName + ".bmp"), largerOrigin, width, height);
+            savePixels(output / (std::string("realtime-viewport-offset-") + pathName + ".bmp"), offset, width, height);
+            std::uint32_t actualWidth = 0, actualHeight = 0;
+            const auto offsetFull = readScene(renderer, &actualWidth, &actualHeight);
+            require(actualWidth == largerWidth && actualHeight == largerHeight,
+                "Readback did not use the actual larger render-target dimensions.");
+            savePixels(output / (std::string("realtime-viewport-full-") + pathName + ".bmp"), offsetFull, actualWidth, actualHeight);
+            require(largerOriginChanges == 0 && offsetChanges == 0,
+                std::string("Realtime ") + pathName + " GI is misaligned after target resize or nonzero viewport origin (" +
+                std::to_string(largerOriginChanges) + "/" + std::to_string(offsetChanges) + " changed pixels).");
+        }
+        require(renderer.resize(boundaryWidth, boundaryHeight, error), error);
+        settings = boundarySettings;
+        (void)render();
+        pass("realtime Forward/Deferred viewport crops match their zero-origin image exactly inside larger render targets");
 
         report["dispatches"] = renderer.hardwareRayTracingDispatchCount() - dispatchStart;
         report["historyRevision"] = renderer.globalIlluminationStatus().historyRevision;

@@ -64,18 +64,26 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::SeparatorText("Rendering");
         ImGui::TextWrapped("Configure project rendering features independently of the current device.");
         ImGui::Spacing();
+        auto& gi = settings.globalIllumination;
+        const bool giEnabled = gi.method != renderer::GlobalIlluminationMethod::Disabled;
+        const bool realtimeGi = giEnabled && gi.mode == renderer::GlobalIlluminationMode::Realtime;
         bool changed = ImGui::Checkbox("Hardware ray tracing", &settings.hardwareRayTracing);
-        ImGui::TextWrapped("Trace the scene on hardware for ray-traced reflections and shadows.");
-        ImGui::BeginDisabled(!settings.hardwareRayTracing);
+        ImGui::TextWrapped("Use supported hardware tracing for the configured lighting features.");
+        ImGui::BeginDisabled(!settings.hardwareRayTracing || giEnabled);
         changed |= ImGui::Checkbox("Ray-traced reflections", &settings.hardwareRayTracingReflections);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(!settings.hardwareRayTracing || realtimeGi);
         changed |= ImGui::Checkbox("Ray-traced shadows", &settings.hardwareRayTracingShadows);
         ImGui::EndDisabled();
+        if (giEnabled)
+            ImGui::TextWrapped("GI uses its indirect-specular option below. The standalone reflection preference is retained for GI-disabled rendering.");
+        if (realtimeGi)
+            ImGui::TextWrapped("Realtime GI uses the current Forward / Deferred direct-light shadow settings. The hardware shadow preference is retained for other modes.");
 
         ImGui::Spacing();
         ImGui::SeparatorText("Global illumination");
-        auto& gi = settings.globalIllumination;
         int method = static_cast<int>(gi.method);
-        if (ImGui::Combo("GI method", &method, "Disabled\0Progressive path tracing\0")) {
+        if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0")) {
             gi.method = static_cast<renderer::GlobalIlluminationMethod>(method);
             if (gi.method == renderer::GlobalIlluminationMethod::PathTracing)
                 settings.hardwareRayTracing = true;
@@ -83,6 +91,13 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         }
         ImGui::TextWrapped("Selecting path tracing enables hardware ray tracing. Turning hardware off keeps your GI preference.");
         ImGui::BeginDisabled(gi.method != renderer::GlobalIlluminationMethod::PathTracing);
+        int mode = static_cast<int>(gi.mode);
+        if (ImGui::Combo("GI mode", &mode, "Progressive accumulation\0Realtime\0")) {
+            gi.mode = static_cast<renderer::GlobalIlluminationMode>(mode);
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("Indirect diffuse (color bleeding)", &gi.indirectDiffuse);
+        changed |= ImGui::Checkbox("Indirect specular (reflections)", &gi.indirectSpecular);
         const auto sampleSlider = [&changed](const char* label, std::uint32_t& value, std::uint32_t maximum) {
             int edited = static_cast<int>(std::clamp(value, 1u, maximum));
             if (ImGui::SliderInt(label, &edited, 1, static_cast<int>(maximum), "%d", ImGuiSliderFlags_AlwaysClamp)) {
@@ -91,21 +106,32 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             }
         };
         sampleSlider("Samples per frame", gi.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
-        sampleSlider("Target samples", gi.targetSamples, renderer::kGiMaxTargetSamples);
+        const bool realtimeRequested = gi.mode == renderer::GlobalIlluminationMode::Realtime;
+        sampleSlider(realtimeRequested ? "History samples" : "Target samples", gi.targetSamples, renderer::kGiMaxTargetSamples);
         sampleSlider("Max bounces", gi.maxBounces, renderer::kGiMaxBounces);
         ImGui::EndDisabled();
-        ImGui::TextWrapped("Changes update automatically. Keep the view still to accumulate a cleaner image; scene and lighting edits restart the affected history.");
+        if (realtimeRequested)
+            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Changes reset history and use spatial filtering; motion reprojection is not available.");
+        else
+            ImGui::TextWrapped("Progressive accumulation stops at the target sample count. Keep the view still for a cleaner image; scene and lighting edits automatically restart the affected history.");
 
         const auto giStatus = renderer.globalIlluminationStatus();
         const bool giEffective = giStatus.effective == renderer::GlobalIlluminationMethod::PathTracing;
         ImGui::Text("GI requested: %s", gi.method == renderer::GlobalIlluminationMethod::PathTracing
-            ? "Progressive path tracing" : "Disabled");
-        ImGui::Text("GI effective: %s", giEffective ? "Progressive path tracing" : "Disabled");
+            ? "Path tracing" : "Disabled");
+        ImGui::Text("GI requested mode: %s", realtimeRequested ? "Realtime" : "Progressive accumulation");
+        ImGui::Text("GI effective: %s", giEffective ? "Path tracing" : "Disabled");
         if (giEffective) {
             const auto target = std::max(1u, giStatus.targetSamples);
             const auto progress = std::min(giStatus.accumulatedSamples, target);
-            const std::string label = std::to_string(progress) + " / " + std::to_string(target) + " samples";
-            ImGui::ProgressBar(static_cast<float>(progress) / static_cast<float>(target), ImVec2(-FLT_MIN, 0), label.c_str());
+            if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) {
+                ImGui::TextUnformatted("GI effective mode: Realtime (continuous updates)");
+                ImGui::Text("History: %u / %u samples", progress, target);
+            } else {
+                ImGui::TextUnformatted("GI effective mode: Progressive accumulation");
+                const std::string label = std::to_string(progress) + " / " + std::to_string(target) + " samples";
+                ImGui::ProgressBar(static_cast<float>(progress) / static_cast<float>(target), ImVec2(-FLT_MIN, 0), label.c_str());
+            }
         }
         if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
         ImGui::BeginDisabled(!giEffective);

@@ -32,8 +32,11 @@ using Json = nlohmann::json;
 
 void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& settings) {
     using renderer::GlobalIlluminationMethod;
+    using renderer::GlobalIlluminationMode;
     if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing)
         throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+    if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
+        throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
     const auto range = [](const char* key, std::uint32_t value, std::uint32_t maximum) {
         if (value < 1 || value > maximum)
             throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
@@ -69,6 +72,22 @@ RenderingSettings readRenderingSettings(const Json& value) {
             else if (method == "pathTracing") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
             else throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
         }
+        if (gi.contains("mode")) {
+            if (!gi.at("mode").is_string())
+                throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
+            const auto& mode = gi.at("mode").get_ref<const std::string&>();
+            if (mode == "progressive") settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Progressive;
+            else if (mode == "realtime") settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+            else throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
+        }
+        const auto readContribution = [&gi](const char* key, bool& result) {
+            if (!gi.contains(key)) return;
+            if (!gi.at(key).is_boolean())
+                throw std::runtime_error(std::string("rendering.globalIllumination.") + key + " must be a boolean.");
+            result = gi.at(key).get<bool>();
+        };
+        readContribution("indirectDiffuse", settings.globalIllumination.indirectDiffuse);
+        readContribution("indirectSpecular", settings.globalIllumination.indirectSpecular);
         const auto readCount = [&gi](const char* key, std::uint32_t& result, std::uint32_t maximum) {
             if (!gi.contains(key)) return;
             const auto& count = gi.at(key);
@@ -833,6 +852,10 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         if (gi.is_null()) gi = Json::object();
         gi["method"] = settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing
             ? "pathTracing" : "disabled";
+        gi["mode"] = settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
+            ? "realtime" : "progressive";
+        gi["indirectDiffuse"] = settings.globalIllumination.indirectDiffuse;
+        gi["indirectSpecular"] = settings.globalIllumination.indirectSpecular;
         gi["samplesPerFrame"] = settings.globalIllumination.samplesPerFrame;
         gi["targetSamples"] = settings.globalIllumination.targetSamples;
         gi["maxBounces"] = settings.globalIllumination.maxBounces;

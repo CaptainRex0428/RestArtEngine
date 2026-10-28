@@ -4,7 +4,7 @@
 
 namespace rae::renderer { class SceneRenderer; }
 
-// All geometry/materials live in memory. Reads the actual GPU scene image and
-// restores the renderer's source and dimensions before returning.
+// Progressive convergence and realtime raster-consumer evidence use actual GPU
+// images. All geometry/materials live in memory; source and size are restored.
 void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
     const std::filesystem::path& outputDirectory);

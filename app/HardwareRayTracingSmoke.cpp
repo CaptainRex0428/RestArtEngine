@@ -503,10 +503,25 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             uiFrame();
             require(context->NavId == id && context->NavIdIsAlive,
                 std::string("UI control is not navigable: ") + label);
-            auto rectangle = ImGui::WindowRectRelToAbs(window, window->NavRectRel[layer]);
-            ImGui::ScrollToRectEx(window, rectangle, ImGuiScrollFlags_KeepVisibleEdgeY);
-            uiFrame();
-            return ImGui::WindowRectRelToAbs(window, window->NavRectRel[layer]);
+            // A navigable item may still be clipped. Scroll, submit the new
+            // layout and return only the visible hit area, never an old screen
+            // coordinate below the child window or over its parent's footer.
+            for (int attempt = 0; attempt != 4; ++attempt) {
+                auto rectangle = ImGui::WindowRectRelToAbs(window, window->NavRectRel[layer]);
+                if (attempt == 0 || !window->ClipRect.Contains(rectangle.GetCenter())) {
+                    ImGui::ScrollToRectEx(window, rectangle,
+                        ImGuiScrollFlags_AlwaysCenterY | ImGuiScrollFlags_NoScrollParent);
+                    uiFrame();
+                    require(context->NavId == id && context->NavIdIsAlive,
+                        std::string("UI control disappeared while scrolling: ") + label);
+                    rectangle = ImGui::WindowRectRelToAbs(window, window->NavRectRel[layer]);
+                }
+                rectangle.ClipWith(window->ClipRect);
+                if (rectangle.GetWidth() > 2.0f && rectangle.GetHeight() > 2.0f &&
+                    window->ClipRect.Contains(rectangle.GetCenter())) return rectangle;
+                uiFrame();
+            }
+            throw std::runtime_error(std::string("UI control has no visible hit target after scrolling: ") + label);
         };
         const auto click = [&](ImVec2 position) {
             input.mouse = position;
@@ -561,8 +576,8 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
             "GI method did not open its choices.");
         auto* giPopup = context->OpenPopupStack.back().Window;
-        const auto pathItem = ImHashStr("Progressive path tracing", 0, giPopup->GetID(1));
-        click(itemRect(giPopup, "Progressive path tracing", ImGuiNavLayer_Main, pathItem).GetCenter());
+        const auto pathItem = ImHashStr("Path tracing", 0, giPopup->GetID(1));
+        click(itemRect(giPopup, "Path tracing", ImGuiNavLayer_Main, pathItem).GetCenter());
         require(uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing &&
             uiSettings.hardwareRayTracing && editor.projectSettingsDirty(),
             "GI method failed to request path tracing and activate its hardware dependency.");
@@ -574,6 +589,50 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             click(itemRect(findChild("ProjectSettingsContent"), "Restart accumulation").GetCenter());
             require(renderer.globalIlluminationStatus().historyRevision > oldHistory,
                 "Restart accumulation did not invalidate progressive history.");
+        }
+
+        click(itemRect(findChild("ProjectSettingsContent"), "GI mode").GetCenter());
+        require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+            "GI update mode did not open its choices.");
+        auto* modePopup = context->OpenPopupStack.back().Window;
+        const auto realtimeItem = ImHashStr("Realtime", 0, modePopup->GetID(1));
+        click(itemRect(modePopup, "Realtime", ImGuiNavLayer_Main, realtimeItem).GetCenter());
+        require(uiSettings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime &&
+            uiSettings.hardwareRayTracing && editor.projectSettingsDirty(),
+            "Realtime GI mode did not update from the actual combo selection.");
+        if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible)
+            require(renderer.globalIlluminationStatus().effective == renderer::GlobalIlluminationMethod::PathTracing &&
+                renderer.globalIlluminationStatus().effectiveMode == renderer::GlobalIlluminationMode::Realtime,
+                "Realtime GI request did not reach the effective rendering mode.");
+        require(uiText.find("History samples") != std::string::npos &&
+            uiText.find("Realtime GI updates continuously") != std::string::npos,
+            "Realtime configuration did not expose its rolling history controls.");
+
+        const bool legacyReflections = uiSettings.hardwareRayTracingReflections;
+        const bool firstDiffuse = uiSettings.globalIllumination.indirectDiffuse;
+        const bool firstSpecular = uiSettings.globalIllumination.indirectSpecular;
+        click(itemRect(findChild("ProjectSettingsContent"), "Indirect diffuse (color bleeding)").GetCenter());
+        require(uiSettings.globalIllumination.indirectDiffuse != firstDiffuse &&
+            uiSettings.globalIllumination.indirectSpecular == firstSpecular &&
+            uiSettings.hardwareRayTracingReflections == legacyReflections,
+            "Indirect diffuse checkbox did not change only its independent GI contribution.");
+        click(itemRect(findChild("ProjectSettingsContent"), "Indirect specular (reflections)").GetCenter());
+        require(uiSettings.globalIllumination.indirectDiffuse != firstDiffuse &&
+            uiSettings.globalIllumination.indirectSpecular != firstSpecular &&
+            uiSettings.hardwareRayTracingReflections == legacyReflections,
+            "Indirect specular checkbox changed another contribution or the standalone reflection preference.");
+        click(itemRect(findChild("ProjectSettingsContent"), "Indirect diffuse (color bleeding)").GetCenter());
+        require(uiSettings.globalIllumination.indirectDiffuse == firstDiffuse &&
+            uiSettings.globalIllumination.indirectSpecular != firstSpecular,
+            "Restoring diffuse also reset the independently edited specular contribution.");
+        (void)itemRect(findChild("ProjectSettingsContent"), "GI mode");
+        uiFrame("project-settings-realtime.bmp");
+        if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible) {
+            const auto historyBeforeRestart = renderer.globalIlluminationStatus().historyRevision;
+            click(itemRect(findChild("ProjectSettingsContent"), "Restart accumulation").GetCenter());
+            require(renderer.globalIlluminationStatus().historyRevision > historyBeforeRestart &&
+                renderer.globalIlluminationStatus().effectiveMode == renderer::GlobalIlluminationMode::Realtime,
+                "Restart accumulation did not restart the continuous GI history.");
         }
         const auto actorCount = editor.world().actors.size();
         const auto selected = editor.selectedActor();
@@ -593,7 +652,11 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             reloaded.rendering.hardwareRayTracingShadows == uiSettings.hardwareRayTracingShadows,
             "Saved project rendering values did not survive reloading.");
         require(reloaded.rendering.globalIllumination == uiSettings.globalIllumination,
-            "Saved GI algorithm and sampling values did not survive reloading.");
+            "Saved GI algorithm, mode, contributions and sampling values did not survive reloading.");
+        require(reloaded.rendering.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime &&
+            reloaded.rendering.globalIllumination.indirectDiffuse == firstDiffuse &&
+            reloaded.rendering.globalIllumination.indirectSpecular != firstSpecular,
+            "Project reload lost the Realtime mode or independent GI contribution choices.");
         require(Json::parse(contents(project.manifest))["hardwareRtSmokeUnknownField"]["preserve"] == 17,
             "Saving project settings destroyed an unrelated manifest field.");
         uiFrame("project-settings-saved.bmp");
@@ -601,7 +664,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         editor.closeProjectSettings();
         uiFrame();
         require(!editor.projectSettingsOpen(), "Project settings failed to close.");
-        pass("Project menu, Rendering navigation, real switches, focus, unsaved state and project save/reload");
+        pass("Project menu, GI algorithm/update modes, independent contributions, scrolled restart, focus and project save/reload");
 
         report["dispatches"] = renderer.hardwareRayTracingDispatchCount() - dispatchStart;
         report["validationErrors"] = renderer.validationErrorCount();

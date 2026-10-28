@@ -172,9 +172,19 @@ void globalIlluminationRoundTrip() {
     require(loaded.rendering.globalIllumination == renderer::GlobalIlluminationSettings{},
         "An empty GI settings object preserves compatible defaults.");
 
+    value["rendering"]["globalIllumination"]["method"] = "pathTracing";
+    fixture.write(value);
+    require(loadProject(fixture.manifest, loaded, error), error);
+    require(loaded.rendering.globalIllumination.mode == renderer::GlobalIlluminationMode::Progressive &&
+        loaded.rendering.globalIllumination.indirectDiffuse && loaded.rendering.globalIllumination.indirectSpecular,
+        "Older path-tracing projects default to progressive mode and both indirect contributions.");
+
     RenderingSettings requested;
     requested.hardwareRayTracing = true;
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+    requested.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+    requested.globalIllumination.indirectDiffuse = false;
+    requested.globalIllumination.indirectSpecular = true;
     requested.globalIllumination.samplesPerFrame = 4;
     requested.globalIllumination.targetSamples = 512;
     requested.globalIllumination.maxBounces = 6;
@@ -183,14 +193,18 @@ void globalIlluminationRoundTrip() {
     require(loaded.rendering == requested, "GI algorithm and quality settings survive project reload.");
     const auto saved = Json::parse(bytes(fixture.manifest));
     const auto& gi = saved.at("rendering").at("globalIllumination");
-    require(gi.at("method") == "pathTracing" && gi.at("samplesPerFrame") == 4 &&
+    require(gi.at("method") == "pathTracing" && gi.at("mode") == "realtime" &&
+        gi.at("indirectDiffuse") == false && gi.at("indirectSpecular") == true && gi.at("samplesPerFrame") == 4 &&
         gi.at("targetSamples") == 512 && gi.at("maxBounces") == 6,
-        "GI serializes stable method names and integer quality controls.");
+        "GI serializes independent algorithm, update mode, contributions and quality controls.");
     require(gi.at("extension") == value.at("rendering").at("globalIllumination").at("extension") &&
         saved.at("customExtension") == fixture.original.at("customExtension"),
         "Saving GI preserves unknown nested and project fields.");
 
     requested.hardwareRayTracing = false;
+    requested.globalIllumination.mode = renderer::GlobalIlluminationMode::Progressive;
+    requested.globalIllumination.indirectDiffuse = true;
+    requested.globalIllumination.indirectSpecular = false;
     requested.globalIllumination.samplesPerFrame = renderer::kGiMaxSamplesPerFrame;
     requested.globalIllumination.targetSamples = renderer::kGiMaxTargetSamples;
     requested.globalIllumination.maxBounces = renderer::kGiMaxBounces;
@@ -198,6 +212,8 @@ void globalIlluminationRoundTrip() {
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "Turning hardware off retains the requested GI algorithm and upper quality bounds.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
+    requested.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+    requested.globalIllumination.indirectDiffuse = false;
     requested.globalIllumination.samplesPerFrame = requested.globalIllumination.targetSamples =
         requested.globalIllumination.maxBounces = 1;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
@@ -235,6 +251,11 @@ void globalIlluminationValidation() {
         reject(invalid, "globalIllumination");
     for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("PathTracing"), Json::array()})
         reject(Json{{"method", invalid}}, "method");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("Realtime"), Json::array()})
+        reject(Json{{"mode", invalid}}, "mode");
+    for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
+        for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
+            reject(Json{{contribution, invalid}}, contribution);
 
     struct Bound { const char* key; std::uint32_t maximum; };
     for (const auto& bound : {Bound{"samplesPerFrame", renderer::kGiMaxSamplesPerFrame},
@@ -255,6 +276,9 @@ void globalIlluminationValidation() {
     };
     RenderingSettings invalid;
     invalid.globalIllumination.method = static_cast<renderer::GlobalIlluminationMethod>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.mode = static_cast<renderer::GlobalIlluminationMode>(99);
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.samplesPerFrame = 0;

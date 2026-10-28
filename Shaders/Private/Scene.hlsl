@@ -57,6 +57,16 @@ Texture2DArray<float> shadowMap : register(t3);
 SamplerState gbufferSampler : register(s0);
 SamplerComparisonState shadowSampler : register(s1);
 
+#if !defined(RAE_HARDWARE_RAYTRACING)
+// Algorithm-independent raster consumer: a resolved, shaded indirect-radiance
+// image in linear HDR, aligned with the current scene viewport.
+cbuffer GlobalIlluminationConstants : register(b6)
+{
+    float4 giViewport; // effective realtime GI, local width, local height, reserved
+};
+Texture2D<float4> indirectLightingBuffer : register(t9);
+#endif
+
 static const float PI = 3.14159265359;
 
 static const float RAY_EPSILON = 0.003;
@@ -486,6 +496,16 @@ float3 ShadeSurfaceContributions(float3 position, float3 normal, float3 view, Su
     directSpecular = specular * irradiance;
     float3 direct = directDiffuse + directSpecular;
 
+#if !defined(RAE_HARDWARE_RAYTRACING)
+    if (giViewport.x > 0.5)
+    {
+        float4 clip = mul(float4(position, 1.0), viewProjection);
+        float2 localUv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+        uint2 pixel = min(uint2(saturate(localUv) * giViewport.yz), uint2(giViewport.yz) - 1u);
+        return direct + indirectLightingBuffer.Load(int3(pixel, 0)).rgb;
+    }
+#endif
+
 #if defined(RAE_HARDWARE_RAYTRACING)
     float ambientOcclusion = 1.0;
 #else
@@ -512,7 +532,7 @@ float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool d
 #if defined(RAE_HARDWARE_RAYTRACING)
     if (traceOptions.x > 0.5)
 #else
-    if (parameters.w > 0.5)
+    if (parameters.w > 0.5 && giViewport.x < 0.5)
 #endif
     {
         float3 ray = reflect(-view, normal);

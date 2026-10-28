@@ -198,8 +198,9 @@ struct HardwareConstants {
     std::uint32_t outputInfo[4];
     float traceOptions[4];
     std::uint32_t accumulationInfo[4]; // sample offset, batch, bounces, GI method
+    std::uint32_t giOptions[4]; // mode, contribution bits, pass, continuous sample sequence
 };
-static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 112);
+static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 128);
 
 // Compare the full frame contract rather than one combined frame hash. Geometry
 // hashes are the same immutable-content identities used by the upload cache.
@@ -209,8 +210,8 @@ struct HistoryKey {
     std::array<float, 16> inverseViewProjection;
     std::uint64_t positions = 0, triangles = 0, normals = 0;
     std::uint64_t pipelineRevision = 0, epoch = 0;
-    std::uint32_t width = 0, height = 0, maxBounces = 0, method = 0;
-    bool reflections = false, shadows = false;
+    std::uint32_t width = 0, height = 0, maxBounces = 0, method = 0, mode = 0, contributions = 0;
+    bool shadows = false;
     bool operator==(const HistoryKey&) const = default;
 };
 
@@ -308,7 +309,7 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
     D3D12_SHADER_DESC description{};
     if (failed(reflection->GetDesc(&description), "Read DXR shader reflection", error)) return false;
     bool scene = false, hardware = false, acceleration = false, triangles = false, normals = false;
-    bool output = false, accumulation = false;
+    unsigned uavMask = 0;
     for (UINT index = 0; index < description.BoundResources; ++index) {
         D3D12_SHADER_INPUT_BIND_DESC binding{};
         if (failed(reflection->GetResourceBindingDesc(index, &binding), "Read DXR binding", error)) return false;
@@ -318,14 +319,14 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             auto* constants = reflection->GetConstantBufferByName(binding.Name);
             D3D12_SHADER_BUFFER_DESC constantDescription{};
             if (failed(constants->GetDesc(&constantDescription), "Read DXR constant buffer", error)) return false;
-            if (constantDescription.Size != (isScene ? 144u : 112u)) {
+            if (constantDescription.Size != (isScene ? 144u : 128u)) {
                 error = std::string(binding.Name) + ": DXR constant buffer size does not match the CPU contract."; return false;
             }
             struct Field { const char* name; UINT offset, size; };
             static constexpr Field sceneFields[] = {{"viewProjection",0,64},{"cameraPosition",64,16},{"baseColor",80,16},
                 {"lightDirectionIntensity",96,16},{"parameters",112,16},{"viewportDebug",128,16}};
             static constexpr Field hardwareFields[] = {{"inverseViewProjection",0,64},{"outputInfo",64,16},
-                {"traceOptions",80,16},{"accumulationInfo",96,16}};
+                {"traceOptions",80,16},{"accumulationInfo",96,16},{"giOptions",112,16}};
             const Field* fields = isScene ? sceneFields : hardwareFields;
             const auto count = isScene ? std::size(sceneFields) : std::size(hardwareFields);
             for (std::size_t fieldIndex = 0; fieldIndex < count; ++fieldIndex) {
@@ -337,7 +338,8 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
                 D3D12_SHADER_TYPE_DESC type{};
                 if (FAILED(reflectedVariable->GetType()->GetDesc(&type)) ||
                     type.Type != ((std::strcmp(field.name, "outputInfo") == 0 ||
-                        std::strcmp(field.name, "accumulationInfo") == 0) ? D3D_SVT_UINT : D3D_SVT_FLOAT) ||
+                        std::strcmp(field.name, "accumulationInfo") == 0 ||
+                        std::strcmp(field.name, "giOptions") == 0) ? D3D_SVT_UINT : D3D_SVT_FLOAT) ||
                     (field.size == 64 && (type.Class != D3D_SVC_MATRIX_ROWS || type.Rows != 4 || type.Columns != 4)) ||
                     (field.size == 16 && (type.Class != D3D_SVC_VECTOR || type.Columns != 4))) {
                     error = std::string("DXR constant field type mismatch: ") + field.name; return false;
@@ -383,15 +385,15 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             }
         }
         else if (binding.Type == D3D_SIT_RTACCELERATIONSTRUCTURE && binding.BindPoint == 7) acceleration = true;
-        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 1 &&
+        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 4 &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
-            if (binding.BindPoint == 0) output = true; else accumulation = true;
+            uavMask |= 1u << binding.BindPoint;
         }
         else { error = std::string("Unexpected DXR shader resource: ") + binding.Name; return false; }
     }
     UINT x = 0, y = 0, z = 0; reflection->GetThreadGroupSize(&x, &y, &z);
-    if (!(scene && hardware && acceleration && triangles && normals && output && accumulation) || x != 8 || y != 8 || z != 1) {
-        error = "DXR shader must preserve b0/b5, t4/t7/t8, u0/u1 and the 8x8x1 thread-group contract."; return false;
+    if (!(scene && hardware && acceleration && triangles && normals) || uavMask != 0x1fu || x != 8 || y != 8 || z != 1) {
+        error = "DXR shader must preserve b0/b5, t4/t7/t8, u0..u4 and the 8x8x1 thread-group contract."; return false;
     }
     return true;
 }
@@ -418,8 +420,10 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D12RootSignature> rootSignature;
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> descriptors;
-    ComPtr<ID3D12Resource> outputTexture, accumulationTexture;
-    ComPtr<ID3D11Texture2D> sharedOutput;
+    ComPtr<ID3D12Resource> outputTexture, accumulationTexture, normalGuide, indirectTexture, albedoGuide;
+    ComPtr<ID3D11Texture2D> sharedOutput, sharedIndirect;
+    ComPtr<ID3D11ShaderResourceView> indirectView;
+    bool indirectReady = false;
     std::uint32_t width = 0, height = 0;
     ComPtr<ID3D12Resource> constants, triangleData, normalData;
     ComPtr<ID3D12Resource> vertexData, instanceData, blas, tlas, scratch;
@@ -429,7 +433,7 @@ struct HardwareRayTracing::Impl {
     std::uint64_t dispatches = 0;
     HistoryKey historyKey{};
     bool historyValid = false;
-    std::uint32_t accumulatedSamples = 0;
+    std::uint32_t accumulatedSamples = 0, sampleSequence = 0;
     std::uint64_t pipelineRevision = 0;
     GlobalIlluminationStatus giStatus;
     std::string message = "Hardware ray tracing has not been initialized.";
@@ -494,7 +498,8 @@ struct HardwareRayTracing::Impl {
         const D3D12_RANGE writtenRange{0, size}; resource->Unmap(0, &writtenRange); return true;
     }
     bool prepareOutput(std::uint32_t w, std::uint32_t h, UINT64 dx11Done, std::string& error) {
-        if (outputTexture && accumulationTexture && width == w && height == h) return true;
+        if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
+            indirectView && width == w && height == h) return true;
         // Previous DX11 reads must finish before replacing a shared allocation
         // or its descriptor. Normal frame reuse remains GPU ordered.
         if (!wait(dx11Done, error)) return false;
@@ -519,26 +524,56 @@ struct HardwareRayTracing::Impl {
         if (failed(device11->OpenSharedResource1(sharedHandle.value, IID_PPV_ARGS(&candidate11)), "Open DXR image in DX11", error)) {
             appendImportDiagnostics(device11.Get(), error); return false;
         }
-        // Keep the estimator in full-precision linear HDR. This texture is not
-        // shared with DX11 and never passes through the display transfer curve.
-        D3D12_RESOURCE_DESC accumulationDescription = description;
-        accumulationDescription.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        accumulationDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        ComPtr<ID3D12Resource> accumulationCandidate;
-        if (failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &accumulationDescription,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&accumulationCandidate)),
-            "Create HDR path accumulation image", error)) return false;
-        // Both resources exist before either live descriptor is replaced.
+        // All estimator/guide images stay in full-precision linear space. Only
+        // the resolved indirect image crosses the DX12/DX11 ownership boundary.
+        D3D12_RESOURCE_DESC hdrDescription = description;
+        hdrDescription.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        hdrDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> accumulationCandidate, normalCandidate, albedoCandidate;
+        const auto createPrivateImage = [&](ComPtr<ID3D12Resource>& resource, const char* operation) {
+            return !failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &hdrDescription,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)), operation, error);
+        };
+        if (!createPrivateImage(accumulationCandidate, "Create HDR path accumulation image") ||
+            !createPrivateImage(normalCandidate, "Create realtime GI normal/depth guide") ||
+            !createPrivateImage(albedoCandidate, "Create realtime GI material guide")) return false;
+        auto sharedHdrDescription = description;
+        // DX11/DX12 interoperable HDR format. The estimator remains FP32;
+        // only its resolved consumer image uses half precision.
+        sharedHdrDescription.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        ComPtr<ID3D12Resource> indirectCandidate;
+        if (failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_SHARED, &sharedHdrDescription,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&indirectCandidate)),
+                "Create shared HDR indirect lighting image", error)) return false;
+        Handle indirectHandle;
+        if (failed(device->CreateSharedHandle(indirectCandidate.Get(), nullptr, GENERIC_ALL, nullptr, &indirectHandle.value),
+                "Share HDR indirect lighting image", error)) return false;
+        ComPtr<ID3D11Texture2D> indirectCandidate11;
+        if (failed(device11->OpenSharedResource1(indirectHandle.value, IID_PPV_ARGS(&indirectCandidate11)),
+                "Open HDR indirect lighting image in DX11", error)) {
+            appendImportDiagnostics(device11.Get(), error); return false;
+        }
+        ComPtr<ID3D11ShaderResourceView> indirectViewCandidate;
+        if (failed(device11->CreateShaderResourceView(indirectCandidate11.Get(), nullptr, &indirectViewCandidate),
+                "Create HDR indirect lighting SRV", error)) return false;
+        // Every allocation and import exists before any live descriptor changes.
         D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
         view.Format = description.Format; view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         auto descriptor = descriptors->GetCPUDescriptorHandleForHeapStart();
         device->CreateUnorderedAccessView(candidate.Get(), nullptr, &view, descriptor);
-        descriptor.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        view.Format = accumulationDescription.Format;
-        device->CreateUnorderedAccessView(accumulationCandidate.Get(), nullptr, &view, descriptor);
+        const auto descriptorStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        view.Format = hdrDescription.Format;
+        for (auto* resource : {accumulationCandidate.Get(), normalCandidate.Get(), indirectCandidate.Get(), albedoCandidate.Get()}) {
+            descriptor.ptr += descriptorStride;
+            view.Format = resource->GetDesc().Format;
+            device->CreateUnorderedAccessView(resource, nullptr, &view, descriptor);
+        }
         outputTexture = std::move(candidate); sharedOutput = std::move(candidate11); width = w; height = h;
         accumulationTexture = std::move(accumulationCandidate);
-        historyValid = false; accumulatedSamples = 0;
+        normalGuide = std::move(normalCandidate); albedoGuide = std::move(albedoCandidate);
+        indirectTexture = std::move(indirectCandidate); sharedIndirect = std::move(indirectCandidate11);
+        indirectView = std::move(indirectViewCandidate); indirectReady = false;
+        historyValid = false; accumulatedSamples = 0; sampleSequence = 0;
         return true;
     }
 
@@ -634,8 +669,24 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
     if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &accumulationFormat,
                sizeof(accumulationFormat)), "Query HDR path accumulation format", error)) return fail();
     constexpr auto accumulationSupport = D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
-    if ((accumulationFormat.Support2 & accumulationSupport) != accumulationSupport) {
-        error = "The adapter cannot read and write full-precision HDR path accumulation."; return fail();
+    if ((accumulationFormat.Support2 & accumulationSupport) != accumulationSupport ||
+        !(accumulationFormat.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D)) {
+        error = "The adapter cannot read and write private FP32 HDR GI images."; return fail();
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT indirectFormat{DXGI_FORMAT_R16G16B16A16_FLOAT};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &indirectFormat,
+            sizeof(indirectFormat)), "Query shared HDR indirect lighting format", error)) return fail();
+    if (!(indirectFormat.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) ||
+        !(indirectFormat.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET)) {
+        error = "The adapter cannot write the shared FP16 HDR GI image."; return fail();
+    }
+    UINT hdrSupport11 = 0;
+    if (failed(candidate->device11->CheckFormatSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, &hdrSupport11),
+            "Query DX11 HDR indirect lighting format", error)) return fail();
+    constexpr UINT requiredHdr11 = D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_SHADER_LOAD |
+        D3D11_FORMAT_SUPPORT_RENDER_TARGET;
+    if ((hdrSupport11 & requiredHdr11) != requiredHdr11) {
+        error = "The DX11 scene renderer cannot import and sample HDR indirect lighting."; return fail();
     }
     std::wstring executable(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
@@ -664,7 +715,7 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
     if (!candidate->event.value) { error = "Cannot create DXR completion event."; return fail(); }
     D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
     descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 2; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    descriptors.NumDescriptors = 5; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)), "Create DXR descriptors", error)) return fail();
     candidate->device.As(&candidate->infoQueue);
     candidate->capable = true;
@@ -717,7 +768,7 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[3].Descriptor.ShaderRegister = 7;
     parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[4].Descriptor.ShaderRegister = 8;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 2; range.BaseShaderRegister = 0;
+    range.NumDescriptors = 5; range.BaseShaderRegister = 0;
     parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[5].DescriptorTable.NumDescriptorRanges = 1; parameters[5].DescriptorTable.pDescriptorRanges = &range;
     D3D12_ROOT_SIGNATURE_DESC rootDescription{};
@@ -738,7 +789,8 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
         !state.wait(state.submitted, error)) return false;
     state.pipeline = std::move(candidate); state.rootSignature = std::move(rootCandidate);
     ++state.pipelineRevision;
-    state.historyValid = false; state.accumulatedSamples = 0;
+    state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
+    state.indirectReady = false;
     state.giStatus.accumulatedSamples = 0;
     state.giStatus.effective = GlobalIlluminationMethod::Disabled;
     state.giStatus.reason = "Shader pipeline updated; accumulation restarts on the next lit frame.";
@@ -752,11 +804,18 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     error.clear(); auto& state = *impl_;
     const auto targetSamples = std::clamp(frame.globalIllumination.targetSamples, 1u, kGiMaxTargetSamples);
     state.giStatus.requested = frame.globalIllumination.method;
+    state.giStatus.requestedMode = frame.globalIllumination.mode;
+    state.giStatus.effectiveMode = frame.globalIllumination.mode;
     state.giStatus.targetSamples = targetSamples;
+    state.indirectReady = false;
     const auto fail = [&] {
         // A submitted batch may have partially written history even if its
         // synchronization fails. The next safe render must start from scratch.
-        state.historyValid = false; state.accumulatedSamples = 0;
+        state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
+        // Uploads/acceleration structures may already have changed before a
+        // later failure. Rebuild their identities on a safe retry as well.
+        state.positionHash = state.triangleHash = state.normalHash = 0;
+        state.geometryReady = false;
         state.giStatus.accumulatedSamples = 0;
         state.giStatus.effective = GlobalIlluminationMethod::Disabled;
         state.message = "Hardware ray tracing failed: " + error;
@@ -767,6 +826,10 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     if (frame.globalIllumination.method != GlobalIlluminationMethod::Disabled &&
         frame.globalIllumination.method != GlobalIlluminationMethod::PathTracing) {
         error = "The requested global illumination method is unavailable in this backend."; return fail();
+    }
+    if (frame.globalIllumination.mode != GlobalIlluminationMode::Progressive &&
+        frame.globalIllumination.mode != GlobalIlluminationMode::Realtime) {
+        error = "The requested global illumination execution mode is unavailable."; return fail();
     }
     if (!frame.width || !frame.height || frame.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || frame.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         error = "Invalid hardware ray tracing output dimensions."; return fail();
@@ -788,36 +851,59 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         const auto normalHash = hashBytes(normals.data(), normals.size() * sizeof(XMFLOAT3));
         const bool pathRequested = frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
         const bool pathLit = pathRequested && frame.sceneConstants[34] == 0.0f;
+        const bool realtime = frame.globalIllumination.mode == GlobalIlluminationMode::Realtime;
+        const bool realtimeLit = pathLit && realtime;
+        // Realtime exports indirect transport only. Its secondary illumination
+        // always needs physical visibility; the raster pass independently owns
+        // the primary surface's chosen direct shadow technique.
+        const bool transportShadows = pathRequested && realtime ? true : frame.shadows;
+        const std::uint32_t contributions = (frame.globalIllumination.indirectDiffuse ? 1u : 0u) |
+            (frame.globalIllumination.indirectSpecular ? 2u : 0u);
         const auto maxBounces = std::clamp(frame.globalIllumination.maxBounces, 1u, kGiMaxBounces);
         HistoryKey nextHistory{};
         nextHistory.sceneConstants = frame.sceneConstants;
         nextHistory.sceneConstants[30] = 0.0f; // exposure belongs to display resolve
+        nextHistory.sceneConstants[31] = 0.0f; // legacy preview reflections do not select GI lobes
         nextHistory.sceneConstants[34] = 0.0f; // debug views pause without poisoning HDR history
+        nextHistory.sceneConstants[35] = 0.0f; // GI uses its own hardware shadow visibility
         nextHistory.inverseViewProjection = frame.inverseViewProjection;
         nextHistory.positions = positionHash; nextHistory.triangles = triangleHash; nextHistory.normals = normalHash;
         nextHistory.pipelineRevision = state.pipelineRevision; nextHistory.epoch = frame.historyEpoch;
         nextHistory.width = frame.width; nextHistory.height = frame.height; nextHistory.maxBounces = maxBounces;
         nextHistory.method = static_cast<std::uint32_t>(frame.globalIllumination.method);
-        nextHistory.reflections = frame.reflections; nextHistory.shadows = frame.shadows;
+        nextHistory.mode = static_cast<std::uint32_t>(frame.globalIllumination.mode);
+        nextHistory.contributions = contributions; nextHistory.shadows = transportShadows;
+        const std::uint32_t requestedBatch = std::min(
+            std::clamp(frame.globalIllumination.samplesPerFrame, 1u, kGiMaxSamplesPerFrame), targetSamples);
         const bool restart = pathLit && (!state.historyValid || !(nextHistory == state.historyKey) ||
-            targetSamples < state.accumulatedSamples);
-        const std::uint32_t sampleOffset = restart ? 0u : state.accumulatedSamples;
-        const std::uint32_t batch = pathLit ? std::min(
-            std::clamp(frame.globalIllumination.samplesPerFrame, 1u, kGiMaxSamplesPerFrame),
-            targetSamples - sampleOffset) : 0u;
+            (!realtime && targetSamples < state.accumulatedSamples) ||
+            (realtime && state.sampleSequence > std::numeric_limits<std::uint32_t>::max() - requestedBatch));
+        // Progressive counts all samples. Realtime keeps a bounded history
+        // weight but advances a separate sequence so convergence never freezes.
+        const std::uint32_t sampleOffset = restart ? 0u : std::min(state.accumulatedSamples, targetSamples);
+        const std::uint32_t sequenceOffset = restart ? 0u : realtime ? state.sampleSequence : sampleOffset;
+        const std::uint32_t batch = !pathLit ? 0u : realtime ? requestedBatch :
+            std::min(requestedBatch, targetSamples - sampleOffset);
         // Null/empty scenes still bind valid upload buffers; the shader guards
         // traversal using outputInfo.z and renders the normal background.
         if ((!state.triangleData || triangleHash != state.triangleHash) &&
             !state.upload(triangles.data(), triangles.size() * sizeof(RayTriangle), state.triangleData, error)) return fail();
         if ((!state.normalData || normalHash != state.normalHash) &&
             !state.upload(normals.data(), normals.size() * sizeof(XMFLOAT3), state.normalData, error)) return fail();
-        std::array<unsigned char, 512> constants{};
+        // Root CBVs are 256-byte aligned. Separate immutable constants for the
+        // two realtime dispatches prevent the resolve pass from overwriting
+        // the trace pass's pass/sequence values before either executes.
+        std::array<unsigned char, 768> constants{};
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         const HardwareConstants hardware{frame.inverseViewProjection,
-            {frame.width, frame.height, static_cast<std::uint32_t>(triangles.size()), frame.shadows ? 1u : 0u},
-            {frame.reflections ? 1.0f : 0.0f, 0, 0, 0},
-            {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u}};
+            {frame.width, frame.height, static_cast<std::uint32_t>(triangles.size()), transportShadows ? 1u : 0u},
+            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), 0, 0},
+            {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
+            {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));
+        auto resolve = hardware;
+        resolve.giOptions[2] = 1;
+        std::memcpy(constants.data() + 512, &resolve, sizeof(resolve));
         if (!state.upload(constants.data(), constants.size(), state.constants, error)) return fail();
         if (failed(state.allocator->Reset(), "Reset DXR allocator", error) ||
             failed(state.list->Reset(state.allocator.Get(), state.pipeline.Get()), "Reset DXR command list", error)) return fail();
@@ -832,7 +918,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
         transition.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        state.list->ResourceBarrier(1, &transition);
+        D3D12_RESOURCE_BARRIER transitions[] = {transition, transition};
+        transitions[1].Transition.pResource = state.indirectTexture.Get();
+        state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
         ID3D12DescriptorHeap* heaps[] = {state.descriptors.Get()}; state.list->SetDescriptorHeaps(1, heaps);
         state.list->SetComputeRootSignature(state.rootSignature.Get());
         state.list->SetComputeRootConstantBufferView(0, state.constants->GetGPUVirtualAddress());
@@ -842,11 +930,19 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.list->SetComputeRootShaderResourceView(4, state.normalData->GetGPUVirtualAddress());
         state.list->SetComputeRootDescriptorTable(5, state.descriptors->GetGPUDescriptorHandleForHeapStart());
         state.list->Dispatch((frame.width + 7) / 8, (frame.height + 7) / 8, 1);
-        // The running mean remains in UAV state across frames. Explicitly order
-        // its read/write dependencies before the next dispatch can access it.
-        uavBarrier(state.list.Get(), state.accumulationTexture.Get());
-        std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
-        state.list->ResourceBarrier(1, &transition);
+        // Resolve reads the full trace image and its guides, including neighbor
+        // pixels. A UAV barrier must make every trace thread's writes visible.
+        // The same barrier also orders persistent history between frames.
+        uavBarrier(state.list.Get(), nullptr);
+        if (realtimeLit) {
+            state.list->SetComputeRootConstantBufferView(1, state.constants->GetGPUVirtualAddress() + 512);
+            state.list->Dispatch((frame.width + 7) / 8, (frame.height + 7) / 8, 1);
+            uavBarrier(state.list.Get(), nullptr);
+        }
+        for (auto& barrier : transitions)
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        // Both shared images return to COMMON before the DX11 ownership wait.
+        state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
         const HRESULT closeResult = state.list->Close(); recording = false;
         if (failed(closeResult, "Close DXR command list", error)) { state.geometryReady = false; return fail(); }
         ID3D12CommandList* lists[] = {state.list.Get()}; state.queue->ExecuteCommandLists(1, lists);
@@ -862,23 +958,33 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (pathLit) {
             if (restart) ++state.giStatus.historyRevision;
             state.historyKey = nextHistory; state.historyValid = true;
-            state.accumulatedSamples = sampleOffset + batch;
+            state.accumulatedSamples = std::min(sampleOffset + batch, targetSamples);
+            state.sampleSequence = sequenceOffset + batch;
             state.giStatus.effective = GlobalIlluminationMethod::PathTracing;
-            state.giStatus.reason = state.accumulatedSamples >= targetSamples ? "Target samples reached." : "Accumulating linear HDR samples.";
+            state.giStatus.reason = realtime
+                ? "Realtime indirect lighting; sampling continuously with a bounded HDR history."
+                : state.accumulatedSamples >= targetSamples ? "Target samples reached." : "Accumulating linear HDR samples.";
         } else if (pathRequested) {
             state.giStatus.effective = GlobalIlluminationMethod::Disabled;
             state.giStatus.reason = "Path tracing is paused in this viewport debug mode.";
         } else {
-            state.historyValid = false; state.accumulatedSamples = 0;
+            state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
             state.giStatus.effective = GlobalIlluminationMethod::Disabled;
             state.giStatus.reason = "Global illumination is disabled; using the hardware preview.";
         }
         state.giStatus.accumulatedSamples = state.accumulatedSamples;
-        ++state.dispatches;
-        state.message = "D3D12 DXR 1.1 active: " + std::to_string(state.triangleCount) + " triangles, hardware primary rays, " +
-            (frame.reflections ? "reflections on, " : "reflections off, ") + (frame.shadows ? "shadows on." : "shadows off.");
-        if (pathRequested) state.message += " Path tracing " + std::to_string(state.accumulatedSamples) + "/" +
-            std::to_string(targetSamples) + " samples. " + state.giStatus.reason;
+        state.indirectReady = realtimeLit;
+        state.dispatches += realtimeLit ? 2u : 1u;
+        state.message = "D3D12 DXR 1.1 active: " + std::to_string(state.triangleCount) + " triangles. ";
+        if (pathRequested) {
+            state.message += (realtime ? "Realtime GI " : "Progressive GI ") + std::to_string(state.accumulatedSamples) + "/" +
+                std::to_string(targetSamples) + " samples; indirect diffuse " +
+                (frame.globalIllumination.indirectDiffuse ? "on, " : "off, ") + "indirect specular " +
+                (frame.globalIllumination.indirectSpecular ? "on. " : "off. ") + state.giStatus.reason;
+        } else {
+            state.message += std::string(frame.reflections ? "Reflections on, " : "Reflections off, ") +
+                (frame.shadows ? "shadows on." : "shadows off.");
+        }
         return true;
     } catch (const std::exception& exception) {
         if (recording) { state.list->Close(); state.geometryReady = false; }
@@ -888,6 +994,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
 }
 
 ID3D11Texture2D* HardwareRayTracing::output() const { return impl_->sharedOutput.Get(); }
+ID3D11ShaderResourceView* HardwareRayTracing::indirectLighting() const {
+    return impl_->indirectReady ? impl_->indirectView.Get() : nullptr;
+}
 std::string HardwareRayTracing::status() const { return impl_->message; }
 std::uint64_t HardwareRayTracing::dispatchCount() const { return impl_->dispatches; }
 GlobalIlluminationStatus HardwareRayTracing::globalIlluminationStatus() const { return impl_->giStatus; }

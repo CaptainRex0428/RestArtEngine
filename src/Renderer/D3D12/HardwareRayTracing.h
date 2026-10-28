@@ -10,6 +10,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11ShaderResourceView;
 namespace rae::scene { class World; }
 namespace rae::assets { class AssetLibrary; struct MaterialAsset; }
 
@@ -47,6 +48,10 @@ public:
     // Borrowed until the next render/resize or shutdown. A successful render
     // queues a DX11 wait, so subsequent copies on the borrowed context are safe.
     [[nodiscard]] ID3D11Texture2D* output() const;
+    // Linear indirect lighting for the raster scene. Null unless the latest
+    // successful render produced a lit realtime GI frame. The caller must
+    // unbind its SRV before the next render; the bridge orders GPU ownership.
+    [[nodiscard]] ID3D11ShaderResourceView* indirectLighting() const;
     [[nodiscard]] std::string status() const;
     [[nodiscard]] std::uint32_t validationErrorCount() const;
     [[nodiscard]] std::uint64_t dispatchCount() const;
