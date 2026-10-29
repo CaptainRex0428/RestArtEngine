@@ -134,7 +134,26 @@ add_executable(GenerateEngineMeshes EXCLUDE_FROM_ALL tools/GenerateEngineMeshes.
 target_include_directories(GenerateEngineMeshes PRIVATE include vendor/nlohmann/single_include)
 target_link_libraries(GenerateEngineMeshes PRIVATE ufbx)
 target_compile_definitions(GenerateEngineMeshes PRIVATE NOMINMAX)
+add_executable(GenerateCornellBox EXCLUDE_FROM_ALL tools/GenerateCornellBox.cpp
+    src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetFile.cpp
+    src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+target_include_directories(GenerateCornellBox PRIVATE include vendor/nlohmann/single_include)
+target_link_libraries(GenerateCornellBox PRIVATE ufbx)
+target_compile_definitions(GenerateCornellBox PRIVATE NOMINMAX)
+if(MSVC)
+    target_compile_options(GenerateCornellBox PRIVATE /W4 /permissive- /utf-8)
+endif()
 if(BUILD_TESTING)
+    add_executable(ScenePresentationTests tests/ScenePresentationTests.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+    target_include_directories(ScenePresentationTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(ScenePresentationTests PRIVATE ufbx)
+    target_compile_definitions(ScenePresentationTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(ScenePresentationTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME ScenePresentationTests COMMAND ScenePresentationTests)
     add_executable(MaterialRenderStateTests tests/MaterialRenderStateTests.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp
         src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp)

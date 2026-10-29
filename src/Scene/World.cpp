@@ -1,11 +1,87 @@
 #include "RestArtEngine/Scene/World.h"
 #include "../Assets/AssetSerialization.h"
 #include <algorithm>
+#include <cmath>
 
 namespace rae::scene {
 namespace {
 using assets::detail::Json;
 using assets::detail::readId;
+void bounded(float value, float low, float high, const char* name) {
+    if (!std::isfinite(value) || value < low || value > high)
+        throw std::runtime_error(std::string("Invalid scene ") + name + ".");
+}
+float readNumber(const Json& value, const char* name) {
+    if (!value.is_number()) throw std::runtime_error(std::string("Scene ") + name + " must be numeric.");
+    return value.get<float>();
+}
+void readVector(const Json& value, float (&destination)[3], const char* name) {
+    if (!value.is_array() || value.size() != 3)
+        throw std::runtime_error(std::string("Scene ") + name + " must contain three numbers.");
+    for (int axis = 0; axis < 3; ++axis) destination[axis] = readNumber(value[axis], name);
+}
+void validatePresentation(const World& world) {
+    if (world.startupCamera) {
+        const auto& camera = *world.startupCamera;
+        bounded(camera.yaw, -1000000, 1000000, "camera yaw");
+        bounded(camera.pitch, -1.55f, 1.55f, "camera pitch");
+        bounded(camera.distance, 2, 30, "camera distance");
+        bounded(camera.exposure, .01f, 64, "camera exposure");
+        for (float value : camera.target) bounded(value, -1000000, 1000000, "camera target");
+    }
+    if (!world.environment.overrideLighting) return;
+    const auto& environment = world.environment;
+    bounded(environment.directionalIntensity, 0, 100000, "directional intensity");
+    bounded(environment.environmentIntensity, 0, 10000, "environment intensity");
+    const auto& light = environment.areaLight;
+    double lengthU = 0, lengthV = 0, product = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        bounded(light.center[axis], -1000000, 1000000, "area light center");
+        bounded(light.radiance[axis], 0, 1000000, "area light radiance");
+        bounded(light.halfAxisU[axis], -10000, 10000, "area light axis U");
+        bounded(light.halfAxisV[axis], -10000, 10000, "area light axis V");
+        lengthU += double(light.halfAxisU[axis]) * light.halfAxisU[axis];
+        lengthV += double(light.halfAxisV[axis]) * light.halfAxisV[axis];
+        product += double(light.halfAxisU[axis]) * light.halfAxisV[axis];
+    }
+    if (lengthU < 1e-8 || lengthV < 1e-8 || std::abs(product) > 1e-4 * std::sqrt(lengthU * lengthV))
+        throw std::runtime_error("Scene area light axes must be nonzero and perpendicular.");
+}
+void readPresentation(const Json& value, World& world) {
+    if (value.contains("camera")) {
+        const auto& input = value.at("camera");
+        if (!input.is_object()) throw std::runtime_error("Scene camera must be an object.");
+        SceneCamera camera;
+        camera.yaw = readNumber(input.at("yaw"), "camera yaw");
+        camera.pitch = readNumber(input.at("pitch"), "camera pitch");
+        camera.distance = readNumber(input.at("distance"), "camera distance");
+        readVector(input.at("target"), camera.target, "camera target");
+        camera.exposure = readNumber(input.at("exposure"), "camera exposure");
+        world.startupCamera = camera;
+    }
+    if (value.contains("lighting")) {
+        const auto& input = value.at("lighting");
+        if (!input.is_object()) throw std::runtime_error("Scene lighting must be an object.");
+        auto& environment = world.environment;
+        environment.overrideLighting = true;
+        if (input.contains("directionalIntensity"))
+            environment.directionalIntensity = readNumber(input.at("directionalIntensity"), "directional intensity");
+        if (input.contains("environmentIntensity"))
+            environment.environmentIntensity = readNumber(input.at("environmentIntensity"), "environment intensity");
+        if (input.contains("areaLight")) {
+            const auto& source = input.at("areaLight");
+            if (!source.is_object()) throw std::runtime_error("Scene area light must be an object.");
+            auto& light = environment.areaLight;
+            if (!source.at("enabled").is_boolean()) throw std::runtime_error("Scene area light enabled must be boolean.");
+            light.enabled = source.at("enabled").get<bool>();
+            readVector(source.at("center"), light.center, "area light center");
+            readVector(source.at("halfAxisU"), light.halfAxisU, "area light axis U");
+            readVector(source.at("halfAxisV"), light.halfAxisV, "area light axis V");
+            readVector(source.at("radiance"), light.radiance, "area light radiance");
+        }
+    }
+    validatePresentation(world);
+}
 void validateActor(const Actor& actor, const assets::AssetLibrary& library) {
     readId(Json(actor.id));
     if (actor.name.empty()) throw std::runtime_error("Actor name cannot be empty.");
@@ -85,12 +161,14 @@ const Actor* World::findActor(ActorId id) const {
     return it==actors.end()?nullptr:&*it;
 }
 void World::createDefaultScene() {
+    environment = {}; startupCamera.reset();
     actors.clear(); nextActorId_=1;
     const auto sphere=createActor("Sphere",1,1);
     findActor(sphere)->transform.position[1]=1;
     createActor("Ground",2,2);
 }
 void World::createDefaultScene(const assets::AssetLibrary& library) {
+    environment = {}; startupCamera.reset();
     const auto pick = [&library](std::string_view name, assets::AssetId fallback) {
         for (const auto& material : library.materials)
             if (material.name == name) return material.id;
@@ -103,12 +181,25 @@ void World::createDefaultScene(const assets::AssetLibrary& library) {
 }
 bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& library, std::string& error) const {
     try {
+        validatePresentation(*this);
         // Version 3 stores asset references only: materials and meshes live in
         // .rasset containers under Content, the scene keeps Actor data.
         Json value={{"format","RAEngine.Scene"},{"version",3},{"actors",Json::array()},
             {"materials",Json::array()},{"meshes",Json::array()}};
         // Written only when non-default so existing sky scenes keep their file shape.
         if (blackBackground) value["background"]="black";
+        if (startupCamera) {
+            const auto& camera = *startupCamera;
+            value["camera"] = {{"yaw",camera.yaw},{"pitch",camera.pitch},{"distance",camera.distance},
+                {"target",camera.target},{"exposure",camera.exposure}};
+        }
+        if (environment.overrideLighting) {
+            const auto& light = environment.areaLight;
+            value["lighting"] = {{"directionalIntensity",environment.directionalIntensity},
+                {"environmentIntensity",environment.environmentIntensity},
+                {"areaLight",{{"enabled",light.enabled},{"center",light.center},{"halfAxisU",light.halfAxisU},
+                    {"halfAxisV",light.halfAxisV},{"radiance",light.radiance}}}};
+        }
         std::unordered_set<assets::AssetId> meshIds,materialIds,actorIds;
         for (const auto& material:library.materials) {
             if (!materialIds.insert(material.id).second) throw std::runtime_error("Duplicate material ID.");
@@ -148,6 +239,7 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
         assets::AssetLibrary builtin; builtin.createDefaults();
         assets::AssetLibrary staged;
         World next;
+        readPresentation(value, next);
         if (value.contains("background")) {
             if (!value.at("background").is_string()) throw std::runtime_error("Scene background must be a string.");
             const auto background=value.at("background").get<std::string>();

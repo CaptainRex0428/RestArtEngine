@@ -1279,7 +1279,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     data.cameraPosition.w = world.blackBackground ? 1.0f : 0.0f;
     data.baseColor = XMFLOAT4(settings.baseColor[0], settings.baseColor[1], settings.baseColor[2], 1);
     XMStoreFloat4(&data.lightDirectionIntensity, XMVector3Normalize(XMVectorSet(-3, 6, -2, 0)));
-    data.lightDirectionIntensity.w = settings.lightIntensity;
+    data.lightDirectionIntensity.w = world.environment.overrideLighting
+        ? world.environment.directionalIntensity : settings.lightIntensity;
     data.parameters = XMFLOAT4(std::clamp(settings.roughness, 0.04f, 1.0f),
         std::clamp(settings.metallic, 0.0f, 1.0f), settings.exposure,
         (settings.rayTracing && rayTracingSupported(world, assets)) ? 1.0f : 0.0f);
@@ -1460,6 +1461,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         frame.reflections = settings.hardwareRayTracingReflections;
         frame.shadows = settings.hardwareRayTracingShadows;
         frame.globalIllumination = settings.globalIllumination;
+        const auto& environment = world.environment;
+        if (environment.overrideLighting && settings.globalIllumination.mode == GlobalIlluminationMode::Progressive) {
+            const auto& light = environment.areaLight;
+            frame.areaLight = {light.center[0], light.center[1], light.center[2], light.enabled ? 1.0f : 0.0f,
+                light.halfAxisU[0], light.halfAxisU[1], light.halfAxisU[2], environment.environmentIntensity,
+                light.halfAxisV[0], light.halfAxisV[1], light.halfAxisV[2], 0,
+                light.radiance[0], light.radiance[1], light.radiance[2], 0};
+        }
         frame.historyEpoch = state.giHistoryEpoch;
         state.context->OMSetRenderTargets(0, nullptr, nullptr);
         state.context->PSSetShaderResources(0, 5, emptyViews);
@@ -1478,6 +1487,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         }
     }
     GlobalIlluminationConstants giData{};
+    if (diagnosticMainScene && world.environment.overrideLighting &&
+        (world.environment.areaLight.enabled || world.environment.environmentIntensity != 1.0f) &&
+        (!state.hardwareActive || settings.globalIllumination.method != GlobalIlluminationMethod::PathTracing ||
+            settings.globalIllumination.mode != GlobalIlluminationMode::Progressive)) {
+        const std::string limitation = " Scene area light/environment scale require hardware progressive Path Tracing.";
+        if (state.giStatus.reason.find(limitation) == std::string::npos) state.giStatus.reason += limitation;
+        if (state.hardwareStatus.find(limitation) == std::string::npos) state.hardwareStatus += limitation;
+    }
     giData.viewport = XMFLOAT4(indirectView ? 1.0f : 0.0f,
         static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0.0f);
     state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);

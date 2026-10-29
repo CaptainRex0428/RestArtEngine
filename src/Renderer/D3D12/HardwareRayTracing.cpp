@@ -200,8 +200,9 @@ struct HardwareConstants {
     float traceOptions[4];
     std::uint32_t accumulationInfo[4]; // sample offset, batch, bounces, GI method
     std::uint32_t giOptions[4]; // mode, contribution bits, pass, continuous sample sequence
+    std::array<float, 16> areaLight;
 };
-static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 128);
+static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 192);
 
 // Compare the full frame contract rather than one combined frame hash. Geometry
 // hashes are the same immutable-content identities used by the upload cache.
@@ -209,6 +210,7 @@ static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 128);
 struct HistoryKey {
     std::array<float, 36> sceneConstants;
     std::array<float, 16> inverseViewProjection;
+    std::array<float, 16> areaLight;
     std::uint64_t positions = 0, triangles = 0, normals = 0;
     std::uint64_t pipelineRevision = 0, epoch = 0;
     std::uint32_t width = 0, height = 0, maxBounces = 0, method = 0, mode = 0, contributions = 0;
@@ -372,14 +374,15 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             auto* constants = reflection->GetConstantBufferByName(binding.Name);
             D3D12_SHADER_BUFFER_DESC constantDescription{};
             if (failed(constants->GetDesc(&constantDescription), "Read DXR constant buffer", error)) return false;
-            if (constantDescription.Size != (isScene ? 144u : 128u)) {
+            if (constantDescription.Size != (isScene ? 144u : 192u)) {
                 error = std::string(binding.Name) + ": DXR constant buffer size does not match the CPU contract."; return false;
             }
             struct Field { const char* name; UINT offset, size; };
             static constexpr Field sceneFields[] = {{"viewProjection",0,64},{"cameraPosition",64,16},{"baseColor",80,16},
                 {"lightDirectionIntensity",96,16},{"parameters",112,16},{"viewportDebug",128,16}};
             static constexpr Field hardwareFields[] = {{"inverseViewProjection",0,64},{"outputInfo",64,16},
-                {"traceOptions",80,16},{"accumulationInfo",96,16},{"giOptions",112,16}};
+                {"traceOptions",80,16},{"accumulationInfo",96,16},{"giOptions",112,16},
+                {"areaLightCenter",128,16},{"areaLightU",144,16},{"areaLightV",160,16},{"areaLightRadiance",176,16}};
             const Field* fields = isScene ? sceneFields : hardwareFields;
             const auto count = isScene ? std::size(sceneFields) : std::size(hardwareFields);
             for (std::size_t fieldIndex = 0; fieldIndex < count; ++fieldIndex) {
@@ -932,6 +935,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         nextHistory.sceneConstants[34] = 0.0f; // debug views pause without poisoning HDR history
         nextHistory.sceneConstants[35] = 0.0f; // GI uses its own hardware shadow visibility
         nextHistory.inverseViewProjection = frame.inverseViewProjection;
+        nextHistory.areaLight = frame.areaLight;
         nextHistory.positions = positionHash; nextHistory.triangles = triangleHash; nextHistory.normals = normalHash;
         nextHistory.pipelineRevision = state.pipelineRevision; nextHistory.epoch = frame.historyEpoch;
         nextHistory.width = frame.width; nextHistory.height = frame.height; nextHistory.maxBounces = maxBounces;
@@ -964,7 +968,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
             {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), 0, 0},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
-            {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}};
+            {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}, frame.areaLight};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));
         auto resolve = hardware;
         resolve.giOptions[2] = 1;

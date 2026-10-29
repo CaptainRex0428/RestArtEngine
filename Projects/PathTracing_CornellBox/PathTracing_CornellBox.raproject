@@ -1,0 +1,24 @@
+{
+  "contentRoot": "Content",
+  "defaultScene": "Content/Scenes/CornellBox.rascene",
+  "engineAssociation": "0.2.0",
+  "engineHash": "dev-0.2.0",
+  "engineRoot": "../..",
+  "engineVersion": "0.2.0",
+  "format": "RAEngine.Project",
+  "name": "PathTracing_CornellBox",
+  "rendering": {
+    "globalIllumination": {
+      "indirectDiffuse": true,
+      "indirectSpecular": true,
+      "maxBounces": 8,
+      "method": "pathTracing",
+      "mode": "progressive",
+      "samplesPerFrame": 4,
+      "targetSamples": 1024
+    },
+    "hardwareRayTracing": true
+  },
+  "shaderRoot": "Shaders",
+  "version": 3
+}

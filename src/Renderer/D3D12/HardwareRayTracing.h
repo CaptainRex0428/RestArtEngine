@@ -21,6 +21,9 @@ namespace rae::renderer::d3d12 {
 struct Frame {
     std::array<float, 36> sceneConstants{};
     std::array<float, 16> inverseViewProjection{};
+    // Centre/enabled, half-axis U/environment scale, half-axis V/reserved,
+    // emitted radiance/reserved. Kept outside the locked raster b0 contract.
+    std::array<float, 16> areaLight{0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,0};
     std::uint32_t width = 0, height = 0;
     bool reflections = true, shadows = true;
     GlobalIlluminationSettings globalIllumination;

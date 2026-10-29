@@ -1,6 +1,8 @@
 #pragma once
 
 #include "RestArtEngine/Assets/AssetLibrary.h"
+#include "RestArtEngine/Scene/SceneEnvironment.h"
+#include <optional>
 
 namespace rae::scene {
 using ActorId = std::uint64_t;
@@ -26,6 +28,8 @@ public:
     // Scene-wide backdrop. false keeps the procedural sky gradient; true renders
     // a solid black background, which is what the ray-tracing test scene uses.
     bool blackBackground = false;
+    SceneEnvironment environment;
+    std::optional<SceneCamera> startupCamera;
     ActorId createActor(std::string name, assets::AssetId mesh, assets::AssetId material);
     bool removeActor(ActorId id);
     ActorId duplicateActor(ActorId id);

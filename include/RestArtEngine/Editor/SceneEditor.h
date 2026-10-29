@@ -20,6 +20,8 @@ namespace rae::editor {
 class SceneEditor {
 public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
+    // Apply the scene opening view; navigating does not alter this bookmark.
+    void applyStartupCamera(renderer::SceneSettings& settings);
     // Borrowed service; the caller keeps it alive until detached or editor destruction.
     void setGarbageCollector(rae::GarbageCollector* gc, const std::filesystem::path& settingsPath);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
@@ -89,6 +91,7 @@ public:
     // same ids the UI uses can be invoked and their enablement inspected.
     [[nodiscard]] const EditorCommandRegistry& commands() const noexcept { return commands_; }
 private:
+    bool startupCameraPending_ = false;
     void drawOutliner();
     void drawScene(const renderer::SceneRenderer& renderer);
     void drawSceneLighting(renderer::SceneSettings& settings);

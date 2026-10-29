@@ -72,10 +72,11 @@ float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
 
 bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
     Surface material, bool includeDiffuse, bool includeSpecular,
-    inout uint randomState, out float3 incoming, out float3 weight)
+    inout uint randomState, out float3 incoming, out float3 weight, out float pdf)
 {
     incoming = normal;
     weight = 0.0;
+    pdf = 0.0;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
     float specularEnergy = includeSpecular
         ? PathLuminance(Fresnel(saturate(dot(normal, view)), f0)) : 0.0;
@@ -109,10 +110,99 @@ bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
     if (nl <= 1e-6 || dot(geometricNormal, incoming) <= 1e-6) return false;
     float specularPdf;
     float3 brdf = PathBrdf(normal, view, incoming, material, includeDiffuse, includeSpecular, specularPdf);
-    float pdf = specularProbability * specularPdf + (1.0 - specularProbability) * nl / PI;
+    pdf = specularProbability * specularPdf + (1.0 - specularProbability) * nl / PI;
     if (pdf <= 1e-12) return false;
     weight = brdf * nl / pdf;
     return all(isfinite(weight)) && any(weight > 0.0);
+}
+
+bool PathAreaHit(float3 origin, float3 direction, out float distance)
+{
+    distance = 1e20;
+    if (areaLightCenter.w < 0.5) return false;
+    float3 crossed = cross(areaLightU.xyz, areaLightV.xyz);
+    float denominator = dot(crossed, direction);
+    if (abs(denominator) < 1e-10) return false;
+    float candidate = dot(crossed, areaLightCenter.xyz - origin) / denominator;
+    if (candidate <= RAY_EPSILON) return false;
+    float3 offset = origin + candidate * direction - areaLightCenter.xyz;
+    if (abs(dot(offset, areaLightU.xyz)) > dot(areaLightU.xyz, areaLightU.xyz) ||
+        abs(dot(offset, areaLightV.xyz)) > dot(areaLightV.xyz, areaLightV.xyz)) return false;
+    distance = candidate;
+    return true;
+}
+
+float PathAreaPdf(float3 direction, float distance)
+{
+    float3 crossed = cross(areaLightU.xyz, areaLightV.xyz);
+    float area = 4.0 * length(crossed);
+    float cosine = dot(normalize(crossed), -direction);
+    return cosine > 1e-8 && area > 1e-8 ? distance * distance / (area * cosine) : 0.0;
+}
+
+float PathFullBrdfPdf(float3 normal, float3 view, float3 incoming, Surface material, float specularPdf)
+{
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
+    float specularEnergy = PathLuminance(Fresnel(saturate(dot(normal, view)), f0));
+    float diffuseEnergy = PathLuminance(material.albedo) * (1.0 - material.metallic);
+    float probability = diffuseEnergy <= 1e-8 ? 1.0
+        : clamp(specularEnergy / max(specularEnergy + diffuseEnergy, 1e-8), 0.05, 0.95);
+    return probability * specularPdf + (1.0 - probability) * saturate(dot(normal, incoming)) / PI;
+}
+
+float PathMisWeight(float sampledPdf, float otherPdf)
+{
+    // Ratio form avoids squaring large solid-angle densities near grazing rays.
+    float ratio = otherPdf / max(sampledPdf, 1e-30);
+    return 1.0 / (1.0 + ratio * ratio);
+}
+
+bool PathAreaVisible(float3 origin, float3 direction, float distance)
+{
+    if (outputInfo.w == 0) return true;
+    float sceneDistance;
+    float3 ignoredNormal;
+    int ignoredObject;
+    // Test only the segment ending at the sampled light point. Geometry behind
+    // the ceiling emitter must not shadow it. Use the existing shadow face rules.
+    return !TraceScene(origin, direction, sceneDistance, ignoredNormal, ignoredObject, true)
+        || sceneDistance >= distance - RAY_EPSILON;
+}
+
+float3 PathAreaDirect(float3 position, float3 normal, float3 geometricNormal,
+    float3 view, Surface material, inout uint randomState)
+{
+    if (areaLightCenter.w < 0.5) return 0.0;
+    float3 origin = position + geometricNormal * RAY_EPSILON;
+    float3 radiance = 0.0;
+    float u = PathRandom(randomState) * 2.0 - 1.0;
+    float v = PathRandom(randomState) * 2.0 - 1.0;
+    float3 delta = areaLightCenter.xyz + u * areaLightU.xyz + v * areaLightV.xyz - origin;
+    float distance = length(delta);
+    float3 incoming = delta / max(distance, 1e-8);
+    float lightPdf = PathAreaPdf(incoming, distance);
+    float cosine = dot(normal, incoming);
+    if (lightPdf > 0.0 && cosine > 0.0 && dot(geometricNormal, incoming) > 0.0 &&
+        PathAreaVisible(origin, incoming, distance))
+    {
+        float specularPdf;
+        float3 brdf = PathBrdf(normal, view, incoming, material, true, true, specularPdf);
+        float brdfPdf = PathFullBrdfPdf(normal, view, incoming, material, specularPdf);
+        radiance += brdf * cosine * areaLightRadiance.xyz / lightPdf * PathMisWeight(lightPdf, brdfPdf);
+    }
+    // A second direct-light estimator resolves small, near-mirror highlights.
+    // Use full BRDF here: GI contribution switches only govern indirect paths.
+    // The ordinary continuation below does not add emitter radiance again.
+    float3 weight;
+    float brdfPdf;
+    if (PathSampleBrdf(normal, geometricNormal, view, material, true, true,
+        randomState, incoming, weight, brdfPdf) && PathAreaHit(origin, incoming, distance))
+    {
+        lightPdf = PathAreaPdf(incoming, distance);
+        if (lightPdf > 0.0 && PathAreaVisible(origin, incoming, distance))
+            radiance += weight * areaLightRadiance.xyz * PathMisWeight(brdfPdf, lightPdf);
+    }
+    return radiance;
 }
 
 float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
@@ -122,6 +212,8 @@ float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
     float nl = dot(normal, light);
     if (nl <= 0.0 || dot(geometricNormal, light) <= 0.0) return 0.0;
     if (outputInfo.w != 0 && TraceSceneAny(position + geometricNormal * RAY_EPSILON, light)) return 0.0;
+    float emitterDistance;
+    if (outputInfo.w != 0 && PathAreaHit(position + geometricNormal * RAY_EPSILON, light, emitterDistance)) return 0.0;
     float unusedPdf;
     // GI lobe switches control indirect transport. Direct highlights remain
     // part of the material's direct lighting in both modes.
@@ -169,13 +261,24 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
         float3 normal;
         int object;
         bool hit = TraceScene(origin, direction, distance, normal, object, false);
+        float emitterDistance;
+        if (PathAreaHit(origin, direction, emitterDistance) && emitterDistance < distance &&
+            (depth != 0 || emitterDistance <= farDistance))
+        {
+            // The rectangle is opaque from both sides but emits from cross(U,V).
+            // Secondary direct visibility is already evaluated by the paired
+            // MIS estimators at the preceding surface; do not count it twice.
+            if (depth == 0 && dot(cross(areaLightU.xyz, areaLightV.xyz), -direction) > 0.0)
+                radiance += throughput * areaLightRadiance.xyz;
+            break;
+        }
         if (depth == 0 && distance > farDistance) hit = false;
         if (!hit)
         {
             // Black backdrop is a camera-visibility preference, matching the
             // preview contract; it does not remove environment illumination.
             if (depth != 0 || (!realtime && cameraPosition.w < 0.5))
-                radiance += throughput * Environment(direction, 0.0);
+                radiance += throughput * Environment(direction, 0.0) * areaLightU.w;
             break;
         }
         if (depth == maximumSurfaces) break;
@@ -197,14 +300,18 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
         // Realtime exports only indirect radiance; the raster lighting pass
         // owns the primary direct light, shadows and background.
         if (depth != 0 || !realtime)
+        {
             radiance += throughput * PathDirectLight(position, normal, geometricNormal, -direction, material);
+            radiance += throughput * PathAreaDirect(position, normal, geometricNormal, -direction, material, randomState);
+        }
         float3 incoming, weight;
+        float continuationPdf;
         // Classify contributions at the receiving surface. Subsequent path
         // vertices retain both lobes, including diffuse GI seen in a mirror.
         bool includeDiffuse = depth != 0 || (giOptions.y & 1u) != 0;
         bool includeSpecular = depth != 0 || (giOptions.y & 2u) != 0;
         if (!PathSampleBrdf(normal, geometricNormal, -direction, material, includeDiffuse, includeSpecular,
-            randomState, incoming, weight)) break;
+            randomState, incoming, weight, continuationPdf)) break;
         throughput *= weight;
         if (!all(isfinite(throughput)) || !any(throughput > 0.0)) break;
         if (depth >= 3)

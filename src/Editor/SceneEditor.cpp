@@ -155,6 +155,7 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     world_.createDefaultScene(assets_);
     scenePath_ = project_.defaultScene;
     if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    startupCameraPending_ = true;
     refreshContent();
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
@@ -1064,11 +1065,68 @@ void SceneEditor::setActorVisible(scene::ActorId id, bool visible) {
     status_ = visible ? "Actor visible." : "Actor hidden.";
 }
 
+void SceneEditor::applyStartupCamera(renderer::SceneSettings& settings) {
+    startupCameraPending_ = false;
+    if (!world_.startupCamera) return;
+    const auto& camera = *world_.startupCamera;
+    settings.cameraYaw = camera.yaw;
+    settings.cameraPitch = camera.pitch;
+    settings.cameraDistance = camera.distance;
+    std::copy(std::begin(camera.target), std::end(camera.target), settings.cameraTarget);
+    settings.exposure = camera.exposure;
+}
+
 void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
+    ImGui::SeparatorText("Opening view");
+    if (ImGui::Button("Store current view")) {
+        scene::SceneCamera camera;
+        camera.yaw = settings.cameraYaw; camera.pitch = settings.cameraPitch;
+        camera.distance = settings.cameraDistance; camera.exposure = settings.exposure;
+        std::copy(std::begin(settings.cameraTarget), std::end(settings.cameraTarget), camera.target);
+        world_.startupCamera = camera; sceneDirty_ = true;
+        status_ = "Opening view updated. Save Scene to persist it.";
+    }
+    if (world_.startupCamera) {
+        ImGui::SameLine();
+        if (ImGui::Button("Restore view")) applyStartupCamera(settings);
+        if (ImGui::Button("Clear opening view")) { world_.startupCamera.reset(); sceneDirty_ = true; }
+    }
     ImGui::SeparatorText("Lighting");
+    auto& environment = world_.environment;
+    if (ImGui::Checkbox("Save lighting in scene", &environment.overrideLighting)) {
+        if (environment.overrideLighting) environment.directionalIntensity = settings.lightIntensity;
+        sceneDirty_ = true;
+    }
     ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12.0f, "Key light %.1f");
-    ImGui::TextDisabled("Temporary scene-level key light; it moves into a direct-light Actor component later.");
+    if (environment.overrideLighting) {
+        sceneDirty_ |= ImGui::SliderFloat("##Light", &environment.directionalIntensity, 0, 12.0f, "Key light %.1f");
+        ImGui::SetNextItemWidth(-1);
+        sceneDirty_ |= ImGui::SliderFloat("Environment intensity", &environment.environmentIntensity, 0, 4);
+        auto& light = environment.areaLight;
+        sceneDirty_ |= ImGui::Checkbox("Rectangle area light", &light.enabled);
+        if (light.enabled) {
+            ImGui::TextWrapped("Rectangle lighting requires progressive Path Tracing. Axis orientation is authored in the scene file.");
+            sceneDirty_ |= ImGui::DragFloat3("Light center", light.center, .01f, -1000000, 1000000, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            float extentU = 0, extentV = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                extentU += light.halfAxisU[axis] * light.halfAxisU[axis];
+                extentV += light.halfAxisV[axis] * light.halfAxisV[axis];
+            }
+            extentU = std::sqrt(extentU); extentV = std::sqrt(extentV);
+            float dimensions[2] = {extentU * 2, extentV * 2};
+            if (ImGui::DragFloat2("Light size", dimensions, .01f, .001f, 1000, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    light.halfAxisU[axis] *= dimensions[0] / (2 * extentU);
+                    light.halfAxisV[axis] *= dimensions[1] / (2 * extentV);
+                }
+                sceneDirty_ = true;
+            }
+            sceneDirty_ |= ImGui::DragFloat3("Light radiance", light.radiance, .1f, 0, 1000000, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        }
+    } else {
+        ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12.0f, "Key light %.1f");
+        ImGui::TextDisabled("Temporary key light; enable scene lighting to persist it.");
+    }
     ImGui::SeparatorText("Direct-light shadows");
     ImGui::TextDisabled("Ray tracing: all mesh actors");
     ImGui::Text("Shadow method");
@@ -1348,6 +1406,7 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     }
     if (!stagedWorld.load(path, stagedAssets, error)) return false;
     world_ = std::move(stagedWorld);
+    startupCameraPending_ = true;
     assets_ = std::move(stagedAssets);
     scenePath_ = path;
     sceneDirty_ = false;
@@ -2716,6 +2775,7 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
 }
 
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
+    if (startupCameraPending_) applyStartupCamera(settings);
     // Capture requested feature values even while Project Settings is closed.
     // Save All and the close prompt share the same configuration draft.
     syncProjectSettings(settings);
@@ -2916,6 +2976,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             if (ImGui::Button("Load & replace")) {
                 std::string error;
                 if (world_.load(scenePath_, assets_, error)) {
+                    applyStartupCamera(settings);
                     // History entries reference Actors from the replaced scene.
                     undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;

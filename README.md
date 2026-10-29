@@ -240,12 +240,13 @@ Projects/RayTracing_Simple/ <- 光追测试工程
 
 版本或 hash 不匹配时，Project Manager 提供「使用引用的引擎」「更新到当前引擎」「选择引擎…」；`engineRoot` 失效时会尝试按关联自动恢复，恢复不了则明确提示无法打开。
 
-仓库自带两个示例工程，Project Manager 扫描 `Projects/*/*.raproject` 自动列出：
+仓库自带以下示例工程，Project Manager 扫描 `Projects/*/*.raproject` 自动列出：
 
 | 工程 | 用途 |
 | --- | --- |
 | `Projects/Sandbox` | 通用演示：内置球 / 平面 / 立方体、程序化网格材质、基础光照与阴影。 |
 | `Projects/RayTracing_Simple` | 光追测试：康奈尔盒（红 / 蓝侧墙、白色地面与顶面）+ 两个镜面球。配合 `--rt` 观察解析光追的反射与阴影；关闭 `--rt` 即为纯光栅化对照。 |
+| [Projects/PathTracing_CornellBox](Projects/PathTracing_CornellBox/README.md) | 渐进式硬件路径追踪：红／绿房间、矩形顶灯、三颗不同粗糙度金属球；保存初始视角与照明。 |
 
 ```powershell
 # 打开光追测试工程

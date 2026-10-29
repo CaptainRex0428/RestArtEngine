@@ -7,6 +7,10 @@ cbuffer HardwareConstants : register(b5)
     float4 traceOptions; // reflections enabled, reserved
     uint4 accumulationInfo; // sample offset, sample batch, max surface bounces, GI method
     uint4 giOptions; // update mode, first-surface lobe mask, realtime pass, independent sample sequence
+    float4 areaLightCenter; // xyz centre, w enabled
+    float4 areaLightU; // xyz half-axis U, w environment scale
+    float4 areaLightV; // xyz half-axis V, w reserved
+    float4 areaLightRadiance; // xyz emitted linear radiance, w reserved
 };
 RaytracingAccelerationStructure hardwareScene : register(t7);
 StructuredBuffer<float3> hardwareVertexNormals : register(t8);

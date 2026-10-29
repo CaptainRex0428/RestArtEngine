@@ -890,6 +890,7 @@ int wmain(int argc, wchar_t** argv) {
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
+        editor.applyStartupCamera(settings);
         struct FileDropScope {
             rae::imgui::ImGuiLayer& ui;
             ~FileDropScope() { ui.setFileDropHandler({}); }
@@ -1131,6 +1132,14 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "D3D11 debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
             << "; validation errors: " << validationErrors << '\n';
         if (validationErrors) throw std::runtime_error("D3D11 validation reported errors");
+        if (frameLimit > 0 && settings.globalIllumination.method != GlobalIlluminationMethod::Disabled) {
+            const auto gi = renderer.globalIlluminationStatus();
+            std::cout << "GI effective: " << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing" : "disabled")
+                << "; mode: " << (gi.effectiveMode == GlobalIlluminationMode::Progressive ? "progressive" : "realtime")
+                << "; samples: " << gi.accumulatedSamples << '/' << gi.targetSamples
+                << "; DXR dispatches: " << renderer.hardwareRayTracingDispatchCount() << '\n';
+            if (!gi.reason.empty()) std::cout << "GI status: " << gi.reason << '\n';
+        }
         std::cout << "Completed " << frame << " frames.\n";
         return 0;
     } catch (const std::exception& e) {
