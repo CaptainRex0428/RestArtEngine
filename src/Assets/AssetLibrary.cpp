@@ -3,6 +3,7 @@
 #include "RestArtEngine/Assets/AssetThumbnail.h"
 #include "AssetSerialization.h"
 #include "ContentFiles.h"
+#include "FbxImporter.h"
 #include <unordered_map>
 #include <algorithm>
 #include <array>
@@ -134,7 +135,7 @@ MeshAsset cubeMesh() {
 } // namespace
 
 void AssetLibrary::createDefaults() {
-    meshes.clear(); materials.clear(); nextMeshId_=4;
+    meshes.clear(); materials.clear();
     meshes.push_back(sphereMesh()); meshes.push_back(planeMesh()); meshes.push_back(cubeMesh());
     MaterialAsset copper; copper.id=1; copper.name="Copper";
     MaterialAsset ground; ground.id=2; ground.name="Ground";
@@ -241,11 +242,30 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
         }
         if (stream.bad()) throw std::runtime_error("Failed reading OBJ.");
         if (mesh.indices.empty()) throw std::runtime_error("OBJ contains no renderable faces.");
-        mesh.id=detail::nextId(meshes,nextMeshId_);
+        do { mesh.id = generateAssetId(); } while (findMesh(mesh.id));
         meshes.push_back(std::move(mesh));
         result=meshes.back().id; error.clear(); return true;
     } catch (const std::exception& e) {error=e.what();return false;}
 }
+bool AssetLibrary::importFbx(const std::filesystem::path& path, AssetId& result, std::string& error,
+    MeshImportDiagnostics* diagnostics, const AssetImportOptions& options) {
+    if (diagnostics) *diagnostics = {};
+    try {
+        MeshAsset mesh;
+        MeshImportDiagnostics importDiagnostics;
+        if (!detail::readFbxMesh(path, mesh, error, &importDiagnostics, options)) return false;
+        do { mesh.id = generateAssetId(); } while (findMesh(mesh.id));
+        meshes.push_back(std::move(mesh));
+        result = meshes.back().id;
+        if (diagnostics) *diagnostics = importDiagnostics;
+        error.clear();
+        return true;
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        return false;
+    }
+}
+
 bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::string& error) const {
     try {
         const auto existing = storedAssetPaths(folder, AssetFileType::Material);
@@ -372,14 +392,54 @@ bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std:
     }
 }
 
+bool AssetLibrary::loadEngineMeshes(const std::filesystem::path& folder, std::string& error) {
+    try {
+        if (!std::filesystem::is_directory(folder) || detail::contentLink(folder))
+            throw std::runtime_error("Engine mesh directory is missing or linked: " + detail::pathUtf8(folder));
+        std::vector<MeshAsset> loaded;
+        std::unordered_set<AssetId> ids;
+        for (const auto& path : detail::contentFiles(folder)) {
+            if (!isAssetContainerFile(path)) continue;
+            AssetFile file;
+            if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+            if (file.type != AssetFileType::StaticMesh) continue;
+            if (!isEngineAssetId(file.id)) throw std::runtime_error("Engine mesh must use a reserved identity.");
+            if (!ids.insert(file.id).second) throw std::runtime_error("Duplicate Engine mesh GUID.");
+            if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
+            MeshAsset mesh;
+            if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+            mesh.origin = AssetOrigin::Engine;
+            loaded.push_back(std::move(mesh));
+        }
+        for (const auto id : {EngineCubeMeshId, EngineSphereMeshId, EngineCylinderMeshId, EngineConeMeshId, EngineTorusMeshId, EnginePlaneMeshId})
+            if (!ids.contains(id)) throw std::runtime_error("Engine Content is missing built-in mesh " + assetIdText(id));
+        for (const auto& mesh : meshes) {
+            if (mesh.origin == AssetOrigin::Engine) continue;
+            if (isEngineAssetId(mesh.id)) throw std::runtime_error("Project mesh conflicts with a reserved Engine identity.");
+            if (!ids.insert(mesh.id).second) throw std::runtime_error("Duplicate Project mesh ID.");
+            loaded.push_back(mesh);
+        }
+        meshes = std::move(loaded);
+        error.clear();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
 bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& error) const {
     try {
         const auto existing = storedAssetPaths(folder, AssetFileType::StaticMesh);
         std::unordered_set<AssetId> ids;
         std::unordered_set<std::string> reserved;
         for (const auto& mesh : meshes) {
-            if (mesh.primitive != MeshPrimitive::Imported) continue;
             if (!ids.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
+            if (isEngineAssetId(mesh.id) != (mesh.origin == AssetOrigin::Engine))
+                throw std::runtime_error("Mesh identity does not match its Engine/Project origin.");
+        }
+        for (const auto& mesh : meshes) {
+            if (mesh.origin == AssetOrigin::Engine || mesh.primitive != MeshPrimitive::Imported) continue;
             const auto path = saveAssetPath(folder, meshAssetFileName(mesh), mesh.id, existing, reserved);
             auto file = makeMeshAssetFile(mesh);
             attachThumbnail(file, renderMeshThumbnail(mesh));
@@ -411,6 +471,8 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
                 AssetFile file;
                 if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
                 if (file.type != AssetFileType::StaticMesh) continue;
+                if (isEngineAssetId(file.id))
+                    throw std::runtime_error("Project mesh conflicts with a reserved Engine identity: " + detail::pathUtf8(path));
                 if (pass == 1 && preferredIds.contains(file.id)) continue;
                 if (!ids.insert(file.id).second)
                     throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(path));
@@ -437,7 +499,7 @@ bool AssetLibrary::ensureBuiltinMeshes(const std::filesystem::path& folder, std:
         const auto existing = storedAssetPaths(folder, AssetFileType::StaticMesh);
         std::unordered_set<std::string> reserved;
         for (const auto& mesh : meshes) {
-            if (mesh.primitive == MeshPrimitive::Imported) continue;
+            if (mesh.origin == AssetOrigin::Engine || mesh.primitive == MeshPrimitive::Imported) continue;
             const auto found = existing.find(mesh.id);
             if (found != existing.end()) {
                 AssetFile file;

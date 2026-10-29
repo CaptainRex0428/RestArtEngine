@@ -12,6 +12,7 @@
 #include <RestArtEngine/Editor/EditorCommands.h>
 #include <RestArtEngine/Editor/DiagnosticsPanel.h>
 #include <RestArtEngine/Assets/AssetRegistry.h>
+#include <RestArtEngine/Assets/AssetImport.h>
 
 namespace rae::editor {
 
@@ -67,6 +68,12 @@ public:
     // Save a new Project material without applying/saving unrelated drafts or assets.
     bool copyMaterialToProject(assets::AssetId source, std::string& error);
     [[nodiscard]] const std::string& selectedContentAsset() const noexcept { return selectedAsset_; }
+    // Native drops are queued between frames, then checked against the visible
+    // Content asset area before entering the same pipeline as Import....
+    // Coordinates use the current ImGui coordinate space (desktop with viewports).
+    void queueExternalImport(std::vector<std::filesystem::path> sources, float x, float y, unsigned sourceViewport);
+    [[nodiscard]] const assets::AssetImportReport& lastImportReport() const noexcept { return importReport_; }
+    void closeImportResults() { importResultsOpen_ = false; importResultsFocused_ = false; }
     bool openScene(const std::filesystem::path& path, std::string& error);
     bool createScene(const std::filesystem::path& path, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }
@@ -94,6 +101,7 @@ private:
     void duplicateSelectedActor();
     void duplicateForDrag();
     bool createMeshActor(assets::AssetId mesh, const scene::Transform& transform, const std::string& label);
+    void assignActorMaterial(scene::ActorId actor, assets::AssetId material);
     void registerCommands();
     void drawEditMenu();
     // Flips visibility for every selected Actor as one undoable edit (H).
@@ -138,7 +146,10 @@ private:
     void drawMaterial();
     void drawShader(renderer::SceneRenderer&);
     void selectMaterial(assets::AssetId);
-    void importMesh();
+    void chooseImportFiles();
+    void importFiles(const std::vector<std::filesystem::path>& sources, std::string_view destinationFolder);
+    void processExternalImports();
+    void drawImportResults();
     bool applyMaterial();
     void discardMaterial();
     bool saveScene(renderer::SceneRenderer* renderer = nullptr);
@@ -165,6 +176,21 @@ private:
     std::string pendingContentOpen_, pendingContentMove_, pendingContentMoveFolder_;
     assets::AssetId pendingContentCopy_ = 0;
     bool assetDragCancelled_ = false;
+    struct ExternalImport {
+        std::vector<std::filesystem::path> sources;
+        std::string destinationFolder;
+        float x = 0, y = 0;
+        unsigned sourceViewport = 0;
+        int frame = 0;
+    };
+    std::vector<ExternalImport> externalImports_;
+    assets::AssetImportReport importReport_;
+    std::string importStatus_;
+    bool importResultsOpen_ = false, importResultsFocusRequested_ = false, importResultsFocused_ = false;
+    // Rebuilt from the asset child every draw; a hidden/collapsed Content panel
+    // never retains an eligible rectangle from a previous frame.
+    unsigned contentImportWindow_ = 0;
+    float contentImportMin_[2]{}, contentImportMax_[2]{};
     // Offscreen material preview: throttled re-render of the draft parameters.
     float materialPreviewAge_ = 1.0f;
     assets::MaterialAsset materialPreviewParams_{};
@@ -190,6 +216,7 @@ private:
     assets::AssetLibrary assets_;
     scene::ActorId selectedActor_ = 0;
     scene::ActorId sceneInspectorActor_ = 0;
+    scene::ActorId materialDropOutlineActor_ = 0;
     assets::AssetId selectedMesh_ = 1, selectedMaterial_ = 1, pendingMaterial_ = 0;
     assets::MaterialAsset materialDraft_;
     std::string shaderDraft_, shaderSaved_, diagnostics_, status_;

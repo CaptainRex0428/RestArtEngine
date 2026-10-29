@@ -13,20 +13,21 @@
 | `include/RestArtEngine/Core/`、`src/Core/` | 引擎生命周期等公共基础设施。 |
 | `include/RestArtEngine/Project/`、`src/Project/` | `.raproject` 工程描述解析、引擎与工程资源路径解析验证。 |
 | `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、`StaticMeshComponent` 与场景序列化；不依赖 ImGui 或 DX11。 |
-| `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、OBJ 导入与资产文件读写。 |
+| `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、统一 OBJ／FBX 导入与资产文件读写；导入契约见 [Importing.md](Importing.md)。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
 | `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Scene / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
 | `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
 | `Content/Materials/DefaultMaterial.rasset` | 引擎发布的共享默认材质。作为只读 Engine Content 挂载，项目场景通过固定 ID 引用；修改时先复制成项目资产。 |
+| `Content/Meshes/*.rasset` | 只读引擎 StaticMesh：Cube、Sphere、Cylinder、Cone、Torus、Plane，含几何和缩略图。固定引擎 ID 与旧项目 1/2/3 分离；可直接在项目场景中引用。`tools/GenerateEngineMeshes.cpp` 是可选的资产重建工具。 |
 | `Projects/Sandbox/Sandbox.raproject` | 默认 Sandbox 工程描述，声明引擎、工程资产、工程 Shader 与默认场景的位置。 |
 | `RestArtEngine.exe` | 独立工程管理器和编辑器程序；无 `--project` 时进入 Project Manager。CMake 目标名为 `RestArtEngine`。 |
 | `Engine.raeengine` | 引擎安装身份（版本和发布 / 源码 hash），用于工程绑定和工程管理器兼容检查。 |
 | `Projects/Sandbox/Sandbox.raproject`、`Content/`、`Shaders/` | 默认示例工程（纯数据）：`.raproject` 声明引擎链接与内容路径，通过 `RestArtEngine.exe` 打开；不包含也不生成 `.sln`。 |
 | `Projects/Sandbox/Content/Scenes/` | Sandbox 工程的场景资产；默认场景为 `Default.rascene`。 |
 | `Projects/Sandbox/Content/Materials/` | Sandbox 工程的材质参数资产。参数资产与 HLSL 源码分开管理。 |
-| `Projects/Sandbox/Content/Meshes/` | Sandbox 工程的 OBJ 源文件；编辑器导入时复制至当前工程的 Meshes 目录。 |
+| `Projects/Sandbox/Content/Meshes/` | Sandbox 的项目网格目录；共享内置网格从引擎 Content 引用，不在此复制。外部 OBJ／FBX 导入为当前项目 Content 目录下的自包含 `.rasset`。 |
 | `Projects/Sandbox/Shaders/Materials/Standard.hlsli` | Sandbox 工程可编辑的共享材质 Shader，编辑器 Apply / Save 的源码入口。 |
 | `Projects/RayTracing_Simple/` | 光追测试示例（纯数据）：康奈尔盒 + 两个镜面球，用于观察 `--rt` 解析光追的反射与阴影差异；与 Sandbox 一样通过 `RestArtEngine.exe` 打开，不生成自己的 `.sln`。 |
 | `app/MinimalApp.cpp` | 引擎可执行入口：Win32 窗口、消息循环、Project Manager、编辑器启动、启动加载界面、命令行解析。 |
@@ -187,7 +188,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 | `World` / Actor 列表 | World / Level、World Outliner | 单场景，无 Level Streaming、父子层级或蓝图。 |
 | Actor 的 Transform 与 `StaticMeshComponent` | Actor / Static Mesh Component | 一个静态网格组件，无任意组件栈。 |
 | 视口变换手柄与网格拾取 | 视口选择及移动 / 旋转 / 缩放工具 | 支持多选，Gizmo 以主 Actor 为枢轴对整组应用同一世界增量；编辑事务覆盖批量增删与变换；使用 Y 轴向上的引擎坐标。 |
-| `MeshAsset` | Static Mesh 资产 | 内置几何与 OBJ，无 FBX / Nanite / LOD 工具链。 |
+| `MeshAsset` | Static Mesh 资产 | 内置几何与 OBJ／FBX 静态网格；无骨骼动画 / Nanite / LOD 工具链。 |
 | `MaterialAsset` 参数编辑 | Material Instance 的参数调节 | 共享标准 Shader，尚无节点图、材质继承或纹理采样参数。 |
 | Shader 编辑器 Apply | 修改后编译并更新预览 | 编译共享 HLSL，当前为 DX11 Shader Model 5。 |
 | Save | 将编辑成果保存到磁盘 | Apply 与 Save 分离，不存在自动 Cook 或派生数据缓存。 |
@@ -206,7 +207,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染工具预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，通过带 renderer 的保存路径写到同目录 `<scene>.rthumb`（普通 Save Scene／Ctrl+S 不刷新），Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
-Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置图元首次打开工程时生成到 `Content/Meshes/Builtin/`。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
+Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置网格从引擎 `Content/Meshes/` 只读挂载，不再向项目生成 `Meshes/Builtin/`；旧图元 ID 保留内存兼容。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
 当前编辑器和光栅场景使用 DX11，独立 DX12／DXR 1.1 通道已通过共享图像接入场景。OpenGL、DX12、Vulkan、Null 的通用 RHI 仍为骨架，不能切换完整场景后端。原生 DXR 资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，Scene / Assets 不依赖具体图形 API；细节见 [HardwareRayTracing](HardwareRayTracing.md)。
 

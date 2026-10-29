@@ -164,7 +164,7 @@ Premake 还会在项目 `.idea/` 下生成 RestArtEngine 与 RefreshConfig 运�
 进入编辑器后：
 
 - Outliner 或视口选 Actor，在左侧 Details 修改变换与 Mesh / Material；
-- 底部 Content 支持文件夹导航、名称／路径搜索、类型筛选、排序、可调缩略图与 OBJ 导入；选择场景中的具体 Actor 后，左侧 Details 显示该实例的网格与当前材质。点击材质或 Details 的 `Edit assigned material`，在独立系统窗口编辑材质与 HLSL；
+- 底部 Content 支持文件夹导航、名称／路径搜索、类型筛选、排序、可调缩略图与 OBJ／FBX 静态网格导入；`Import...` 多选和外部拖入当前 Content 目录共用[统一导入规范](docs/Importing.md)，不支持或损坏的文件会提示拒绝。选择场景中的具体 Actor 后，左侧 Details 显示该实例的网格与当前材质。点击材质或 Details 的 `Edit assigned material`，在独立系统窗口编辑材质与 HLSL；
 - `Save Scene` 写场景，`Save All` 同时落材质、Shader 与场景。
 
 编辑器使用 Dear ImGui 官方 Docking 分支，由 `EditorDockManager` 统一管理六个工作区面板。拖动面板标签或悬浮窗口标题栏，按停靠预览将面板放到目标区域的边缘可左右/上下分割，放到中央可合并为标签；拖离停靠区域可在主窗口内悬浮。拖动分隔条调整相邻区域，视口随布局更新。材质编辑器单独使用系统窗口，可移出主窗口；其他面板仍保持主窗口内工作。
@@ -306,7 +306,7 @@ Forward : 背景 + 几何  →  绘制时直接着色
 | --- | --- |
 | `include/RestArtEngine/` | 公共头文件（Scene / Assets / Project / Renderer / Editor / ImGui / Core） |
 | `src/Scene/World.cpp` | Actor、Transform、静态网格组件、场景 JSON 读写（事务性） |
-| `src/Assets/AssetLibrary.cpp` | 内置 Mesh、OBJ 导入、材质参数与持久化 |
+| `src/Assets/AssetLibrary.cpp`、`AssetImport.cpp`、`FbxImporter.cpp` | 内置 Mesh、统一 OBJ／FBX 导入、材质参数与持久化 |
 | `src/Project/Project.cpp` | `.raproject` / `Engine.raeengine`、兼容性检查、引擎注册表 |
 | `src/Renderer/SceneRenderer.cpp` | DX11 设备、交换链、G-buffer、阴影、渲染、截图 |
 | `src/Editor/SceneEditor.cpp` | Outliner / Scene / Details / Content、材质与 Shader 草稿 |

@@ -1,5 +1,6 @@
 #include "EditorSmoke.h"
 #include "DiagnosticsSmoke.h"
+#include "ImportSmoke.h"
 #include <RestArtEngine/Core/TraceProfiler.h>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -199,6 +200,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     const auto mountEngineMaterials = [&] {
         std::string mountError;
         require(assets.loadEngineMaterials(project.engineRoot / "Content/Materials", mountError), mountError);
+        require(assets.loadEngineMeshes(project.engineRoot / "Content/Meshes", mountError), mountError);
     };
     world.createDefaultScene(); assets.createDefaults();
     mountEngineMaterials();
@@ -296,6 +298,11 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         v2Project.defaultScene = v2Root / "Scenes" / "V2.rascene";
         rae::editor::SceneEditor v2Editor;
         require(v2Editor.initialize(v2Project, renderer, v2Error), v2Error);
+        require(!std::filesystem::exists(v2Root / "Meshes" / "Builtin") &&
+            !v2Editor.assetRegistry().find("Meshes/Builtin/Sphere.rasset") &&
+            v2Editor.assetRegistry().find("engine://Meshes/Sphere.rasset") &&
+            v2Editor.assetRegistry().find("engine://Meshes/Plane.rasset"),
+            "Editor startup must mount Engine meshes without creating project Builtin files.");
         assets::AssetQuery v2MaterialQuery;
         v2MaterialQuery.type = assets::AssetType::Material;
         v2MaterialQuery.recursive = true;
@@ -303,8 +310,19 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             v2Editor.assetRegistry().query(v2MaterialQuery).size() == 2 &&
             v2Editor.assets().findMaterial(assets::EngineDefaultMaterialId),
             "The editor did not load a scene v2 with its GUID materials.");
-        // Built-in primitives are generated as .rasset files the first time a
-        // project opens; later runs reuse them and never duplicate the files.
+        {
+            auto freshProject = v2Project;
+            freshProject.defaultScene = v2Root / "Scenes" / "Fresh.rascene";
+            rae::editor::SceneEditor freshEditor;
+            require(freshEditor.initialize(freshProject, renderer, v2Error), v2Error);
+            require(freshEditor.world().findActor(1) && freshEditor.world().findActor(2) &&
+                freshEditor.world().findActor(1)->mesh.meshId == assets::EngineSphereMeshId &&
+                freshEditor.world().findActor(2)->mesh.meshId == assets::EnginePlaneMeshId &&
+                !std::filesystem::exists(v2Root / "Meshes" / "Builtin"),
+                "A fresh editor scene must reference Engine sphere/plane without writing project primitives.");
+        }
+        // Legacy primitive files remain readable when explicitly supplied by an
+        // older project; editor startup must no longer generate them.
         {
             const auto builtinDir = v2Root / "Meshes" / "Builtin";
             assets::AssetLibrary builtinAssets;
@@ -459,7 +477,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     ImGuiContext* context = nullptr;
     std::string renderedUiText;
     const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false,
-                             bool useMaterialPreview = true) {
+                             bool useMaterialPreview = true, bool useOutline = true) {
         struct TraceFrame {
             TraceFrame() { diagnostics::beginFrame(); }
             ~TraceFrame() { diagnostics::endFrame(); }
@@ -513,13 +531,15 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
                     "Scene renderer rectangle differs from this frame's dock content rectangle.");
             }
         }
-        require(renderer.render(settings, world, assets, error,
+        auto renderSettings = settings;
+        if (!useOutline) { renderSettings.outlineActors = nullptr; renderSettings.outlineActorCount = 0; }
+        require(renderer.render(renderSettings, world, assets, error,
             useMaterialPreview ? editor.materialPreview() : nullptr), error);
         const auto screenshotPath = output / (std::string(name) + ".bmp");
         const std::string_view captureName(name);
         if (drawEditor && (captureName.starts_with("material_") || captureName.starts_with("two_sided_ui_") ||
             captureName.starts_with("cull_front_ui_") || captureName.starts_with("depth_never_ui_")))
-            saveScenePixels(renderer, settings, screenshotPath);
+            saveScenePixels(renderer, renderSettings, screenshotPath);
         ui.endFrame();
         if (!renderer.saveScreenshot(screenshotPath.c_str(), error)) {
             int screenshotErrno = 0;
@@ -561,7 +581,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         settings.cameraYaw = originalYaw;
         // Content browser with thumbnails: the first frame builds the layout, the
         // second one captures the panels.
-        editor.selectContentFolder("Meshes/Builtin");
+        editor.selectContentFolder("engine://Meshes");
         capture("content_thumbnails_preroll", true);
         capture("content_thumbnails", true);
         editor.setContentGridView(true);
@@ -573,7 +593,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         editor.setContentGridView(false);
         {
             // Double-click equivalent: the asset details window previews the file.
-            editor.showAssetDetails("Meshes/Builtin/Sphere.rasset");
+            editor.showAssetDetails("engine://Meshes/Sphere.rasset");
             capture("asset_details_mesh_preroll", true);
             capture("asset_details_mesh", true);
             { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Sphere###AssetDetails") != nullptr,
@@ -586,26 +606,26 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             require(renderedUiText.find("Scenes/Default.rascene") != std::string::npos,
                 "Asset Details did not switch from the mesh to the requested scene.");
         }
-        editor.selectContentFolder("Meshes/Builtin");
+        editor.selectContentFolder("engine://Meshes");
         {
             const auto* sceneEntry = editor.assetRegistry().find("Scenes/Default.rascene");
             require(sceneEntry && sceneEntry->thumbnail.valid(),
                 "A scene asset did not get a generated thumbnail.");
         }
         editor.selectContentFolder(std::string());
-        const auto* cubeEntry = editor.assetRegistry().find("Meshes/Builtin/Cube.rasset");
+        const auto* cubeEntry = editor.assetRegistry().find("engine://Meshes/Cube.rasset");
         require(cubeEntry && cubeEntry->thumbnail.valid(),
             "The generated built-in mesh thumbnail is missing from the registry.");
         const auto selectedBeforeBrowsing = editor.selectedActor();
         editor.closeAssetDetails();
-        editor.selectContentFolder("Meshes/Builtin");
-        require(editor.navigateContentUp() && editor.contentFolder() == "Meshes",
+        editor.selectContentFolder("engine://Meshes");
+        require(editor.navigateContentUp() && editor.contentFolder() == "engine://",
             "Content Up did not select the parent directory.");
-        require(editor.navigateContentBack() && editor.contentFolder() == "Meshes/Builtin",
+        require(editor.navigateContentBack() && editor.contentFolder() == "engine://Meshes",
             "Content Back did not restore the previous directory.");
-        require(editor.navigateContentForward() && editor.contentFolder() == "Meshes",
+        require(editor.navigateContentForward() && editor.contentFolder() == "engine://",
             "Content Forward did not restore the next directory.");
-        editor.selectContentFolder("");
+        editor.selectContentFolder("engine://");
         editor.setContentRecursive(true);
         editor.setContentTypeFilter(assets::AssetType::Mesh);
         editor.setContentSearch("sPhErE");
@@ -623,7 +643,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         editor.setContentRecursive(false);
         editor.setContentSort(assets::AssetSort::Name);
         capture("content_root_folders", true);
-        editor.selectContentFolder("Meshes/Builtin");
+        editor.selectContentFolder("engine://Meshes");
         {
             ImGuiContextScope active(context);
             const auto originalTheme = imgui::currentTheme();
@@ -649,7 +669,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
                 editor.setContentSearch("");
                 editor.setContentRecursive(false);
                 editor.setContentSort(assets::AssetSort::Name);
-                editor.selectContentFolder("Meshes/Builtin");
+                editor.selectContentFolder("engine://Meshes");
             }
             imgui::setTheme(originalTheme);
         }
@@ -662,7 +682,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         {
             assets::Thumbnail directThumb;
             std::string thumbError;
-            require(assets::readAssetThumbnail(project.contentRoot / "Meshes" / "Builtin" / "Cube.rasset",
+            require(assets::readAssetThumbnail(project.engineRoot / "Content" / "Meshes" / "Cube.rasset",
                 directThumb, thumbError), thumbError);
         }
 
@@ -1477,7 +1497,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(floatingHost != nullptr, "Floating Content has no host window.");
         const auto originalSize = floatingHost->Size;
         ImGui::SetWindowSize(floatingHost, ImVec2(440, 360), ImGuiCond_Always);
-        editor.selectContentFolder("Meshes/Builtin");
+        editor.selectContentFolder("engine://Meshes");
         editor.setContentGridView(true);
         capture("content_narrow_preroll", true);
         capture("content_narrow", true);
@@ -1792,7 +1812,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             });
             require(found != entries.end(), "Mesh selection test asset is absent from Content.");
             editor.selectContentFolder(found->folder);
-            editor.setContentSearch("");
+            editor.setContentSearch(mesh->name);
             editor.setContentTypeFilter(assets::AssetType::Unknown);
             editor.setContentGridView(false);
             capture("content_click_preroll", true);
@@ -1837,7 +1857,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(world.findActor(1)->visible, "Undo did not restore Actor visibility from the Outliner eye.");
     }
         clickActor(1);
-        clickMesh(3);
+        clickMesh(assets::EngineCubeMeshId);
         capture("instance_details_content_independent", true, true);
         require(editor.selectedActor() == 1 && findWindow("Scene")->DockId == findWindow("Details")->DockId,
             "Content browsing changed the scene Actor or inspector tab group.");
@@ -1898,7 +1918,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             require(findWindow("Scene")->DockNode->SelectedTabId == findWindow("Scene")->TabId,
                 "A delayed Actor selection stole the manually selected Scene tab.");
         }
-        clickMesh(2);
+        clickMesh(assets::EnginePlaneMeshId);
         require(editor.selectedActor() == 1 &&
             findWindow("Scene")->DockNode->SelectedTabId == findWindow("Scene")->TabId,
             "Content asset selection stole the Scene tab or changed the Actor selection.");
@@ -2599,8 +2619,18 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             const auto start = assetPoint(path, grid);
             input.mouse = start;
             capture("content_drag_source_hover", true);
+            // The smoke clock advances by fixed 1/60 s frames, regardless of
+            // screenshot I/O time. Repeating a drag from the same tile can
+            // otherwise become a double-click and correctly open Asset Details
+            // instead of starting the intended independent drag gesture.
+            const double nextSingleClick = context->IO.MouseClickedTime[0] + context->IO.MouseDoubleClickTime;
+            for (int settle = 0; context->Time <= nextSingleClick && settle < 60; ++settle)
+                capture("content_drag_single_click_settle", true);
+            require(context->Time > nextSingleClick && !context->IO.MouseDown[0],
+                "Content drag fixture did not settle between independent click gestures.");
             input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
             capture("content_drag_source_press", true);
+            require(!context->IO.MouseDoubleClicked[0], "Content drag fixture accidentally generated a double-click.");
             input.mouse = {start.x + 18.0f, start.y};
             capture("content_drag_source_active", true);
             require(context->DragDropActive && context->DragDropPayload.IsDataType("RAE_ASSET") &&
@@ -2687,10 +2717,22 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         const auto support = world.createActor("Mesh drop support", 2, 2);
         world.findActor(support)->transform.position[1] = 1.6f;
         capture("content_drag_surface_fixture", true);
-        checkPlacedMesh("Meshes/Builtin/Cube.rasset", true, 3, .7f, 1.6f, .4f, "content_drop_grid_surface");
+        checkPlacedMesh("engine://Meshes/Cube.rasset", true, assets::EngineCubeMeshId, .7f, 1.6f, .4f, "content_drop_grid_surface");
         world.actors.clear();
         capture("content_drag_ground_fixture", true);
-        checkPlacedMesh("Meshes/Builtin/Sphere.rasset", false, 1, -.8f, 0, .65f, "content_drop_list_ground");
+        checkPlacedMesh("engine://Meshes/Sphere.rasset", false, assets::EngineSphereMeshId, -.8f, 0, .65f, "content_drop_list_ground");
+        const std::pair<const char*, assets::AssetId> engineMeshes[] = {
+            {"Cube", assets::EngineCubeMeshId}, {"Sphere", assets::EngineSphereMeshId},
+            {"Cylinder", assets::EngineCylinderMeshId}, {"Cone", assets::EngineConeMeshId},
+            {"Torus", assets::EngineTorusMeshId}, {"Plane", assets::EnginePlaneMeshId}};
+        for (const auto& [name, id] : engineMeshes) {
+            const auto path = std::string("engine://Meshes/") + name + ".rasset";
+            const auto prefix = std::string("engine_mesh_drop_") + name;
+            require(assets.findMesh(id) && assets.findMesh(id)->origin == assets::AssetOrigin::Engine,
+                "Engine mesh is not mounted in the editor.");
+            checkPlacedMesh(path.c_str(), true, id, -.8f, 0, .65f, prefix.c_str());
+        }
+        std::cout << "PASS: six Engine Content StaticMeshes, real tile drag placement and undo/redo.\n";
         world = savedWorld;
         settings = savedSettings;
         capture("content_drag_scene_restored", true);
@@ -2702,17 +2744,15 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(findWindow("Scene Viewport##Interaction")->WorkRect.Contains(sceneDestination) &&
             sceneDestination.y > viewportToolbar.y + 50.0f,
             "Canceled-drop fixture is outside the scene image or inside its toolbar.");
-        assets::AssetQuery materialQuery;
-        materialQuery.type = assets::AssetType::Material;
-        materialQuery.recursive = true;
-        const auto visibleMaterials = editor.assetRegistry().query(materialQuery);
-        require(!visibleMaterials.empty(), "No visible Material exists for the unsupported drop test.");
-        const std::string materialPath = visibleMaterials.front()->relativePath;
+        const auto unsupportedEntry = std::find_if(editor.assetRegistry().entries().begin(),
+            editor.assetRegistry().entries().end(), [](const auto& entry) { return entry.type == assets::AssetType::Scene; });
+        require(unsupportedEntry != editor.assetRegistry().entries().end(), "No Scene exists for the unsupported drop test.");
+        const std::string unsupportedPath = unsupportedEntry->relativePath;
         for (int scenario = 0; scenario < 4; ++scenario) {
             const auto count = world.actors.size(), historySize = editor.undoStack().size(), history = editor.undoStack().cursor();
             const auto selected = editor.selectedActor();
             const auto camera = settings;
-            beginAssetDrag(scenario == 3 ? materialPath : "Meshes/Builtin/Cube.rasset", scenario % 2 == 0);
+            beginAssetDrag(scenario == 3 ? unsupportedPath : "engine://Meshes/Cube.rasset", scenario % 2 == 0);
             const auto destination = scenario == 1 ? ImVec2(mainOrigin().x - 60, mainOrigin().y - 60) :
                 scenario == 2 ? viewportToolbar : sceneDestination;
             holdAssetAt(destination, "content_drop_rejected_hover");
@@ -2724,7 +2764,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 require(!context->DragDropActive, "A canceled source restarted its payload before mouse release.");
             }
             releaseAsset(scenario == 0 ? "content_drop_escape" : scenario == 1 ? "content_drop_outside" :
-                scenario == 2 ? "content_drop_toolbar" : "content_drop_material_rejected");
+                scenario == 2 ? "content_drop_toolbar" : "content_drop_scene_rejected");
             require(world.actors.size() == count && editor.selectedActor() == selected &&
                 editor.undoStack().size() == historySize && editor.undoStack().cursor() == history,
                 "A canceled, outside, toolbar or unsupported Content drop changed the scene/history/selection.");
@@ -2734,6 +2774,156 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                     "A rejected asset drag moved an existing Actor through its gizmo.");
             }
             cameraUnchanged(camera);
+        }
+
+        {
+            // Materials use the same real source widgets, but assign only the
+            // hit instance. A separate fixture keeps empty-space and occlusion
+            // assertions independent from the default scene's ground plane.
+            const auto savedPreferences = imgui::uiPreferences();
+            imgui::uiPreferences().selectionOutline = false;
+            settings.cameraYaw = 0; settings.cameraPitch = .2f; settings.cameraDistance = 9;
+            settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
+            world.actors.clear();
+            const auto peer = world.createActor("Material drop selected peer", 1, 2);
+            world.findActor(peer)->transform.position[0] = -1.3f;
+            world.findActor(peer)->transform.position[1] = 1;
+            const auto target = world.createActor("Material drop target", 1, 1);
+            world.findActor(target)->transform.position[0] = 1.3f;
+            world.findActor(target)->transform.position[1] = 1;
+            // Behind the target along the exact center camera ray, so the
+            // frontmost visible triangle must win the material assignment.
+            const auto occluded = world.createActor("Material drop occluded peer", 1, 2);
+            world.findActor(occluded)->transform.position[0] = 1.3f * 1.3f;
+            world.findActor(occluded)->transform.position[1] = 1 - .3f * 9 * std::sin(.2f);
+            world.findActor(occluded)->transform.position[2] = -.3f * 9 * std::cos(.2f);
+            for (auto& actor : world.actors)
+                for (float& scale : actor.transform.scale) scale = .65f;
+            capture("material_drop_fixture", true);
+            click(projectPoint(-1.3f, 1, 0));
+            require(editor.selectedActor() == peer, "Material drop fixture could not select the unaffected peer.");
+            const auto selected = editor.selectedActor();
+            const auto selection = editor.selection();
+            const auto actorCount = world.actors.size();
+            const auto camera = settings;
+            const auto projectEntry = std::find_if(editor.assetRegistry().entries().begin(),
+                editor.assetRegistry().entries().end(), [&](const auto& entry) {
+                    return entry.type == assets::AssetType::Material && entry.origin == assets::AssetOrigin::Project &&
+                        entry.path.extension() == ".rasset" && assets.findMaterial(entry.id) != nullptr;
+                });
+            require(projectEntry != editor.assetRegistry().entries().end(), "No loaded project material exists for drag assignment.");
+            const auto projectMaterial = projectEntry->id;
+            const auto projectMaterialPath = projectEntry->relativePath;
+            const std::string engineDragPath = "engine://Materials/DefaultMaterial.rasset";
+            const auto checkOutline = [&](scene::ActorId hovered) {
+                require(settings.outlineActorCount == (hovered ? 1u : 0u) &&
+                    (!hovered || (settings.outlineActors && settings.outlineActors[0] == hovered)),
+                    "Material hover outline did not contain exactly the current target.");
+                require(!imgui::uiPreferences().selectionOutline && editor.selectedActor() == selected &&
+                    editor.selection() == selection, "Material hover changed selection or its outline preference.");
+            };
+            const auto checkInstances = [&](assets::AssetId targetMaterial) {
+                require(world.actors.size() == actorCount && world.findActor(target)->mesh.materialId == targetMaterial &&
+                    world.findActor(peer)->mesh.materialId == 2 && world.findActor(occluded)->mesh.materialId == 2 &&
+                    editor.selectedActor() == selected && editor.selection() == selection,
+                    "Material drop changed another shared-mesh instance, Actor count or selection.");
+                cameraUnchanged(camera);
+            };
+            const auto checkMaterialDrop = [&](const std::string& path, bool grid, assets::AssetId material,
+                                                const char* prefix) {
+                const auto beforeMaterial = world.findActor(target)->mesh.materialId;
+                const auto history = editor.undoStack().cursor();
+                const auto historySize = editor.undoStack().size();
+                beginAssetDrag(path, grid);
+                holdAssetAt(projectPoint(-1.3f, 1, 0), "material_drop_peer_hover");
+                checkOutline(peer);
+                holdAssetAt(projectPoint(1.3f, 1, 0), (std::string(prefix) + "_hover").c_str());
+                checkOutline(target);
+                checkInstances(beforeMaterial);
+                require(editor.undoStack().cursor() == history && editor.undoStack().size() == historySize,
+                    "Hovering Material mutated the instance or its history before release.");
+                // Same stationary drag and scene, with only the render-call
+                // outline span suppressed. This proves the actual GPU outline
+                // changes scene pixels, not just a label or drag tooltip.
+                const auto withoutOutline = std::string(prefix) + "_without_outline";
+                const auto withOutline = std::string(prefix) + "_with_outline";
+                capture(withoutOutline.c_str(), true, false, true, false);
+                capture(withOutline.c_str(), true);
+                require(scenePixels(output / (withoutOutline + ".bmp"), settings) !=
+                    scenePixels(output / (withOutline + ".bmp"), settings),
+                    "Material hover target produced no visible GPU outline while selection outline was disabled.");
+                releaseAsset((std::string(prefix) + "_assigned").c_str());
+                checkOutline(0);
+                checkInstances(material);
+                require(editor.undoStack().cursor() == history + 1 && editor.undoStack().undoLabel() == "Assign Material",
+                    "Material release did not create exactly one Assign Material transaction.");
+                const auto sceneFile = output / (std::string(prefix) + ".rascene");
+                require(world.save(sceneFile, assets, error), error);
+                auto reloadedAssets = assets;
+                scene::World reloadedWorld;
+                require(reloadedWorld.load(sceneFile, reloadedAssets, error) && reloadedWorld.findActor(target) &&
+                    reloadedWorld.findActor(target)->mesh.materialId == material &&
+                    reloadedWorld.findActor(peer)->mesh.materialId == 2,
+                    "Dropped material reference did not survive isolated scene save/reload.");
+                require(editor.undo() && editor.undoStack().cursor() == history,
+                    "One Undo did not reverse material assignment.");
+                checkInstances(beforeMaterial);
+                require(editor.redo() && editor.undoStack().cursor() == history + 1,
+                    "Redo did not restore material assignment.");
+                checkInstances(material);
+                const auto noOpHistory = editor.undoStack().cursor(), noOpSize = editor.undoStack().size();
+                beginAssetDrag(path, grid);
+                holdAssetAt(projectPoint(1.3f, 1, 0), "material_drop_same_hover");
+                checkOutline(target);
+                releaseAsset("material_drop_same_noop");
+                checkOutline(0);
+                checkInstances(material);
+                require(editor.undoStack().cursor() == noOpHistory && editor.undoStack().size() == noOpSize,
+                    "Assigning the same material added an empty undo transaction.");
+                require(editor.undo(), "Could not restore the fixture after material drop.");
+                checkInstances(beforeMaterial);
+            };
+            checkMaterialDrop(engineDragPath, true, assets::EngineDefaultMaterialId, "material_drop_engine_grid");
+            world.findActor(target)->mesh.materialId = assets::EngineDefaultMaterialId;
+            checkMaterialDrop(projectMaterialPath, false, projectMaterial, "material_drop_project_list");
+
+            for (int scenario = 0; scenario < 4; ++scenario) {
+                const auto beforeMaterial = world.findActor(target)->mesh.materialId;
+                const auto history = editor.undoStack().cursor(), historySize = editor.undoStack().size();
+                beginAssetDrag(projectMaterialPath, scenario % 2 == 0);
+                holdAssetAt(projectPoint(1.3f, 1, 0), "material_drop_cancel_target");
+                checkOutline(target);
+                auto* viewport = findWindow("Scene Viewport##Interaction");
+                if (scenario == 0) {
+                    pressKey(ImGuiKey_Escape);
+                    require(!context->DragDropActive, "Escape retained the Material payload.");
+                    checkOutline(0);
+                    input.mouse.x += 12;
+                    capture("material_drop_escape_still_held", true);
+                    require(!context->DragDropActive, "Canceled Material payload restarted while the mouse was held.");
+                } else {
+                    const auto destination = scenario == 1 ? ImVec2(viewport->WorkRect.Min.x + 12, viewport->WorkRect.Min.y + 50) :
+                        scenario == 2 ? itemRect(viewport, viewport->GetID("Move [W]")).GetCenter() :
+                        ImVec2(mainOrigin().x - 60, mainOrigin().y - 60);
+                    holdAssetAt(destination, scenario == 1 ? "material_drop_empty_hover" :
+                        scenario == 2 ? "material_drop_toolbar_hover" : "material_drop_outside_hover");
+                    checkOutline(0);
+                }
+                releaseAsset(scenario == 0 ? "material_drop_escape" : scenario == 1 ? "material_drop_empty" :
+                    scenario == 2 ? "material_drop_toolbar" : "material_drop_outside");
+                checkOutline(0);
+                checkInstances(beforeMaterial);
+                require(editor.undoStack().cursor() == history && editor.undoStack().size() == historySize,
+                    "Canceled or invalid Material drop changed undo history.");
+            }
+            imgui::uiPreferences() = savedPreferences;
+            world = savedWorld;
+            settings = savedSettings;
+            capture("material_drop_scene_restored", true);
+            click(projectPoint(-.35f, 1.35f, 0));
+            require(editor.selectedActor() == 1, "Material drag tests did not restore the selected scene Actor.");
+            std::cout << "PASS: Engine Grid/Project List Material assignment, target-only GPU hover outline, "
+                "shared-mesh and nearest-hit isolation, scene persistence, undo/redo/no-op, cancellation.\n";
         }
 
         editor.setContentSearch(""); editor.setContentTypeFilter(assets::AssetType::Unknown);
@@ -3122,14 +3312,28 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "Engine asset details did not explain its source and protection.");
         editor.closeAssetDetails();
 
+        require(editor.commands().enabled("actor.addCube"), "Engine Content does not permit creating a cube.");
+        bool cubeCreated = false;
+        const auto countBeforeCube = world.actors.size();
+        for (const auto& command : editor.commands().commands()) if (command.info.id == "actor.addCube") {
+            command.action(); cubeCreated = true; break;
+        }
+        const auto* cubeActor = world.findActor(editor.selectedActor());
+        require(cubeCreated && cubeActor && cubeActor->mesh.meshId == assets::EngineCubeMeshId &&
+            cubeActor->mesh.materialId == assets::EngineDefaultMaterialId &&
+            world.actors.size() == countBeforeCube + 1,
+            "New cube actors must use Engine geometry and default material.");
+        require(editor.undo() && world.actors.size() == countBeforeCube,
+            "Undo did not restore the scene after creating an Engine cube.");
         require(editor.commands().enabled("actor.addSphere"), "Default material does not permit creating a sphere.");
         bool created = false;
         for (const auto& command : editor.commands().commands()) if (command.info.id == "actor.addSphere") {
             command.action(); created = true; break;
         }
         const auto* actor = world.findActor(editor.selectedActor());
-        require(created && actor && actor->mesh.materialId == assets::EngineDefaultMaterialId,
-            "New actors must use the shared engine default, regardless of browser material selection.");
+        require(created && actor && actor->mesh.meshId == assets::EngineSphereMeshId &&
+            actor->mesh.materialId == assets::EngineDefaultMaterialId,
+            "New sphere actors must use Engine geometry and default material, regardless of browser selection.");
         capture("engine_default_actor", true);
         auto* detailsWindow = findWindow("Details");
         if (detailsWindow->DockNode && detailsWindow->DockNode->SelectedTabId != detailsWindow->TabId)
@@ -3281,6 +3485,24 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         renderer.clearFrameCapture();
         std::cout << "PASS: Diagnostics Record/Stop, retained events, trace export, frozen Frame Inspector pixel reads, "
             "both themes, 300px window, keyboard ownership and unchanged scene/undo.\n";
+    }
+    {
+        ImGuiContextScope active(context);
+        runImportSmoke(editor, ui, renderer, output, [&](const char* name) { capture(name, true); },
+            [&](bool enabled) {
+                auto* content = findWindow("Content & Editors");
+                click(itemRect(content, ImHashStr("Import options...", 0, content->ID)).GetCenter());
+                require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+                    "The Import options button did not open its popup.");
+                auto* popup = context->OpenPopupStack.back().Window;
+                if (imgui::uiPreferences().importSkipDegenerateTriangles != enabled)
+                    click(itemRect(popup, ImHashStr("Skip degenerate triangles", 0, popup->ID)).GetCenter());
+                require(imgui::uiPreferences().importSkipDegenerateTriangles == enabled &&
+                    imgui::loadUiPreferences(imgui::defaultUiPreferencesPath()).importSkipDegenerateTriangles == enabled,
+                    "The real import checkbox did not update and save the shared option.");
+                capture(enabled ? "import_options_skip" : "import_options_strict", true);
+                pressKey(ImGuiKey_Escape);
+            });
     }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);
     input.detach();

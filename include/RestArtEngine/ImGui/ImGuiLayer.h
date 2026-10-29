@@ -3,7 +3,10 @@
 #include <RestArtEngine/Core/GarbageCollector.h>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <unordered_map>
+#include <vector>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -49,6 +52,14 @@ public:
     // Automated validation keeps the default null filename for deterministic frames.
     void setIniFilename(const char* filename) noexcept;
     void setWindowChrome(WindowChrome* chrome) noexcept { chrome_ = chrome; }
+    // Receives OS file drops on the UI thread. The handler should only queue
+    // work; importing belongs to the editor frame, after Content hit testing.
+    // x/y match ImGui coordinates (desktop coordinates with platform windows).
+    // sourceViewport identifies the native receiver; 0 means unknown. Retain it
+    // so a separate OS window cannot import into Content behind that window.
+    using FileDropHandler = std::function<void(std::vector<std::filesystem::path>, float x, float y,
+        unsigned sourceViewport)>;
+    void setFileDropHandler(FileDropHandler handler);
 
     [[nodiscard]] bool isInitialized() const noexcept { return initialized_; }
     [[nodiscard]] std::uint64_t frameCount() const noexcept { return frameCount_; }
@@ -58,11 +69,13 @@ public:
 
 private:
     static void createPlatformWindow(ImGuiViewport* viewport);
+    void dispatchFileDrop(void* window, std::uintptr_t drop);
     void (*createPlatformWindow_)(ImGuiViewport*) = nullptr;
     void* context_ = nullptr;
     void* previousFrameContext_ = nullptr;
     void* window_ = nullptr;
     WindowChrome* chrome_ = nullptr;
+    FileDropHandler fileDropHandler_;
     ID3D11ShaderResourceView* logo_ = nullptr;
     bool platformInitialized_ = false;
     bool rendererInitialized_ = false;

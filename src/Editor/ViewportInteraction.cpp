@@ -172,18 +172,17 @@ SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const a
     return hit;
 }
 
-const assets::MeshAsset* droppedMesh(const ImGuiPayload& payload, const assets::AssetRegistry& registry,
-                                    const assets::AssetLibrary& assets) {
+const assets::AssetEntry* droppedAsset(const ImGuiPayload& payload, const assets::AssetRegistry& registry) {
     // Content paths have no terminating NUL. Resolve the copied byte range
     // afresh each frame instead of retaining a registry entry across a rescan.
     if (!payload.Data || payload.DataSize <= 0 || payload.DataSize > 4096) return nullptr;
     const std::string_view path(static_cast<const char*>(payload.Data), static_cast<std::size_t>(payload.DataSize));
     if (path.find('\0') != std::string_view::npos) return nullptr;
     const auto* entry = registry.find(path);
-    if (!entry || entry->type != assets::AssetType::Mesh || !entry->id) return nullptr;
+    if (!entry || !entry->id) return nullptr;
     std::error_code error;
     if (!std::filesystem::is_regular_file(entry->path, error)) return nullptr;
-    return assets.findMesh(entry->id);
+    return entry;
 }
 
 bool meshBounds(const assets::MeshAsset& mesh, XMFLOAT3& minimum, XMFLOAT3& maximum) {
@@ -319,10 +318,13 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                const std::function<void()>& duplicateForDrag,
                                const assets::AssetRegistry& registry,
                                const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
+                               const std::function<void(scene::ActorId, assets::AssetId)>& assignMaterial,
                                const assets::MaterialAsset* materialOverride, bool keyboardBlocked) {
     meshQueries_.retain(assets);
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
+    materialDragging_ = false;
+    materialDropTarget_ = 0;
     settings.editorViewport = true;
     settings.viewportVisible = false;
     settings.viewportWidth = settings.viewportHeight = 0;
@@ -371,6 +373,8 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     const bool popup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     const auto* activePayload = ImGui::GetDragDropPayload();
     const bool assetDragging = activePayload && activePayload->IsDataType("RAE_ASSET");
+    const auto* activeAsset = assetDragging ? droppedAsset(*activePayload, registry) : nullptr;
+    materialDragging_ = activeAsset && activeAsset->type == assets::AssetType::Material;
     ImGuiIO& io = ImGui::GetIO();
     // WantTextInput is computed from the preceding frame. A click in the scene
     // can already have deactivated the text field drawn earlier this frame, so
@@ -540,18 +544,29 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     // actual visible area a stable drop target without inserting an invisible
     // button that would take mouse ownership from the camera or Gizmo.
     const ImRect dropArea({imageMin.x, std::max(imageMin.y, toolbarBottom)}, imageMax);
-    if (assetDragging && !popup && !usingGizmo_ && createFromMesh &&
+    if (assetDragging && !popup && !usingGizmo_ &&
         ImGui::GetCurrentContext()->HoveredWindowUnderMovingWindow == ImGui::GetCurrentWindow() &&
         dropArea.GetWidth() > 0 && dropArea.GetHeight() > 0 &&
-        ImGui::BeginDragDropTargetCustom(dropArea, ImGui::GetID("##scene-mesh-drop"))) {
-        const auto* payload = ImGui::GetDragDropPayload();
-        const auto* mesh = payload ? droppedMesh(*payload, registry, assets) : nullptr;
+        ImGui::BeginDragDropTargetCustom(dropArea, ImGui::GetID("##scene-asset-drop"))) {
+        const auto* mesh = activeAsset && activeAsset->type == assets::AssetType::Mesh ? assets.findMesh(activeAsset->id) : nullptr;
+        const auto* material = materialDragging_ ? assets.findMaterial(activeAsset->id) : nullptr;
         XMFLOAT3 minimum, maximum;
         scene::Transform placement;
         XMVECTOR contact;
         const auto ray = viewRay(settings, view, projection);
-        if (!mesh) {
-            drawDropHint(dropArea.Min, dropArea.Max, "Choose a mesh asset to place in the scene", false);
+        if (material && assignMaterial) {
+            const auto hit = closestSurface(ray, world, assets, materialOverride, meshQueries_);
+            if (const auto* targetActor = world.findActor(hit.actor)) {
+                if (const auto* accepted = ImGui::AcceptDragDropPayload("RAE_ASSET",
+                        ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                    materialDropTarget_ = targetActor->id;
+                    const auto hint = "Assign " + material->name + " to " + targetActor->name;
+                    drawDropHint(dropArea.Min, dropArea.Max, hint.c_str(), true);
+                    if (accepted->IsDelivery()) assignMaterial(targetActor->id, material->id);
+                }
+            } else drawDropHint(dropArea.Min, dropArea.Max, "Point at an Actor to assign this material", false);
+        } else if (!mesh || !createFromMesh) {
+            drawDropHint(dropArea.Min, dropArea.Max, "Drop a mesh to place it, or a material onto an Actor", false);
         } else if (!meshBounds(*mesh, minimum, maximum)) {
             drawDropHint(dropArea.Min, dropArea.Max, "This mesh has no usable geometry", false);
         } else if (!dropTransform(ray, closestSurface(ray, world, assets, materialOverride, meshQueries_), minimum, maximum, placement, contact)) {

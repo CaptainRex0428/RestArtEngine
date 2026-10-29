@@ -12,6 +12,12 @@ if(NOT WIN32)
     message(FATAL_ERROR "RestArtEngine currently targets Windows and DirectX 11.")
 endif()
 
+# ufbx supports C++ compilation as well as C. Keep third-party diagnostics
+# separate from engine code and pin the vendored source for offline builds.
+add_library(ufbx STATIC vendor/ufbx/ufbx.c)
+set_source_files_properties(vendor/ufbx/ufbx.c PROPERTIES LANGUAGE CXX)
+target_include_directories(ufbx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor/ufbx>)
+
 # Vendored Dear ImGui (Win32/DX11 backend) as its own library.
 add_library(DearImGui STATIC
     vendor/imgui/imgui.cpp vendor/imgui/imgui_draw.cpp
@@ -31,6 +37,7 @@ target_link_libraries(DearImGui INTERFACE d3d11 dxgi d3dcompiler dwmapi)
 add_executable(RestArtEngine
     app/MinimalApp.cpp
     app/EditorSmoke.cpp
+    app/ImportSmoke.cpp
     app/DiagnosticsSmoke.cpp
     app/GarbageCollectionSmoke.cpp
     app/HardwareRayTracingSmoke.cpp
@@ -46,6 +53,8 @@ add_executable(RestArtEngine
     src/Renderer/D3D12/HardwareRayTracing.cpp
     src/Assets/AssetLibrary.cpp
     src/Assets/MeshQuery.cpp
+    src/Assets/AssetImport.cpp
+    src/Assets/FbxImporter.cpp
     src/Assets/AssetRegistry.cpp
     src/Assets/AssetFile.cpp
     src/Assets/AssetThumbnail.cpp
@@ -77,7 +86,7 @@ target_include_directories(RestArtEngine PRIVATE
     vendor/imgui
     vendor/imgui/backends
     vendor/ImGuizmo/src)
-target_link_libraries(RestArtEngine PRIVATE DearImGui d3d11 d3d12 dxgi dxguid d3dcompiler dwmapi comdlg32)
+target_link_libraries(RestArtEngine PRIVATE DearImGui ufbx d3d11 d3d12 dxgi dxguid d3dcompiler dwmapi comdlg32)
 
 # DXC is loaded dynamically: devices without DXR retain the DX11 renderer.
 # Ship the compiler and its matching validator beside the executable so a
@@ -119,11 +128,18 @@ set_source_files_properties(vendor/ImGuizmo/src/ImGuizmo.cpp PROPERTIES
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
+# Developer-only asset regeneration; shipped containers require no generator at runtime.
+add_executable(GenerateEngineMeshes EXCLUDE_FROM_ALL tools/GenerateEngineMeshes.cpp
+    src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
+target_include_directories(GenerateEngineMeshes PRIVATE include vendor/nlohmann/single_include)
+target_link_libraries(GenerateEngineMeshes PRIVATE ufbx)
+target_compile_definitions(GenerateEngineMeshes PRIVATE NOMINMAX)
 if(BUILD_TESTING)
     add_executable(MaterialRenderStateTests tests/MaterialRenderStateTests.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp
-        src/Assets/AssetLibrary.cpp)
+        src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp)
     target_include_directories(MaterialRenderStateTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(MaterialRenderStateTests PRIVATE ufbx)
     target_compile_definitions(MaterialRenderStateTests PRIVATE NOMINMAX)
     if(MSVC)
         target_compile_options(MaterialRenderStateTests PRIVATE /W4 /permissive- /utf-8)
@@ -152,23 +168,36 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME TraceProfilerTests COMMAND TraceProfilerTests)
     add_executable(EngineContentTests tests/EngineContentTests.cpp
-        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetRegistry.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
     target_include_directories(EngineContentTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(EngineContentTests PRIVATE ufbx)
     target_compile_definitions(EngineContentTests PRIVATE UNICODE _UNICODE NOMINMAX)
     if(MSVC)
         target_compile_options(EngineContentTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME EngineContentTests COMMAND EngineContentTests "${CMAKE_CURRENT_SOURCE_DIR}/Content")
     add_executable(ContentBrowserTests tests/ContentBrowserTests.cpp
-        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetRegistry.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
     target_include_directories(ContentBrowserTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(ContentBrowserTests PRIVATE ufbx)
     target_compile_definitions(ContentBrowserTests PRIVATE UNICODE _UNICODE NOMINMAX)
     if(MSVC)
         target_compile_options(ContentBrowserTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME ContentBrowserTests COMMAND ContentBrowserTests)
+    add_executable(AssetImportTests tests/AssetImportTests.cpp
+        src/Assets/AssetImport.cpp src/Assets/FbxImporter.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
+    target_include_directories(AssetImportTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(AssetImportTests PRIVATE ufbx)
+    target_compile_definitions(AssetImportTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(AssetImportTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME AssetImportTests COMMAND AssetImportTests)
     add_executable(GarbageCollectorTests tests/GarbageCollectorTests.cpp src/Core/GarbageCollector.cpp)
     target_include_directories(GarbageCollectorTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(GarbageCollectorTests PRIVATE UNICODE _UNICODE NOMINMAX)
@@ -192,5 +221,6 @@ install(DIRECTORY assets/load/ DESTINATION assets/load)
 install(DIRECTORY vendor/imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/RestArtEngine/ThirdParty/imgui
     FILES_MATCHING PATTERN "*.h")
 install(FILES vendor/imgui/LICENSE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/RestArtEngine/licenses RENAME imgui-LICENSE.txt)
+install(FILES vendor/ufbx/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/RestArtEngine/licenses RENAME ufbx-LICENSE.txt)
 install(EXPORT RestArtEngineTargets FILE RestArtEngineTargets.cmake NAMESPACE RestArtEngine::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RestArtEngine)

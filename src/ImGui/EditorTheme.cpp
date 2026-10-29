@@ -181,6 +181,10 @@ void readPreferences(const std::filesystem::path& path, UiPreferences& preferenc
         if (line.rfind("theme=", 0) == 0) {
             preferences.theme = line.find("darkblue") != std::string::npos || line.find("dark_blue") != std::string::npos
                 ? EditorTheme::DarkBlue : EditorTheme::Black;
+        } else if (line == "import_skip_degenerate_triangles=on") {
+            preferences.importSkipDegenerateTriangles = true;
+        } else if (line == "import_skip_degenerate_triangles=off") {
+            preferences.importSkipDegenerateTriangles = false;
         } else if (line == "gizmo_negative_axis_hints=on") {
             preferences.gizmoNegativeAxisHints = true;
         } else if (line == "gizmo_negative_axis_hints=off") {
@@ -224,6 +228,7 @@ void saveUiPreferences(const std::filesystem::path& path, const UiPreferences& p
     std::ofstream stream(path, std::ios::trunc);
     if (!stream) return;
     stream << "theme=" << (preferences.theme == EditorTheme::DarkBlue ? "darkblue" : "black") << '\n';
+    stream << "import_skip_degenerate_triangles=" << (preferences.importSkipDegenerateTriangles ? "on" : "off") << '\n';
     stream << "gizmo_negative_axis_hints=" << (preferences.gizmoNegativeAxisHints ? "on" : "off") << '\n';
     stream << "outline=" << (preferences.selectionOutline ? "on" : "off") << '\n';
     stream << "outline_thickness=" << preferences.outlineThickness << '\n';

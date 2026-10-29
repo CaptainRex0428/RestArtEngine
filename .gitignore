@@ -90,6 +90,7 @@ RestArtEngine.panels.ini
 /docs/*
 !/docs/Architecture.md
 !/docs/AssetFormat.md
+!/docs/Importing.md
 !/docs/EditorGuide.md
 !/docs/EngineDistribution.md
 !/docs/GarbageCollection.md

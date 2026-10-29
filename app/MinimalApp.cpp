@@ -890,6 +890,14 @@ int wmain(int argc, wchar_t** argv) {
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
+        struct FileDropScope {
+            rae::imgui::ImGuiLayer& ui;
+            ~FileDropScope() { ui.setFileDropHandler({}); }
+        } fileDropScope{ui};
+        ui.setFileDropHandler([&editor](std::vector<std::filesystem::path> sources, float x, float y,
+            unsigned sourceViewport) {
+            editor.queueExternalImport(std::move(sources), x, y, sourceViewport);
+        });
         if (interactive) editor.setGarbageCollector(&gc, gcSettingsPath);
         if (gcSelfTest) {
             runGarbageCollectionSmoke(renderer, ui, editor, captureDir);

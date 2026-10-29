@@ -47,9 +47,12 @@ void validateMesh(const assets::MeshAsset& mesh) {
         }
         if (normalLength<1e-12) throw std::runtime_error("Mesh contains zero normals.");
     }
+    if (assets::isEngineAssetId(mesh.id) != (mesh.origin == assets::AssetOrigin::Engine))
+        throw std::runtime_error("Mesh identity does not match its Engine/Project origin.");
+    // Geometry is self-contained. Source paths are provenance, not runtime dependencies.
+    if (mesh.origin == assets::AssetOrigin::Engine) return;
     if (mesh.primitive==assets::MeshPrimitive::Imported) {
-        if (mesh.id<=3 || mesh.sourcePath.empty() || !std::filesystem::is_regular_file(assets::detail::pathFromUtf8(mesh.sourcePath)))
-            throw std::runtime_error("Imported mesh must have an ID above 3 and an existing OBJ source: " + mesh.sourcePath);
+        if (mesh.id<=3) throw std::runtime_error("Imported mesh IDs 1 to 3 are reserved.");
     } else if (mesh.id!=builtinId(primitiveName(mesh.primitive))) {
         throw std::runtime_error("Built-in meshes must retain their reserved IDs (Sphere 1, Plane 2, Cube 3).");
     }
@@ -94,9 +97,9 @@ void World::createDefaultScene(const assets::AssetLibrary& library) {
         return library.materials.empty() ? fallback : library.materials.front().id;
     };
     actors.clear(); nextActorId_=1;
-    const auto sphere=createActor("Sphere",1,pick("Copper",1));
+    const auto sphere=createActor("Sphere",library.findMesh(assets::EngineSphereMeshId) ? assets::EngineSphereMeshId : 1,pick("Copper",1));
     findActor(sphere)->transform.position[1]=1;
-    createActor("Ground",2,pick("Ground",2));
+    createActor("Ground",library.findMesh(assets::EnginePlaneMeshId) ? assets::EnginePlaneMeshId : 2,pick("Ground",2));
 }
 bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& library, std::string& error) const {
     try {
@@ -119,6 +122,9 @@ bool World::save(const std::filesystem::path& path, const assets::AssetLibrary& 
         for (const auto& mesh:library.meshes) {
             validateMesh(mesh);
             if (!meshIds.insert(mesh.id).second) throw std::runtime_error("Duplicate mesh ID.");
+            if ((mesh.origin == assets::AssetOrigin::Engine || mesh.id <= 3) &&
+                std::none_of(actors.begin(), actors.end(), [&](const auto& actor) { return actor.mesh.meshId == mesh.id; }))
+                continue;
             value["meshes"].push_back({{"id",mesh.id}});
         }
         for (const auto& actor:actors) {
@@ -177,19 +183,26 @@ bool World::load(const std::filesystem::path& path, assets::AssetLibrary& librar
             }
         }
         if (version==3) {
-            // Meshes are asset references too: Content/Meshes supplies the geometry.
+            // Meshes are asset references too: Project Content supplies the geometry.
             staged.meshes=library.meshes;
             for (const auto& item:value.at("meshes")) {
                 const auto id=readId(item.at("id"));
                 if (!meshIds.insert(id).second) throw std::runtime_error("Duplicate mesh reference.");
                 if (!library.findMesh(id))
                     throw std::runtime_error("Scene references mesh " + std::to_string(id) +
-                        " that is not loaded from Content/Meshes.");
+                        " that is not loaded from Project or Engine Content.");
             }
         } else {
             const auto sceneFolder=std::filesystem::absolute(path).parent_path();
+            for (const auto& mesh : library.meshes) {
+                if (mesh.origin != assets::AssetOrigin::Engine) continue;
+                validateMesh(mesh);
+                if (!meshIds.insert(mesh.id).second) throw std::runtime_error("Duplicate Engine mesh ID.");
+                staged.meshes.push_back(mesh);
+            }
             for (const auto& item:value.at("meshes")) {
                 const auto id=readId(item.at("id"));
+                if (assets::isEngineAssetId(id)) throw std::runtime_error("Legacy scene cannot redefine a reserved Engine mesh.");
                 if (!meshIds.insert(id).second) throw std::runtime_error("Duplicate mesh ID.");
                 const auto primitive=item.at("primitive").get<std::string>();
                 assets::MeshAsset mesh;

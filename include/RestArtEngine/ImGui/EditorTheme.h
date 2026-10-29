@@ -32,6 +32,9 @@ void setTheme(EditorTheme theme);
 // consistent; the outline fields are editor-only and never reach scene data.
 struct UiPreferences {
     EditorTheme theme = EditorTheme::Black;
+    // Shared by the import picker and external file drops. Successful FBX
+    // imports report skipped zero-area triangles; disabling rejects the source.
+    bool importSkipDegenerateTriangles = true;
     // ImGuizmo's striped indication of an automatically flipped negative axis.
     bool gizmoNegativeAxisHints = true;
     bool selectionOutline = true;
@@ -48,7 +51,7 @@ struct UiPreferences {
 
 [[nodiscard]] UiPreferences& uiPreferences();
 
-// Reads `theme=`, `gizmo_negative_axis_hints=`, `outline=`, `outline_thickness=`, `outline_theme_color=` and
+// Reads `theme=`, `import_skip_degenerate_triangles=`, `gizmo_negative_axis_hints=`, `outline=`, `outline_thickness=`, `outline_theme_color=` and
 // `outline_color=`. Missing keys keep their defaults. When the file does not
 // exist yet, the legacy theme-only file is consulted for the palette.
 [[nodiscard]] UiPreferences loadUiPreferences(const std::filesystem::path& path);

@@ -25,6 +25,7 @@ public:
               renderer::SceneRenderer& renderer, const std::function<void()>& duplicateForDrag,
               const assets::AssetRegistry& registry,
               const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
+              const std::function<void(scene::ActorId, assets::AssetId)>& assignMaterial,
               const assets::MaterialAsset* materialOverride = nullptr,
               bool keyboardBlocked = false);
     bool isUsing() const { return usingGizmo_; }
@@ -32,6 +33,9 @@ public:
     bool isFocused() const { return focused_; }
     // True only for this draw's actual scene-picking path, including reselect.
     bool pickedThisFrame() const { return pickedThisFrame_; }
+    // Transient drag feedback, independent of the editor's actual selection.
+    bool materialDragging() const { return materialDragging_; }
+    scene::ActorId materialDropTarget() const { return materialDropTarget_; }
 private:
     assets::MeshQueryCache meshQueries_;
     int operation_ = 0; // translate, rotate, scale
@@ -39,6 +43,8 @@ private:
     bool usingGizmo_ = false, hovered_ = false, focused_ = false, orbiting_ = false, panning_ = false;
     bool duplicateOnDrag_ = false;
     bool pickedThisFrame_ = false;
+    bool materialDragging_ = false;
+    scene::ActorId materialDropTarget_ = 0;
 };
 
 } // namespace rae::editor

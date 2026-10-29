@@ -18,6 +18,7 @@ project "RestArtEngine"
 		"Content/**.rasset",
 		"vendor/ImGuizmo/src/ImGuizmo.cpp",
 		"vendor/ImGuizmo/src/ImGuizmo.h",
+		"vendor/ufbx/ufbx.c",
 		"RestArtEngine.rc"
 	}
 
@@ -27,7 +28,8 @@ project "RestArtEngine"
 		DepIncludeDir["nlohmann"],
 		DepIncludeDir["imgui"],
 		DepIncludeDir["imgui_backends"],
-		DepIncludeDir["ImGuizmo"]
+		DepIncludeDir["ImGuizmo"],
+		"vendor/ufbx"
 	}
 
 	-- Resolve Win32/DX11 imports at the executable link, not inside DearImGui.lib.
@@ -67,6 +69,10 @@ project "RestArtEngine"
 	-- ImGuizmo is compiled under /W4; silence its signed/unsigned noise.
 	filter "files:**/ImGuizmo.cpp"
 		disablewarnings { "4245" }
+	filter {}
+	filter "files:vendor/ufbx/ufbx.c"
+		compileas "C++"
+		warnings "Off"
 	filter {}
 
 	location (LocationDir)

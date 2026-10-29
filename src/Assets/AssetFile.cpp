@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -206,6 +207,9 @@ bool writeAssetFile(const std::filesystem::path& path, const AssetFile& file, st
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     if (!stream) { error = "Cannot write the asset file: " + path.generic_string(); return false; }
     stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    // Detect errors from buffered writes before a new import is published.
+    stream.flush();
+    stream.close();
     if (!stream) { error = "Writing the asset file failed: " + path.generic_string(); return false; }
     return true;
 }
@@ -366,9 +370,20 @@ bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& erro
         loaded.indices.resize(indexCount);
         if (!vertexBytes.empty()) std::memcpy(loaded.vertices.data(), vertexBytes.data(), vertexBytes.size());
         if (!indexBytes.empty()) std::memcpy(loaded.indices.data(), indexBytes.data(), indexBytes.size());
-        if (loaded.vertices.empty() || loaded.indices.empty()) {
-            error = "Mesh asset has no geometry.";
+        if (loaded.vertices.empty() || loaded.indices.empty() || loaded.indices.size() % 3 != 0) {
+            error = "Mesh asset must have indexed triangle geometry.";
             return false;
+        }
+        for (const auto index : loaded.indices)
+            if (index >= loaded.vertices.size()) throw std::runtime_error("Mesh index is outside the vertex buffer.");
+        for (const auto& vertex : loaded.vertices) {
+            double normalLength = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(vertex.position[axis]) || !std::isfinite(vertex.normal[axis]))
+                    throw std::runtime_error("Mesh geometry must be finite.");
+                normalLength += double(vertex.normal[axis]) * vertex.normal[axis];
+            }
+            if (normalLength < 1e-12) throw std::runtime_error("Mesh normals cannot be zero.");
         }
         mesh = std::move(loaded);
         return true;

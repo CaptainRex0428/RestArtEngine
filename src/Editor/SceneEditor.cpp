@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <iterator>
 #include <system_error>
@@ -38,7 +39,7 @@ const char* meshType(assets::MeshPrimitive type) {
     case assets::MeshPrimitive::Sphere: return "Sphere";
     case assets::MeshPrimitive::Plane: return "Plane";
     case assets::MeshPrimitive::Cube: return "Cube";
-    default: return "Imported OBJ";
+    default: return "Imported mesh";
     }
 }
 
@@ -69,7 +70,10 @@ void message(const std::string& text) {
 }
 bool validMaterialParameters(const assets::MaterialAsset& material) {
     const auto unitValue = [](float value) { return std::isfinite(value) && value >= 0 && value <= 1; };
-    return unitValue(material.roughness) && unitValue(material.metallic) &&
+    const auto depth = static_cast<int>(material.depthTest);
+    return depth >= static_cast<int>(assets::MaterialDepthTest::Never) &&
+        depth <= static_cast<int>(assets::MaterialDepthTest::Disabled) &&
+        unitValue(material.roughness) && unitValue(material.metallic) &&
         std::all_of(std::begin(material.baseColor), std::end(material.baseColor), unitValue);
 }
 bool readOnlyMaterial(const assets::MaterialAsset& material) {
@@ -127,6 +131,7 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     projectSettingsMessage_.clear();
     assets_.createDefaults();
     if (!assets_.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
+    if (!assets_.loadEngineMeshes(project_.engineRoot / "Content/Meshes", error)) return false;
     // Materials are the single source of truth for scene v2 references: load the
     // content folder first so the scene can resolve its GUIDs.
     {
@@ -139,13 +144,9 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     }
     {
         std::string meshError;
-        const auto meshFolder = project_.contentRoot / "Meshes";
-        const auto builtinFolder = meshFolder / "Builtin";
-        std::filesystem::create_directories(builtinFolder);
-        // Built-in primitives become real assets so the Content browser lists
-        // them alongside imported meshes; existing files win. They live in their
-        // own generated folder so user mesh assets stay easy to tell apart.
-        if (!assets_.ensureBuiltinMeshes(builtinFolder, meshError) || !assets_.loadMeshes(meshFolder, meshError)) {
+        // Legacy IDs remain available in memory for older scenes. New scenes
+        // reference Engine without generating project-side copies.
+        if (!assets_.loadMeshes(project_.contentRoot, meshError)) {
             error = meshError;
             return false;
         }
@@ -187,22 +188,22 @@ void SceneEditor::registerCommands() {
         [this] { return selectedActor_ != 0 && !viewport_.isUsing(); });
     commands_.add("actor.addSphere", "actor", "+ Sphere", "", 0,
         [this] {
-            selectedActor_ = world_.createActor("Sphere", 1, assets::EngineDefaultMaterialId);
+            selectedActor_ = world_.createActor("Sphere", assets::EngineSphereMeshId, assets::EngineDefaultMaterialId);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
             selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Sphere");
             sceneDirty_ = true;
         },
-        [this] { return assets_.findMesh(1) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
+        [this] { return assets_.findMesh(assets::EngineSphereMeshId) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
     commands_.add("actor.addCube", "actor", "+ Cube", "", 0,
         [this] {
-            selectedActor_ = world_.createActor("Cube", 3, assets::EngineDefaultMaterialId);
+            selectedActor_ = world_.createActor("Cube", assets::EngineCubeMeshId, assets::EngineDefaultMaterialId);
             world_.findActor(selectedActor_)->transform.position[1] = 1;
             selection_.assign(1, selectedActor_);
             pushActorCreated(*world_.findActor(selectedActor_), "Create Cube");
             sceneDirty_ = true;
         },
-        [this] { return assets_.findMesh(3) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
+        [this] { return assets_.findMesh(assets::EngineCubeMeshId) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
     commands_.add("scene.save", "scene", "Save Scene", "Ctrl+S", ImGuiMod_Ctrl | ImGuiKey_S,
         [this] { saveScene(); });
     commands_.add("actor.addFromMesh", "actor", "Add Actor from mesh", "", 0,
@@ -318,7 +319,7 @@ bool SceneEditor::saveScene(renderer::SceneRenderer* renderer) {
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
         status_ = "Material save failed: " + error; return false;
     }
-    if (!assets_.saveMeshes(project_.contentRoot / "Meshes", error)) {
+    if (!assets_.saveMeshes(project_.contentRoot, error)) {
         status_ = "Mesh save failed: " + error; return false;
     }
     if (!world_.save(scenePath_, assets_, error)) {
@@ -420,6 +421,25 @@ bool SceneEditor::createMeshActor(assets::AssetId meshId, const scene::Transform
     sceneDirty_ = true;
     status_ = "Placed '" + actor.name + "'. Use Move [W] handles to reposition.";
     return true;
+}
+
+void SceneEditor::assignActorMaterial(scene::ActorId actorId, assets::AssetId materialId) {
+    auto* actor = world_.findActor(actorId);
+    if (!actor || !actor->visible || !assets_.findMaterial(materialId)) return;
+    const auto before = actor->mesh.materialId;
+    if (before == materialId) return;
+    actor->mesh.materialId = materialId;
+    // Assign only this instance. Shared mesh/material assets and the current
+    // selection remain untouched throughout the drag and undo/redo.
+    undo_.push("Assign Material",
+        [this, actorId, before] {
+            if (auto* target = world_.findActor(actorId)) { target->mesh.materialId = before; sceneDirty_ = true; }
+        },
+        [this, actorId, materialId] {
+            if (auto* target = world_.findActor(actorId)) { target->mesh.materialId = materialId; sceneDirty_ = true; }
+        });
+    sceneDirty_ = true;
+    status_ = "Assigned material to '" + actor->name + "'. Save Scene to persist.";
 }
 
 void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
@@ -968,11 +988,11 @@ void drawThumbnail(ImDrawList* list, ImVec2 topLeft, float size, const assets::T
 } // namespace
 
 void SceneEditor::drawOutliner() {
-    ImGui::BeginDisabled(!assets_.findMesh(1) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
+    ImGui::BeginDisabled(!assets_.findMesh(assets::EngineSphereMeshId) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
     commandButton("actor.addSphere");
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!assets_.findMesh(3) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
+    ImGui::BeginDisabled(!assets_.findMesh(assets::EngineCubeMeshId) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
     commandButton("actor.addCube");
     ImGui::EndDisabled();
     commandButton("actor.duplicate");
@@ -1158,36 +1178,149 @@ void SceneEditor::setSceneBackground(bool black) {
     status_ = black ? "Scene background: black" : "Scene background: sky";
 }
 
-void SceneEditor::importMesh() {
+void SceneEditor::chooseImportFiles() {
     if (assets::isEngineContentPath(contentFolder_)) { status_ = "Choose Content to import assets."; return; }
-    wchar_t path[32768]{};
+    // A double-NUL list holds either one full path or a directory followed by
+    // selected file names. Keep it on the heap for large multi-file batches.
+    std::vector<wchar_t> paths(65536, L'\0');
+    std::wstring patterns;
+    for (const auto& format : assets::supportedImportFormats()) {
+        if (!patterns.empty()) patterns += L';';
+        patterns += L'*';
+        patterns.append(format.extension.begin(), format.extension.end());
+    }
+    std::wstring filters = L"Supported assets (" + patterns + L")";
+    filters.push_back(L'\0'); filters += patterns; filters.push_back(L'\0');
+    for (const auto& format : assets::supportedImportFormats()) {
+        filters.append(format.description.begin(), format.description.end());
+        filters.push_back(L'\0'); filters += L'*';
+        filters.append(format.extension.begin(), format.extension.end());
+        filters.push_back(L'\0');
+    }
+    filters += L"All files (*.*)"; filters.push_back(L'\0');
+    filters += L"*.*"; filters.push_back(L'\0'); filters.push_back(L'\0');
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = GetActiveWindow();
-    dialog.lpstrFile = path;
-    dialog.nMaxFile = static_cast<DWORD>(std::size(path));
-    dialog.lpstrFilter = L"Wavefront OBJ (*.obj)\0*.obj\0\0";
-    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&dialog)) return;
-    try {
-        // Validate into an isolated copy, then persist a self-contained .rasset.
-        auto proposed = assets_;
-        assets::AssetId imported = 0;
-        std::string error;
-        if (!proposed.importObj(path, imported, error)) { status_ = error; return; }
-        auto* mesh = proposed.findMesh(imported);
-        mesh->id = assets::generateAssetId();
-        const auto utf8Path = std::filesystem::path(path).generic_u8string();
-        mesh->sourcePath.assign(reinterpret_cast<const char*>(utf8Path.data()), utf8Path.size());
-        imported = mesh->id;
-        const auto folder = project_.contentRoot / "Meshes";
-        std::filesystem::create_directories(folder);
-        if (!proposed.saveMeshes(folder, error)) { status_ = error; return; }
-        assets_ = std::move(proposed);
-        selectedMesh_ = imported;
-        sceneDirty_ = true;
+    dialog.lpstrFile = paths.data();
+    dialog.nMaxFile = static_cast<DWORD>(paths.size());
+    dialog.lpstrFilter = filters.c_str();
+    dialog.lpstrTitle = L"Import assets into current Content folder";
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
+    if (!GetOpenFileNameW(&dialog)) {
+        const auto error = CommDlgExtendedError();
+        if (error) {
+            status_ = importStatus_ = error == FNERR_BUFFERTOOSMALL
+                ? "Too many selected file names. Import a smaller batch."
+                : "The import file picker could not open (Windows error " + std::to_string(error) + ").";
+        }
+        return;
+    }
+    std::vector<std::filesystem::path> sources;
+    const auto first = std::filesystem::path(paths.data());
+    auto* next = paths.data() + std::wcslen(paths.data()) + 1;
+    if (*next == L'\0') sources.push_back(first);
+    else while (*next != L'\0') {
+        sources.push_back(first / next);
+        next += std::wcslen(next) + 1;
+    }
+    importFiles(sources, contentFolder_);
+}
+
+void SceneEditor::importFiles(const std::vector<std::filesystem::path>& sources, std::string_view destinationFolder) {
+    assets::AssetImportOptions options;
+    options.skipDegenerateTriangles = imgui::uiPreferences().importSkipDegenerateTriangles;
+    importReport_ = assets::importAssets(assets_, project_.contentRoot, destinationFolder, sources, options);
+    if (importReport_.importedCount()) {
         refreshContent();
-        status_ = "OBJ imported as a .rasset in Content/Meshes. Add an Actor from this mesh, then save.";
-    } catch (const std::exception& error) { status_ = error.what(); }
+        for (const auto& result : importReport_.items) if (result.succeeded()) {
+            selectedMesh_ = result.id;
+            selectedAsset_ = pathText(result.assetPath.lexically_relative(project_.contentRoot));
+        }
+    }
+    importStatus_ = std::to_string(importReport_.importedCount()) + " imported, " +
+        std::to_string(importReport_.rejectedCount()) + " rejected";
+    if (const auto warnings = importReport_.warningCount())
+        importStatus_ += ", " + std::to_string(warnings) + (warnings == 1 ? " warning" : " warnings");
+    importStatus_ += ".";
+    status_ = importStatus_;
+    if (importReport_.rejectedCount() || importReport_.warningCount())
+        importResultsOpen_ = importResultsFocusRequested_ = true;
+}
+
+void SceneEditor::queueExternalImport(std::vector<std::filesystem::path> sources, float x, float y,
+    unsigned sourceViewport) {
+    if (!sources.empty()) externalImports_.push_back({std::move(sources), contentFolder_, x, y, sourceViewport,
+        ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : 0});
+}
+
+void SceneEditor::processExternalImports() {
+    for (const auto& request : std::exchange(externalImports_, {})) {
+        const ImVec2 point(request.x, request.y);
+        const ImRect area(ImVec2(contentImportMin_[0], contentImportMin_[1]),
+            ImVec2(contentImportMax_[0], contentImportMax_[1]));
+        auto* target = contentImportWindow_ ? ImGui::FindWindowByID(contentImportWindow_) : nullptr;
+        bool accepted = target && target->Active && request.sourceViewport != 0 &&
+            target->Viewport && request.sourceViewport == target->Viewport->ID && area.Contains(point) &&
+            request.frame + 1 >= ImGui::GetFrameCount() &&
+            !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        if (accepted) {
+            // Hit test the recorded drop point, not io.MousePos which can move
+            // between WM_DROPFILES and this frame. Inspect current submitted
+            // windows so a newly opened tool also occludes Content immediately.
+            auto& context = *ImGui::GetCurrentContext();
+            for (int index = context.Windows.Size - 1; index >= 0; --index) {
+                const auto* window = context.Windows[index];
+                if (!window->Active || window->Hidden || (window->Flags & ImGuiWindowFlags_NoMouseInputs) ||
+                    window->Viewport != target->Viewport || !window->OuterRectClipped.Contains(point)) continue;
+                accepted = window == target;
+                break;
+            }
+        }
+        if (accepted) importFiles(request.sources, request.destinationFolder);
+        else {
+            importReport_ = {};
+            for (const auto& source : request.sources) {
+                assets::AssetImportResult rejected;
+                rejected.sourcePath = source;
+                rejected.error = "Drop files onto the visible Content asset area. Close covering windows or popups first.";
+                importReport_.items.push_back(std::move(rejected));
+            }
+            status_ = importStatus_ = "Import rejected: drop onto the Content asset area.";
+            importResultsOpen_ = importResultsFocusRequested_ = true;
+        }
+    }
+}
+
+void SceneEditor::drawImportResults() {
+    importResultsFocused_ = false;
+    if (!importResultsOpen_) return;
+    ImGui::SetNextWindowSize(ImVec2(620, 400), ImGuiCond_FirstUseEver);
+    if (std::exchange(importResultsFocusRequested_, false)) ImGui::SetNextWindowFocus();
+    const bool visible = ImGui::Begin("Import results", &importResultsOpen_);
+    importResultsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (visible) {
+        if (const auto warnings = importReport_.warningCount())
+            ImGui::TextWrapped("%zu imported, %zu rejected, %zu warning%s. Successful imports are saved as project assets.",
+                importReport_.importedCount(), importReport_.rejectedCount(), warnings, warnings == 1 ? "" : "s");
+        else
+            ImGui::TextWrapped("%zu imported, %zu rejected. Successful imports are saved as project assets.",
+                importReport_.importedCount(), importReport_.rejectedCount());
+        ImGui::Separator();
+        ImGui::BeginChild("##import-results", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()));
+        for (const auto& result : importReport_.items) {
+            ImGui::TextWrapped("%s: %s", result.succeeded() ? "Imported" : "Rejected", pathText(result.sourcePath).c_str());
+            ImGui::TextWrapped("%s", result.succeeded() ? pathText(result.assetPath).c_str() : result.error.c_str());
+            if (result.succeeded() && !result.warnings.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, .70f, .25f, 1.0f));
+                for (const auto& warning : result.warnings) ImGui::TextWrapped("Warning: %s", warning.c_str());
+                ImGui::PopStyleColor();
+            }
+            ImGui::Separator();
+        }
+        ImGui::EndChild();
+        if (ImGui::Button("Close")) importResultsOpen_ = false;
+    }
+    ImGui::End();
 }
 
 bool SceneEditor::openScene(const std::filesystem::path& path, std::string& error) {
@@ -1202,10 +1335,11 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     assets::AssetLibrary stagedAssets;
     stagedAssets.createDefaults();
     if (!stagedAssets.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
+    if (!stagedAssets.loadEngineMeshes(project_.engineRoot / "Content/Meshes", error)) return false;
     {
         std::string assetError;
         const auto materialFolder = project_.contentRoot / "Materials";
-        const auto meshFolder = project_.contentRoot / "Meshes";
+        const auto meshFolder = project_.contentRoot;
         if ((std::filesystem::is_directory(materialFolder) && !stagedAssets.loadMaterials(materialFolder, assetError)) ||
             (std::filesystem::is_directory(meshFolder) && !stagedAssets.loadMeshes(meshFolder, assetError))) {
             error = assetError;
@@ -1427,6 +1561,7 @@ void SceneEditor::activateAsset(const assets::AssetEntry& entry) {
 }
 
 void SceneEditor::showAssetDetails(std::string relativePath) {
+    assetDetailsMeshValid_ = false;
     if (relativePath.empty()) { closeAssetDetails(); return; }
     assetDetailsError_.clear();
     assetDetailsPath_ = std::move(relativePath);
@@ -1600,7 +1735,7 @@ void SceneEditor::drawAssets() {
     if (ImGui::Button("Add...")) ImGui::OpenPopup("##content-add");
     if (ImGui::BeginPopup("##content-add")) {
         if (ImGui::MenuItem("New folder...", nullptr, false, !engineFolder)) { newFolderBuffer_.clear(); newFolderOpen_ = true; }
-        if (ImGui::MenuItem("Import OBJ...", nullptr, false, !engineFolder)) importMesh();
+        if (ImGui::MenuItem("Import assets...", nullptr, false, !engineFolder)) chooseImportFiles();
         ImGui::Separator();
         ImGui::TextDisabled("Scene mesh library");
         for (const auto& mesh : assets_.meshes) {
@@ -1613,8 +1748,24 @@ void SceneEditor::drawAssets() {
     }
     continueButtonRow("Import...");
     ImGui::BeginDisabled(engineFolder);
-    if (ImGui::Button("Import...")) importMesh();
+    if (ImGui::Button("Import...")) chooseImportFiles();
     ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(engineFolder ? "Engine is read-only. Choose Content to import assets."
+            : "Select files, or drop external files onto the asset area. Imports are saved in the current folder.");
+    continueButtonRow("Import options...");
+    if (ImGui::Button("Import options...")) ImGui::OpenPopup("##content-import-options");
+    if (ImGui::BeginPopup("##content-import-options")) {
+        auto& preferences = imgui::uiPreferences();
+        if (ImGui::Checkbox("Skip degenerate triangles", &preferences.importSkipDegenerateTriangles))
+            imgui::saveUiPreferences(imgui::defaultUiPreferencesPath(), preferences);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Applies to FBX imports from Import... and external file drops.\n"
+                "On: skip zero-area triangles and report warnings.\n"
+                "Off: reject the entire source if a triangle has zero area.\n"
+                "Files with no valid triangles are always rejected.");
+        ImGui::EndPopup();
+    }
     continueButtonRow("Refresh");
     if (ImGui::Button("Refresh")) refreshContent();
     continueButtonRow("View...");
@@ -1712,6 +1863,13 @@ void SceneEditor::drawAssets() {
     continueButtonRow("Include subfolders");
     ImGui::Checkbox("Include subfolders", &contentQuery_.recursive);
     if (!contentError_.empty()) ImGui::TextWrapped("Content: %s", contentError_.c_str());
+    if (!importStatus_.empty()) {
+        ImGui::TextWrapped("Import: %s", importStatus_.c_str());
+        if (!importReport_.items.empty()) {
+            continueButtonRow("Results...");
+            if (ImGui::SmallButton("Results...")) importResultsOpen_ = importResultsFocusRequested_ = true;
+        }
+    }
 
     const float browserHeight = std::max(48.0f, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing());
     const float availableWidth = ImGui::GetContentRegionAvail().x;
@@ -1731,6 +1889,14 @@ void SceneEditor::drawAssets() {
         ImGui::SameLine(0.0f, 2.0f);
     }
     ImGui::BeginChild("##content-assets", ImVec2(0.0f, browserHeight), ImGuiChildFlags_Borders);
+    {
+        const auto* window = ImGui::GetCurrentWindow();
+        auto area = window->InnerRect;
+        area.ClipWith(window->OuterRectClipped);
+        contentImportWindow_ = window->ID;
+        contentImportMin_[0] = area.Min.x; contentImportMin_[1] = area.Min.y;
+        contentImportMax_[0] = area.Max.x; contentImportMax_[1] = area.Max.y;
+    }
     if (contentGridView_) drawAssetGrid(); else drawAssetRows();
     ImGui::EndChild();
     const auto count = visibleContentEntries().size();
@@ -1778,7 +1944,7 @@ void SceneEditor::drawFolderTreeNode(const std::string& folder) {
 }
 
 std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) const {
-    if (entry.readOnly()) return "Engine is read-only. Copy to Project to edit.";
+    if (entry.readOnly()) return "Engine is read-only.";
     if (entry.path.lexically_normal() == scenePath_.lexically_normal()) return "The open scene cannot be deleted.";
     if (entry.type == assets::AssetType::Mesh) {
         if (const auto* mesh = assets_.findMesh(entry.id); mesh && mesh->primitive != assets::MeshPrimitive::Imported)
@@ -1882,7 +2048,7 @@ void SceneEditor::drawAssetRows() {
         ? registry_.childFolders(contentFolder_) : std::vector<std::string>{};
     if (entries.empty() && folders.empty()) {
         ImGui::TextWrapped(contentQuery_.search.empty() && contentQuery_.type == assets::AssetType::Unknown
-            ? "This folder is empty. Import an OBJ or create a folder using Add."
+            ? "This folder is empty. Import assets or drop supported files here. Use Add to create a folder."
             : "No matching assets. Clear the search, choose All types, or include subfolders.");
         return;
     }
@@ -2181,7 +2347,14 @@ void SceneEditor::drawInstanceDetails() {
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##Mesh", mesh ? mesh->name.c_str() : "<missing>")) {
         for (const auto& candidate : assets_.meshes) {
-            const std::string label = candidate.name + "##" + std::to_string(candidate.id);
+            // Compatibility primitives are only shown while an existing Actor
+            // uses them; new Engine-only scenes should not offer duplicate copies.
+            if (candidate.id <= 3 && candidate.origin == assets::AssetOrigin::Project &&
+                std::none_of(world_.actors.begin(), world_.actors.end(), [&](const auto& instance) {
+                    return instance.mesh.meshId == candidate.id;
+                })) continue;
+            const std::string label = candidate.name +
+                (candidate.origin == assets::AssetOrigin::Engine ? " (Engine)" : "") + "##" + std::to_string(candidate.id);
             if (ImGui::Selectable(label.c_str(), actor->mesh.meshId == candidate.id)) {
                 actor->mesh.meshId = candidate.id; sceneDirty_ = true;
             }
@@ -2217,9 +2390,10 @@ void SceneEditor::drawInstanceDetails() {
     }
     ImGui::SeparatorText("Mesh");
     if (mesh) {
-        ImGui::TextWrapped("Type: %s", meshType(mesh->primitive));
+        ImGui::TextWrapped("Type: %s", mesh->origin == assets::AssetOrigin::Engine ? "Built-in StaticMesh" : meshType(mesh->primitive));
         ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
-        message(mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
+        message(mesh->origin == assets::AssetOrigin::Engine ? "Engine (read-only)" :
+            mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
     } else {
         ImGui::TextWrapped("Missing mesh #%llu", static_cast<unsigned long long>(actor->mesh.meshId));
     }
@@ -2553,6 +2727,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     }
     actorPanelFocused_ = false;
     contentFocused_ = false;
+    contentImportWindow_ = 0;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) assetDragCancelled_ = false;
     if (const auto* payload = ImGui::GetDragDropPayload(); payload && payload->IsDataType("RAE_ASSET") &&
         ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
@@ -2660,6 +2835,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawGarbageCollection();
     drawOutlineSettings();
     drawProjectSettings(settings, renderer);
+    drawImportResults();
     // Resolve diagnostic keyboard ownership in this frame before the viewport
     // handles hover shortcuts. Captured-image input never edits the live scene.
     diagnosticsPanel_.draw(renderer);
@@ -2668,7 +2844,9 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         [this] { duplicateForDrag(); }, registry_,
         [this](assets::AssetId mesh, const scene::Transform& transform) {
             createMeshActor(mesh, transform, "Place Mesh");
-        }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_);
+        }, [this](scene::ActorId actor, assets::AssetId material) {
+            assignActorMaterial(actor, material);
+    }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_ || importResultsFocused_);
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
@@ -2721,12 +2899,13 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     });
     drawMaterialWindow(renderer);
     drawAssetDetails(renderer);
+    processExternalImports();
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -2769,6 +2948,16 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     const bool outlineVisible = preferences.selectionOutline && !selection_.empty();
     settings.outlineActors = outlineVisible ? selection_.data() : nullptr;
     settings.outlineActorCount = outlineVisible ? static_cast<std::uint32_t>(selection_.size()) : 0;
+    if (viewport_.materialDragging()) {
+        // Hover feedback uses the existing outline pass, never the selection.
+        // Keep its storage alive through render(), even if UI vectors reallocate.
+        materialDropOutlineActor_ = viewport_.materialDropTarget();
+        const auto* target = world_.findActor(materialDropOutlineActor_);
+        const bool showTarget = target && target->visible;
+        settings.outlineActors = showTarget ? &materialDropOutlineActor_ : nullptr;
+        settings.outlineActorCount = showTarget ? 1u : 0u;
+        settings.outlineFrontObjects = false;
+    }
 }
 
 bool SceneEditor::drawCloseDialog(renderer::SceneRenderer& renderer) {

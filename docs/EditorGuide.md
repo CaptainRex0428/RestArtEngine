@@ -12,6 +12,8 @@
 
 资产文件操作限定在当前 Content：材质、网格和场景只能在各自的 Materials、Meshes、Scenes 目录树内移动；场景 sidecar 随文件移动。`Rename file...` 改文件名并保留 GUID，浏览器显示文件名，容器内部资产名保持原值。内置网格禁止移动／改名／删除；当前场景、当前 Actor 引用的资产和已加载到内存库的材质／网格不能删除，避免破坏引用或下次保存重新生成文件。尚未提供全工程引用扫描、资源卸载和文件操作 Undo；目录整体移动暂不支持。Content 获得焦点时，Actor 删除快捷键不会透传。
 
+导入容错可在 Content → `Import options...` 配置。`Skip degenerate triangles` 默认开启，FBX 零面积三角形跳过并警告；关闭后严格拒绝。选择文件和外部拖入共用设置，并保存为本机编辑器偏好。全部面退化时仍拒绝，源文件保持原样；细节见 [导入选项](Importing.md#导入选项)。
+
 ## 面板布局
 
 Content 用类型色帮助识别：网格蓝、材质绿、场景琥珀、Shader 紫。网格卡片底部色条、列表左侧标记、筛选选项和详情类型文字保持一致；缩略图显示真实内容，选中高亮仍跟随主题。具体色值集中在 [GUI 规范](GuiDevelopment.md#资产浏览与详情窗口)。
@@ -19,7 +21,7 @@ Content 用类型色帮助识别：网格蓝、材质绿、场景琥珀、Shader
 六个面板（World Outliner、Scene、Details、Viewport settings、Content & Editors、Scene Viewport）由 Dear ImGui 官方 Docking 系统统一排版。默认布局为左上 Outliner、左下同组的 Scene / Details 页签、右侧设置、底部 Content 和中央场景视口。
 
 **Scene** 显示场景级参数（工程与场景信息、Actor / Mesh / Material 数量、背景 Sky / Black、Key light 与阴影方式）；Viewport settings 只保留 View 相关项（Exposure、VSync、Reset camera）；操作状态与射线追踪摘要中的 Activity 段落移入 Details 顶部，编辑后能立刻在属性旁看到结果；**World Outliner** 每行左侧的小眼睛显示该 Actor 的可见性，点击即可切换（隐藏后名称变暗、眼睛加斜线），点名称完成选择；**Details** 提供主选中 Actor 的名称、可见性、变换与 Mesh / Material 分配编辑，并显示该场景实例的名称、Actor ID、网格类型／几何数量／来源以及它当前使用的材质。即使两个实例使用同一个 Sphere 网格，Details 也只显示当前主实例的信息，不汇总其他实例的材质。点击 Outliner 或视口中的 Actor 切到 Details；底部 Mesh 浏览不改变场景选择、Details 内容或强制切页。多选时明确显示主实例，无选中实例时显示空状态。手动切页后不会每帧强制跳回。
-**Content & Editors** 使用 Sources 文件夹树、路径导航、搜索／筛选和资产区。`Add...` 包含新建文件夹与场景网格选择，`Import...` 导入 OBJ，`Refresh` 重扫磁盘，`View...` 设置 Tiles／List、缩略图大小、名称／类型／大小排序与旧格式文件显示。Back／Forward／Up 和面包屑切换目录；搜索按名称和相对路径匹配全部空格分词，ASCII 不区分大小写，`Include subfolders` 控制递归范围，类型筛选与搜索同时生效。底部显示结果数和选中项；没有匹配时给出清除筛选的提示。Sources 可调宽、隐藏，窄窗自动收起；低矮面板缩小卡片以保留名称和类型。双击文件夹进入，单击资产只改变浏览器选择，双击资产打开 `Asset Details`（预览、GUID、路径、大小与类型信息）。详情里的 `Open` 或右键 `Open` 执行类型动作；网格右键 `Add Actor from mesh` 创建可撤销的场景实例。
+**Content & Editors** 使用 Sources 文件夹树、路径导航、搜索／筛选和资产区。`Add...` 包含新建文件夹与场景网格选择，`Import...` 多选导入 OBJ／FBX，也可从资源管理器拖入当前项目 Content 的资产区域；不支持或损坏的文件在 Import results 显示原因，完整规则见 [统一导入规范](Importing.md)。`Refresh` 重扫磁盘，`View...` 设置 Tiles／List、缩略图大小、名称／类型／大小排序与旧格式文件显示。Back／Forward／Up 和面包屑切换目录；搜索按名称和相对路径匹配全部空格分词，ASCII 不区分大小写，`Include subfolders` 控制递归范围，类型筛选与搜索同时生效。底部显示结果数和选中项；没有匹配时给出清除筛选的提示。Sources 可调宽、隐藏，窄窗自动收起；低矮面板缩小卡片以保留名称和类型。双击文件夹进入，单击资产只改变浏览器选择，双击资产打开 `Asset Details`（预览、GUID、路径、大小与类型信息）。详情里的 `Open` 或右键 `Open` 执行类型动作；网格右键 `Add Actor from mesh` 创建可撤销的场景实例。
 
 
 - 拖动面板标签，或悬浮窗口的标题栏，在停靠预览出现时松开鼠标。
@@ -32,9 +34,13 @@ Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机�
 
 交互式编辑器通过 Dear ImGui 原生设置将 Dock 树、窗口位置和尺寸写入本机 `RestArtEngine.imgui.ini`，重启后加载上次布局；没有另一份自定义布局文件。首次从旧版自由窗口布局升级时，新 DockSpace 根节点会建立默认布局。已有五面板布局仅在原 Details 所在组补入 Scene；原 Details 自由浮动时保留其位置尺寸并组成双页签，其他区域不重建。已有 Scene 的布局按用户安排保留。自动化自测不加载个人布局文件。Content & Editors 内是完整的 Content 浏览器（Materials / Meshes / Scenes 文件夹树、列表/网格资产区、导入与新建入口）；Material Editor / Shader Editor 两页位于独立材质窗口中。
 
-## 内置引擎材质
+## 材质拖放与内置引擎材质
+
+从 Content 列表或网格拖动材质到 Scene Viewport，可直接赋给鼠标命中的可见 Actor。拖动时只有当前目标显示描边，移动到另一实例立即切换，松手前不改变材质或选择。该目标提示沿用描边颜色与粗细，关闭选中描边也不隐藏拖放目标提示；结束后恢复原来的选中描边状态，不改偏好。松手只修改命中实例，使用相同 Mesh 的其他 Actor 不受影响；一次赋值是一条 `Assign Material` 撤销/重做，重复赋同一材质不增加历史。空白处、视口工具栏、被其他窗口遮挡的区域不接受投递，Esc 取消。项目材质和只读引擎材质都可通过此方式引用；保存场景后持久化引用。
 
 Content 的 Sources 区分 **Content** 和 **Engine**。`View > Show Engine` 控制引擎来源的可见性；隐藏 Sources 时仍可通过路径栏的根选择器切换。搜索、历史导航和向上导航在所选来源内工作。
+
+`Engine > Meshes` 提供 **Cylinder（圆柱）、Cube（方块）、Cone（锥体）、Sphere（圆球）、Torus（圆环）、Plane（平面）** 六个内置 StaticMesh。可直接拖入场景或右键 `Add Actor`，使用默认材质并支持撤销／重做；资产本身保持只读，各 Actor 的变换与材质独立。项目通过固定 ID 引用引擎网格，Save All 不复制这些文件到项目。旧场景（包括尚未迁移的 Sandbox 引用）仍能使用兼容图元；编辑器不会自动改写已有实例的网格引用。新建场景和 `+ Sphere`／`+ Cube` 同样使用引擎网格；旧工程仍能加载原 ID，启动不再生成项目 Builtin。
 
 `Engine > Materials > DefaultMaterial` 是引擎随包提供的中性灰材质。新建 Sphere/Cube、从 Content 网格添加或拖入场景的 Actor 默认引用它；已有 Actor 的材质不会被替换，也不会因为浏览另一份材质而改变新 Actor 的默认值。可在实例 Details 的 Material 下拉中为已有 Actor 分配这份材质。New material 同样从这份默认参数开始，但创建的是具有独立 GUID 的可编辑项目资产。
 
@@ -89,14 +95,14 @@ Premake 的 `vs2022` 操作还会生成 `.idea/.idea.RestArtEngine/.idea/runConf
 ## Actor 与 Mesh
 
 1. 在 Outliner 中选择 Actor，或直接左键点击视口中的网格。左侧切到 Details，显示被点击的具体实例；名称、可见性、变换与资产分配也在 Details 页编辑。
-2. 用 `+ Sphere` 或 `+ Cube` 新建 Actor，或用 Duplicate 复制当前 Actor。复制得到独立 Actor ID，仍可共享原来的 Mesh / Material 资产。Plane 可以在 Content 的 Meshes/Builtin 中右键 `Add Actor from mesh` 创建。
+2. 用 `+ Sphere` 或 `+ Cube` 新建 Actor，或用 Duplicate 复制当前 Actor。复制得到独立 Actor ID，仍可共享原来的 Mesh / Material 资产。Plane 可以在 Engine 的 Meshes 中拖入视口或右键 `Add Actor from mesh` 创建。
 3. 在 Details 中更换 Mesh 与 Material 引用。使用 Outliner 的 `Delete` 按钮，或右键 Actor 后选择 `Delete Actor` 删除场景实例；对应的 Mesh 与 Material 资产保留。
-4. 在 Content 中导入 OBJ；几何写入 `Content/Meshes/*.rasset` 后按 GUID 引用。将列表或网格中的 Mesh 拖入 Scene Viewport 即可放置实例，也可通过 `Add Actor from mesh` 创建，或在 Details 中将它分配给现有 Actor；仅浏览或导入资源不会把它当作场景实例显示在 Details。
+4. 在 Content 中通过 `Import...` 多选或外部拖入导入 OBJ／FBX；几何写入当前项目 Content 文件夹的 `.rasset` 后按 GUID 引用。同名创建新资产，导入本身不创建 Actor。将列表或网格中的 Mesh 拖入 Scene Viewport 即可放置实例，也可通过 `Add Actor from mesh` 创建，或在 Details 中将它分配给现有 Actor；仅浏览或导入资源不会把它当作场景实例显示在 Details。
 5. `Save Scene` 保存到当前活动场景路径，初始路径来自工程 `defaultScene`。重新加载场景会读取保存的 Actor 与资产引用；加载失败时保留当前场景并显示错误。
 
-旋转使用度，场景 Y 轴向上。OBJ 暂时读取位置和法线，不读取贴图、UV、MTL 或骨骼；需要纹理的 DCC 材质不会自动迁移。缺少法线时由导入器生成，复杂多边形建议导入前先三角化。
+旋转使用度，场景 Y 轴向上。OBJ／FBX 暂时读取静态位置和法线，不迁移贴图、UV、材质、骨骼或动画。FBX 合并默认姿态的网格节点并烘焙层级变换、转换为左手 Y-up 米制；OBJ 保留源坐标。缺少法线时由导入器生成，复杂 OBJ 多边形建议导入前先三角化。
 
-拖入 Mesh 时，视口显示包围盒与接触点预览。落点取鼠标射线命中的最近可见网格表面，未命中时使用 Y=0 地面；根据网格包围盒偏移实例，保持默认旋转与缩放。没有有效落点时不创建。松开左键后创建一个共享该 Mesh 的 Actor，使用当前编辑器所选材质，自动选中并显示 Details；一次 Ctrl+Z 撤销放置，Ctrl+Y 恢复同一实例与位置。按 Esc、在视口外或工具栏上松手均取消放置；Material、Scene 等资产不接受为网格实例。拖拽期间视口相机、拾取与变换手柄不会接管这次输入。
+拖入 Mesh 时，视口显示包围盒与接触点预览。落点取鼠标射线命中的最近可见网格表面，未命中时使用 Y=0 地面；根据网格包围盒偏移实例，保持默认旋转与缩放。没有有效落点时不创建。松开左键后创建一个共享该 Mesh 的 Actor，使用引擎默认材质，自动选中并显示 Details；一次 Ctrl+Z 撤销放置，Ctrl+Y 恢复同一实例与位置。按 Esc、在视口外或工具栏上松手均取消放置；Material 拖放用于给已有 Actor 赋材质，不创建实例，Scene 等其他资产不接受投递。拖拽期间视口相机、拾取与变换手柄不会接管这次输入。
 
 ## 视口变换工具
 
@@ -131,7 +137,7 @@ W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete
 
 按住 Alt 后从变换手柄开始拖动，会在首次有效拖动时复制，原件保留在原位置，副本共享原 Mesh / Material 并成为新选择。没有额外的固定位置偏移，单击不移动不会生成副本；每次手势只复制一次，中途松开 Alt 不影响继续拖动，普通拖动开始后再按 Alt 不切换为复制。整组“复制＋最终变换”合为一条历史：Ctrl+Z 删除副本并恢复原选中集合，Ctrl+Y 恢复同一批副本的 ID、最终变换与选择。该操作和 Ctrl+D 的逐个复制历史不同。
 
-历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿及 Actor 名称及 Mesh / Material 引用修改尚未纳入历史；可见性开关和 H 已接入撤销。Actor 仍持有一个 StaticMeshComponent，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
+历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿、Actor 名称、Mesh 引用和 Details 下拉的 Material 引用修改尚未纳入历史；Content 拖放赋材质、可见性开关和 H 已接入撤销。Actor 仍持有一个 StaticMeshComponent，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
 
 ## Material 参数编辑
 

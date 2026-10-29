@@ -12,7 +12,8 @@ RestArtEngine/
 │  └─ RestArtEngine.exe             # CMake install package
 ├─ Engine.raeengine
 ├─ Content/
-│  └─ Materials/DefaultMaterial.rasset # 共享、只读的引擎默认材质
+│  ├─ Materials/DefaultMaterial.rasset # 共享、只读的引擎默认材质
+│  └─ Meshes/*.rasset              # Cube / Sphere / Cylinder / Cone / Torus / Plane
 ├─ Shaders/
 │  ├─ Private/                  # 公共渲染管线
 │  └─ Materials/                # 默认材质模板
@@ -101,7 +102,7 @@ cmake --build --preset windows-debug --target RestArtEngine
 
 1. `RestArtEngine.exe` 能在目标机器启动 Project Manager。
 2. `Engine.raeengine` 的版本和 hash 与此次构建一致。
-3. `Shaders/Private/Scene.hlsl`、默认材质 Shader 模板与 `Content/Materials/DefaultMaterial.rasset` 随包存在。
+3. `Shaders/Private/Scene.hlsl`、默认材质 Shader 模板、`Content/Materials/DefaultMaterial.rasset` 和 `Content/Meshes/` 六个内置网格随包存在；缺失／损坏的引擎网格在挂载时明确报错。
 4. 若分发案例，`Projects/Sandbox/Sandbox.raproject` 的 `engineRoot`、版本和 hash 指向当前引擎。
 5. 在干净目录中用 `RestArtEngine.exe --project` 打开一个外部工程，确认工程内容不会写回引擎目录。
 

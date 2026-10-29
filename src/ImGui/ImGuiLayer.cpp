@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <shellapi.h>
 #include <d3d11.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -20,6 +21,7 @@
 #include <cfloat>
 
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shell32.lib")
 
 // The backend intentionally leaves this declaration to its consumer.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -72,6 +74,7 @@ const wchar_t* const platformContextProperty = MAKEINTATOM(platformContextAtom);
 struct PlatformWindowBinding {
     ImGuiContext* context;
     WNDPROC procedure;
+    ImGuiLayer* layer;
 };
 // A native property is normally sufficient. Keep the process-local binding as
 // a fallback if Win32 cannot allocate even an integer-keyed property; a visible
@@ -95,7 +98,9 @@ LRESULT CALLBACK platformWindowProc(HWND window, UINT message, WPARAM wparam, LP
     auto* previous = ImGui::GetCurrentContext();
     if (owned) ImGui::SetCurrentContext(owned);
     LRESULT result = 0;
-    if (message == WM_CLOSE && owned) {
+    if (message == WM_DROPFILES && owned && ImGuiLayer::handleMessage(window, message, wparam, lparam)) {
+        // The editor will check this drop against the current Content region.
+    } else if (message == WM_CLOSE && owned) {
         // Closing a material window only hides its UI. Let ImGui update the
         // p_open flag next frame, then retire both HWND and swap chain together.
         // In this pinned backend DefWindowProc would destroy the HWND too soon.
@@ -251,6 +256,7 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
 }
 
 void ImGuiLayer::shutdown() noexcept {
+    setFileDropHandler({});
     if (context_) {
         auto* owned = static_cast<ImGuiContext*>(context_);
         auto* previous = ImGui::GetCurrentContext();
@@ -365,7 +371,7 @@ void ImGuiLayer::createPlatformWindow(ImGuiViewport* viewport) {
     if (!hwnd) return;
     const auto original = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
     auto* owned = ImGui::GetCurrentContext();
-    platformWindowBindings.insert_or_assign(hwnd, PlatformWindowBinding{owned, original});
+    platformWindowBindings.insert_or_assign(hwnd, PlatformWindowBinding{owned, original, layer});
     if (!SetPropW(hwnd, platformProcedureProperty, reinterpret_cast<HANDLE>(original))) {
         std::cerr << "ImGui: native procedure property failed; retaining the engine registry binding.\n";
     }
@@ -382,6 +388,7 @@ void ImGuiLayer::createPlatformWindow(ImGuiViewport* viewport) {
         backendContextBindingWarningReported = true;
         std::cerr << "ImGui: native backend context property unavailable; using the engine binding.\n";
     }
+    DragAcceptFiles(hwnd, static_cast<BOOL>(static_cast<bool>(layer->fileDropHandler_)));
     // Reuse the main window's embedded application icon without owning a second
     // icon resource lifetime. The OS/backend owns the secondary window itself.
     for (const auto size : {ICON_BIG, ICON_SMALL}) {
@@ -470,13 +477,66 @@ bool ImGuiLayer::handleMessage(void* window, unsigned message,
                                std::uintptr_t wparam, std::intptr_t lparam) {
     if (!window) return false;
     auto* layer = static_cast<ImGuiLayer*>(GetPropW(static_cast<HWND>(window), contextProperty));
+    if (!layer) {
+        const auto binding = platformWindowBindings.find(static_cast<HWND>(window));
+        if (binding != platformWindowBindings.end()) layer = binding->second.layer;
+    }
     if (!layer || !layer->initialized_) return false;
     auto* previous = ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(layer->context_));
     const auto result = ImGui_ImplWin32_WndProcHandler(
         static_cast<HWND>(window), message, static_cast<WPARAM>(wparam), static_cast<LPARAM>(lparam));
+    if (message == WM_DROPFILES) layer->dispatchFileDrop(window, wparam);
     ImGui::SetCurrentContext(previous);
-    return result != 0;
+    return message == WM_DROPFILES || result != 0;
+}
+
+void ImGuiLayer::setFileDropHandler(FileDropHandler handler) {
+    fileDropHandler_ = std::move(handler);
+    const BOOL enabled = static_cast<BOOL>(static_cast<bool>(fileDropHandler_));
+    if (window_) DragAcceptFiles(static_cast<HWND>(window_), enabled);
+    if (context_) {
+        const auto& viewports = static_cast<ImGuiContext*>(context_)->Viewports;
+        for (int index = 1; index < viewports.Size; ++index) {
+            const auto* viewport = viewports[index];
+            const auto hwnd = static_cast<HWND>(viewport->PlatformHandleRaw
+                ? viewport->PlatformHandleRaw : viewport->PlatformHandle);
+            if (hwnd) DragAcceptFiles(hwnd, enabled);
+        }
+    }
+}
+
+void ImGuiLayer::dispatchFileDrop(void* window, std::uintptr_t drop) {
+    const auto handle = reinterpret_cast<HDROP>(drop);
+    struct FinishDrop { HDROP handle; ~FinishDrop() { DragFinish(handle); } } finish{handle};
+    if (!fileDropHandler_) return;
+    try {
+        std::vector<std::filesystem::path> paths;
+        const auto count = DragQueryFileW(handle, 0xffffffffu, nullptr, 0);
+        paths.reserve(count);
+        for (UINT index = 0; index < count; ++index) {
+            const auto length = DragQueryFileW(handle, index, nullptr, 0);
+            if (!length) continue;
+            std::wstring path(static_cast<std::size_t>(length) + 1, L'\0');
+            if (!DragQueryFileW(handle, index, path.data(), length + 1)) continue;
+            path.resize(length);
+            paths.emplace_back(path);
+        }
+        POINT point{};
+        const bool client = DragQueryPoint(handle, &point) != FALSE;
+        if (client && (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable))
+            ClientToScreen(static_cast<HWND>(window), &point);
+        auto* sourceViewport = ImGui::FindViewportByPlatformHandle(window);
+        if (!sourceViewport) {
+            for (auto* viewport : ImGui::GetCurrentContext()->Viewports)
+                if (viewport->PlatformHandleRaw == window) { sourceViewport = viewport; break; }
+        }
+        // A nonclient drop is deliberately outside every editor content region.
+        fileDropHandler_(std::move(paths), client ? static_cast<float>(point.x) : -FLT_MAX,
+            client ? static_cast<float>(point.y) : -FLT_MAX, sourceViewport ? sourceViewport->ID : 0);
+    } catch (const std::exception& error) {
+        std::cerr << "ImGui: could not queue native file drop: " << error.what() << '\n';
+    }
 }
 
 } // namespace rae::imgui
