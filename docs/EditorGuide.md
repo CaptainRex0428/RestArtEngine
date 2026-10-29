@@ -2,7 +2,7 @@
 
 启动时先出现无边框加载页（占主屏 28% 宽、按图片比例、居中），加载完成后面板窗口按主屏 80% 大小居中显示，带原生边框与自定义标题栏。在 Rider 打开根目录 `RestArtEngine.sln`，编译并运行 `RestArtEngine`（输出文件名为 `RestArtEngine.exe`）。无参数启动会先进入 Project Manager；选择工程后再进入编辑器。本页解释当前基础编辑器的数据关系、保存方式，以及引擎内编辑 HLSL 后 Apply 的工作流。界面使用 Dear ImGui；功能代码位于 `src/Editor/`。
 
-工程管理器列出 `Projects/` 下的所有示例工程（`Sandbox`、`RayTracing_Simple`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。
+工程管理器列出 `Projects/` 下的所有示例工程（`Sandbox`、`RayTracing_Simple`、`PathTracing_CornellBox`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。
 
 引擎目录根部的 `Engine.raeengine` 保存引擎版本和 hash；工程描述中的 `engineVersion` / `engineHash` 绑定到该身份。工程管理器打开工程时先做兼容检查：匹配时直接进入编辑器；版本或 hash 不匹配时可更新绑定、切换到匹配的引擎，或者关闭；旧的 v1 工程没有绑定，首次打开后可升级保存。
 
@@ -13,6 +13,36 @@
 资产文件操作限定在当前 Content：材质、网格和场景只能在各自的 Materials、Meshes、Scenes 目录树内移动；场景 sidecar 随文件移动。`Rename file...` 改文件名并保留 GUID，浏览器显示文件名，容器内部资产名保持原值。项目导入网格右键 `Reimport` 从记录路径更新，`Reimport from...` 自选新的源文件；两者保持 GUID、名称、存放位置与 Actor 引用。`Delete...` 确认后同步删除文件与内存资产，保留外部源文件；当前与已保存场景引用、Engine、内置图元、当前／启动场景及 Shader 等会阻止删除。删除网格／材质成功会清空场景编辑历史，确认框明确提示；文件操作不支持 Undo，目录整体移动暂不支持。详细失败和引用检查规则见 [资源导入](Importing.md)。Content 获得焦点时，Actor 删除快捷键不会透传。
 
 导入容错可在 Content → `Import options...` 配置。`Skip degenerate triangles` 默认开启，FBX 零面积三角形跳过并警告；关闭后严格拒绝。选择文件和外部拖入共用设置，并保存为本机编辑器偏好。全部面退化时仍拒绝，源文件保持原样；细节见 [导入选项](Importing.md#导入选项)。
+
+## 保存场景初始视角与照明
+
+Scene 面板的 `Store current view` 把当前轨道相机与曝光记录为场景初始视角，`Restore view` 恢复，`Clear opening view` 清除；Save Scene 将其写入场景，普通相机导航不会自动修改这份书签。打开／重新加载场景时自动应用；旧场景没有书签则保持现有视角。
+
+Outliner 的 `+ Light` 提供 Directional、Sky、Rect、Spot 和 Point。选中后在 Details 编辑颜色、强度及对应范围／角度／尺寸，参数实时生效且支持撤销重做；视口标记可点击，支持 Gizmo 与 F 聚焦。灯光沿局部 -Z 发射，缩放不改变光参数。存在任何灯光 Actor（包括隐藏灯）时，Scene 的旧灯光控件禁用，避免同时使用两套光源。完整约定见 [灯光模块](Lighting.md)。
+
+无灯光 Actor 时，`Save lighting in scene` 继续保存旧方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸、辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。旧 [PathTracing_CornellBox](../Projects/PathTracing_CornellBox/README.md) 仍按此配置加载，渐进式 Path Tracing 保留可见发光面和 MIS 采样。
+
+## 底栏与命令控制台
+
+主窗口底栏为工作区预留独立高度，停靠面板和场景视口随窗口尺寸重新排版。左侧 `Content` 聚焦已有资产浏览器（`Ctrl+Space`），`Output Log` 打开或关闭会话日志；中间 `Cmd` 输入引擎命令，`Ctrl+反引号` 聚焦。右侧 `Tools` 提供 Profiler、Frame Inspector、GC、Project Settings 和 CPU Trace 开关；宽窗口直接显示 Diagnostics，窄窗口将 Content 和 Output Log 收入 Tools。
+
+`All Saved` / `Unsaved` 汇总场景、已应用材质、未应用材质草稿、Shader 和工程配置。点击可查看分类状态并执行 Save Scene、当前材质保存或 Save All，保持各自的保存职责。
+
+命令区支持 Enter 执行、Tab 补全、上下键历史（向下越过最新记录恢复未完成输入）。输入 `help` 查看全部命令，`help scene` 按前缀筛选。常用命令：
+
+| 命令 | 行为 |
+| --- | --- |
+| `scene.info` / `select <Actor ID>` | 查看场景 Actor ID／选择实例 |
+| `actor.addCube` / `actor.addSphere` / `actor.duplicate` | 使用现有 Actor 操作及撤销事务 |
+| `edit.undo` / `edit.redo` | 使用编辑器撤销栈 |
+| `scene.save` / `material.save` / `save.all` | 保存场景／当前已应用材质／全部修改 |
+| `debug.profiler` / `debug.frameInspector` | 打开诊断工具 |
+| `gc.settings` / `gc.collect` | GC 设置／请求帧末回收 |
+| `trace.start` / `trace.stop` | 开始／停止 CPU Trace，导出在 Diagnostics 中进行 |
+| `content` / `project.settings` / `layout.restore` | 资产浏览器／项目设置／恢复布局 |
+| `clear` | 清空输出，保留历史 |
+
+命令名称区分大小写；空格分隔参数，单／双引号支持带空格的参数。此处为引擎命令入口，不执行 PowerShell、系统 Shell 或 Python。未知命令、参数错误与操作失败会打开 Output Log。日志窗口支持停靠、外移、筛选、复制、清空和跟随滚动；保留本会话最近 512 条命令结果／编辑器提示与 100 条命令历史，重启不保留，不捕获全部 stdout 或渲染器日志。命令输入和日志窗口焦点会阻止场景快捷键透传。
 
 ## 面板布局
 
@@ -36,7 +66,7 @@ Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机�
 
 ## 材质拖放与内置引擎材质
 
-从 Content 列表或网格拖动材质到 Scene Viewport，可直接赋给鼠标命中的可见 Actor。拖动时只有当前目标显示描边，移动到另一实例立即切换，松手前不改变材质或选择。该目标提示沿用描边颜色与粗细，关闭选中描边也不隐藏拖放目标提示；结束后恢复原来的选中描边状态，不改偏好。松手只修改命中实例，使用相同 Mesh 的其他 Actor 不受影响；一次赋值是一条 `Assign Material` 撤销/重做，重复赋同一材质不增加历史。空白处、视口工具栏、被其他窗口遮挡的区域不接受投递，Esc 取消。项目材质和只读引擎材质都可通过此方式引用；保存场景后持久化引用。
+从 Content 列表或网格拖动材质到 Scene Viewport，可直接赋给鼠标命中的可见 Actor。拖动时只有当前目标显示描边，移动到另一实例立即切换，松手前不改变材质或选择。该目标提示沿用描边颜色与粗细，关闭选中描边也不隐藏拖放目标提示；结束后恢复原来的选中描边状态，不改偏好。松手只修改命中实例中该三角形所属的材质 Slot，其他 Slot 和使用相同 Mesh 的其他 Actor 不受影响；一次赋值是一条 `Assign Material` 撤销/重做，重复赋同一材质不增加历史。空白处、视口工具栏、被其他窗口遮挡的区域不接受投递，Esc 取消。项目材质和只读引擎材质都可通过此方式引用；保存场景后持久化引用。
 
 Content 的 Sources 区分 **Content** 和 **Engine**。`View > Show Engine` 控制引擎来源的可见性；隐藏 Sources 时仍可通过路径栏的根选择器切换。搜索、历史导航和向上导航在所选来源内工作。
 
@@ -100,7 +130,7 @@ Premake 的 `vs2022` 操作还会生成 `.idea/.idea.RestArtEngine/.idea/runConf
 4. 在 Content 中通过 `Import...` 多选或外部拖入导入 OBJ／FBX；几何写入当前项目 Content 文件夹的 `.rasset` 后按 GUID 引用。同名创建新资产，导入本身不创建 Actor。将列表或网格中的 Mesh 拖入 Scene Viewport 即可放置实例，也可通过 `Add Actor from mesh` 创建，或在 Details 中将它分配给现有 Actor；仅浏览或导入资源不会把它当作场景实例显示在 Details。
 5. `Save Scene` 保存到当前活动场景路径，初始路径来自工程 `defaultScene`。重新加载场景会读取保存的 Actor 与资产引用；加载失败时保留当前场景并显示错误。
 
-旋转使用度，场景 Y 轴向上。OBJ／FBX 暂时读取静态位置和法线，不迁移贴图、UV、材质、骨骼或动画。FBX 合并默认姿态的网格节点并烘焙层级变换、转换为左手 Y-up 米制；OBJ 保留源坐标。缺少法线时由导入器生成，复杂 OBJ 多边形建议导入前先三角化。
+旋转使用度，场景 Y 轴向上。OBJ／FBX 读取静态位置、法线、面材质分组与 UV：FBX 最多保留前四套，OBJ 保存一套；几何、Slot 和 UV 一起保存在模型 `.rasset` 中。源贴图、材质着色图、骨骼和动画不迁移。FBX 合并默认姿态的网格节点并烘焙层级变换、转换为左手 Y-up 米制；OBJ 保留源坐标。缺少法线时由导入器生成，复杂 OBJ 多边形建议导入前先三角化。
 
 拖入 Mesh 时，视口显示包围盒与接触点预览。落点取鼠标射线命中的最近可见网格表面，未命中时使用 Y=0 地面；根据网格包围盒偏移实例，保持默认旋转与缩放。没有有效落点时不创建。松开左键后创建一个共享该 Mesh 的 Actor，使用引擎默认材质，自动选中并显示 Details；一次 Ctrl+Z 撤销放置，Ctrl+Y 恢复同一实例与位置。按 Esc、在视口外或工具栏上松手均取消放置；Material 拖放用于给已有 Actor 赋材质，不创建实例，Scene 等其他资产不接受投递。拖拽期间视口相机、拾取与变换手柄不会接管这次输入。
 
@@ -137,13 +167,13 @@ W / E / R 和 Space 在视口具有焦点或鼠标位于视口时生效。Delete
 
 按住 Alt 后从变换手柄开始拖动，会在首次有效拖动时复制，原件保留在原位置，副本共享原 Mesh / Material 并成为新选择。没有额外的固定位置偏移，单击不移动不会生成副本；每次手势只复制一次，中途松开 Alt 不影响继续拖动，普通拖动开始后再按 Alt 不切换为复制。整组“复制＋最终变换”合为一条历史：Ctrl+Z 删除副本并恢复原选中集合，Ctrl+Y 恢复同一批副本的 ID、最终变换与选择。该操作和 Ctrl+D 的逐个复制历史不同。
 
-历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿、Actor 名称、Mesh 引用和 Details 下拉的 Material 引用修改尚未纳入历史；Content 拖放赋材质、可见性开关和 H 已接入撤销。Actor 仍持有一个 StaticMeshComponent，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
+历史默认最多 64 步，不跨会话保存；材质 / Shader 草稿和 Actor 名称尚未纳入历史；Details 的 Mesh 分配、材质 Slot 赋值／Reset、Content 拖放赋材质、可见性开关、H 和灯光属性已接入撤销。Actor 为静态网格或灯光，没有父子组件层级。事务实现及边界见 [UndoTransactions.md](UndoTransactions.md)。
 
 ## Material 参数编辑
 
 ### 打开独立材质窗口
 
-在 Details 的 `Static Mesh Component` 中点击 **Edit assigned material**，打开该 Actor 当前使用的材质。也可以先选择场景中的实例，再点击 Details 中的当前材质名称。两个实例即使共享同一 Mesh，也按各自的材质引用显示；此处不展示整个 Mesh 在场景中的材质集合。打开的仍是共享材质资产编辑器，修改会影响所有引用该材质的实例，不会自动创建材质副本。
+单 Slot 网格在 Details 的 `Static Mesh Component` 中点击 **Edit assigned material** 或当前材质名称；多 Slot 网格点击对应槽的 **Edit material**，打开该 Actor 在该槽实际使用的材质。两个实例即使共享同一 Mesh，也按各自的材质引用显示；此处不展示整个 Mesh 在场景中的材质集合。打开的仍是共享材质资产编辑器，修改会影响所有引用该材质的实例，不会自动创建材质副本。
 
 独立窗口包含 **Material Editor** 和 **Shader Editor** 两页，具有系统标题栏、边框和任务栏入口，可移到引擎主窗口外；重复点击材质会复用并聚焦已有窗口，最小化后可恢复。没有场景引用时可用 Content 中的 **Open material editor** 或 `UI > Material editor...` 打开材质库，再选择或新建材质。
 
@@ -155,19 +185,21 @@ Ground 默认启用 `Grid`：世界 XZ 平面每 1 个单位一格，每 5 个�
 
 独立材质窗口中的 Material Editor 可以创建和选择材质，调整 Base Color、Roughness、Metallic 与 Grid。颜色编辑、滑块拖动和开关变化在同帧渲染中预览，所有引用该材质的 Actor 一起更新，前向、延迟及光追反射使用同一组预览参数；无需点击 Apply 或重新编译 Shader。
 
-界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/` 下的 `.rasset`（按 GUID 保留已有文件的子目录和文件名，新资产使用名称；旧 `.ramat` 保留只读）；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
+界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，只标记该材质未保存，不标记场景；`Discard draft` 恢复最近已提交版本。之后使用 `Save material asset` 仅将当前已应用材质写入 `Content/Materials/` 下的 `.rasset`（按 GUID 保留已有文件的子目录和文件名，新资产使用名称；旧 `.ramat` 保留只读）。其他材质和场景不随之保存；草稿尚未 Apply 或当前材质来自只读 Engine 时按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
 
 `Cull` 是逐材质的面剔除选项：Back 剔除背面、Front 剔除正面、Off 双面可见；显示背面时使用翻转法线参与光照。它替代原 Two-sided 复选框，兼容已有资产中的 `twoSided`。`ZTest` 选择深度比较，`ZWrite` 控制深度写入；默认 Less／On，Disabled 会同时禁止测试和写入。三者即时预览，Apply／Save／Discard 与数值参数语义相同。Cull 同时作用于光栅、阴影、光追和拾取；ZTest／ZWrite 改变光栅主可见性。当前硬件光追／GI 要求可见材质使用 Less 或 LessEqual 且写深度，其他设置会报告实际不可用，恢复后自动重新启用。旧 `.ramat` 或场景快照缺少 `twoSided` 时仍按双面读取，现代容器缺该字段仍按单面读取。
 
 视口拾取遵循 Cull 并跳过 ZTest Never 的材质；其他自定义深度模式仍按几何最近命中拾取，不模拟 Always／Greater 或关闭深度写入时的最终绘制顺序，可从 Outliner 选择这些特殊效果对象。
 
-`Save material assets` 写入独立 `.rasset` 容器并保存当前场景的 v3 引用。`Save Scene` 保存 Actor 与资产 GUID 引用，先把已提交材质和网格写入独立容器，再写 v3 场景；不内嵌材质参数，也不会自动应用参数草稿。`Save All` 会先应用草稿，再保存材质、Shader 与场景；Shader 编译失败时显示错误并留在编辑器中。
+`Save Scene`／`Save As` 只保存 Actor、变换、可见性、背景与资产 GUID 引用，不写网格或材质，不应用草稿，也不清除资产的未保存状态。场景的 `Scene saved` 仅表示场景已保存；资产未保存时仍参与退出／切换工程提示。`Save All` 先应用材质和 Shader 草稿，再保存有变化的资产、场景与工程配置；Shader 编译失败时显示错误并留在编辑器中。各文件之间尚无整体保存事务。
+
+场景清单只保留实际使用的资产引用；未使用资产继续保留在 Content。保存前只通过 Content 文件索引检查引用是否已落盘，不读取几何或生成缩略图。未落盘或已删除的依赖会提示先保存资产或使用 Save All，不写出悬空引用；Save As 成功后才切换活动路径。正常 UI 导入、New material 和 Copy to Project 会先发布独立资产；底层 API 创建的纯内存资产需调用方显式保存。已有磁盘资产的内存修改可以保持未保存，重载后恢复磁盘参数。资产保存采用增量写入，实际修改的大型网格落盘仍可能耗时，详见 [资产保存规则](AssetFormat.md#增量网格保存)。
 
 v2/v3 场景引用已加载的材质，v1 仍兼容场景内嵌快照。启动时递归读取 `Content/Materials/` 和 `Content/Meshes/`，再解析场景 GUID；Content 的 Open 场景操作先加载磁盘材质/网格，而普通 `Load Scene` 使用当前内存资产，不自动重新加载全部磁盘资产。`Reload material assets` 显式重新读取独立材质文件并更新引用这些材质的 Actor。加载失败时保留当前资产并显示错误。
 
 多个 Actor 可以引用同一 Material，因此编辑草稿时会同步预览所有引用它的物体。要给某个 Actor 独立外观，先创建新材质，再通过 Details 将它分配给该 Actor。
 
-这是参数式材质编辑器，使用体验接近编辑材质实例的参数。当前没有 UE 式节点连线、节点到 HLSL 生成、多材质槽或独立的每材质 Shader 图。
+这是参数式材质编辑器，使用体验接近编辑材质实例的参数。模型已经支持多材质 Slot，按 Actor 实例独立绑定；当前没有 UE 式节点连线、节点到 HLSL 生成或独立的每材质 Shader 图。
 
 ## Shader 编辑与 Apply
 
@@ -234,3 +266,15 @@ F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板�
 渲染自测和编辑器自测需要 Windows / DX11 设备，分别验证图像与 Shader Apply / 场景编辑效果。
 
 完整目录职责、UE 概念对照及当前能力边界见 [Architecture.md](Architecture.md)。
+
+## 导入网格的材质 Slot 与 UV
+
+导入网格按源文件的面材质 ID 建立命名 Slot。选中 Actor 后，Details 的每个 Slot 可单独选择材质、打开材质编辑器或 Reset 恢复继承；修改立即生效并可撤销／重做。有效材质依次取 Actor 的 Slot override、网格 Slot 默认材质、Actor 的原单材质 fallback。旧单 Slot 网格保留原材质控件。将材质从 Content 拖到模型上时，只修改鼠标命中三角形所属的 Slot；其他 Actor 实例与 Slot 不变。
+
+Slot 绑定随 Save Scene 保存，材质参数仍由 Save Asset／Save All 保存；这两类修改遵守已有独立 dirty 规则。模型重导入时按稳定源 Slot 标识恢复绑定，新增 Slot 继承默认，已删除 Slot 不会错绑到其他表面。源材质同名导致身份无法唯一识别时，重导入会明确拒绝，保留原资产；可在源文件中使用唯一材质名称，再作为新资产导入。
+
+Mesh 的 Asset Details 显示材质 Slot 和实际保存的 UV 通道名称。FBX 最多保留前四套（UV0–UV3），OBJ 保存一套；没有的通道不分配数据。全部 Slot、分区、UV 坐标与几何保存在同一个 `.rasset`，无需外部 UV 文件。此功能保留几何属性，不自动转换源 DCC 材质图或导入其贴图。
+
+## 相机与视口
+
+视口相机、场景 Camera Actor、正交视图和独立相机预览的操作、保存与渲染边界见 [Camera 系统](Camera.md)。`Viewport settings` 的 `Four views` 开启四分屏，每格独立导航并支持最大化；Camera Details 的 `Depth of field` 控制对焦距离、光圈和传感器高度，支持撤销与保存。

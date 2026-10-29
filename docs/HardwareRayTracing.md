@@ -43,19 +43,22 @@ Windows 实现位于 `src/Renderer/D3D12/HardwareRayTracing.*`，在现有 DX11 
 
 Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到上限仍继续更新；场景或相机变化使历史整体重置。实时解析采用 5×5 几何／材质边缘感知空间滤波，粗糙度小于 0.12 的近镜面表面不做空间模糊。Progressive 仍按目标样本停止，当前没有该模式的降噪器。
 
-`Ray-traced reflections` 仅用于 GI Disabled；GI 启用后采用独立 `Indirect specular` 请求。`Ray-traced shadows` 决定硬件预览／Progressive 的方向光遮挡，Realtime 主直接光则沿用 Scene 中的 PCF／PCSS／CSM 等设置。GI 两个贡献开关只分类第一接收表面的 BRDF，次级表面保留完整光传输，因此漫反射 GI 仍可出现在镜面里。
+`Ray-traced reflections` 仅用于 GI Disabled；GI 启用后采用独立 `Indirect specular` 请求。`Ray-traced shadows` 决定硬件预览／Progressive 的灯光遮挡，并与每灯 Cast shadows、Scene 的全局 Disabled 共同生效。Realtime 主直接光沿用光栅设置：首个投影方向光可用 PCF／PCSS／CSM，局部及附加方向光的直接阴影需 Analytic rays。GI 两个贡献开关只分类第一接收表面的 BRDF，次级表面保留完整光传输，因此漫反射 GI 仍可出现在镜面里。
 
 ## Shader 与数据契约
 
-关闭 GI 的硬件预览沿用程序化环境漫反射及单方向反射，不计算物体间漫反射颜色溢出，也不随等待收敛。GI 路径计算表面间反弹和粗糙反射，按更新模式使用完整画面累积或连续间接光历史。实际 DXR dispatch、开关像素差异及零验证错误仅证明通道运行，GI 画质还需通过颜色传递、收敛和实时组合验证。
+关闭 GI 的硬件预览使用共享灯光列表及程序化环境近似，不计算物体间漫反射颜色溢出，也不随等待收敛。GI 路径计算表面间反弹和粗糙反射，按更新模式使用完整画面累积或连续间接光历史。实际 DXR dispatch、开关像素差异及零验证错误仅证明通道运行，GI 画质还需通过颜色传递、收敛和实时组合验证。
 
 | 绑定 | 内容 |
 | --- | --- |
-| b0 | 共用 `SceneConstants`，144 字节。 |
-| b5 | `HardwareConstants`：逆 ViewProjection、输出与效果参数、样本批次／反弹数／算法、更新模式／贡献位／解析阶段／独立序列索引，128 字节。 |
+| b0 | 共用 `SceneConstants`，176 字节。 |
+| b5 | `HardwareConstants`：逆 ViewProjection、输出与效果参数、样本批次／反弹数／算法、更新模式／贡献位／解析阶段／独立序列索引、兼容矩形参数与薄透镜参数，208 字节。 |
+| b7 | `LightingConstants`：灯光计数／模式、Sky 聚合及 32 个光源；3104 字节，与光栅共享布局且纳入 GI 历史键。 |
 | t4 | 共用 `RayTriangle`，80 字节，包含位置、几何法线、颜色与材质标志。 |
 | t7 | TLAS。 |
 | t8 | 每个三角形三个世界空间平滑顶点法线，float3。 |
+| t10 | 可选 UV 顶点属性，两个 float4 打包 UV0–3，由同一网格的实例共享。 |
+| t11 | 仅有 UV 三角形的 uint4：三个 UV 顶点索引与通道存在 mask。 |
 | u0 | RGBA8 硬件输出。 |
 | u1 | 非共享 RGBA32_FLOAT 线性 HDR 样本均值。 |
 | u2 | 非共享 RGBA32_FLOAT 主表面法线与射线距离引导。 |
@@ -77,3 +80,6 @@ RestArtEngine.exe --project Projects/Sandbox --no-hardware-rt
 ```
 
 命令行总开关仅覆盖本次启动值；需要持久化时从配置页保存。自测使用临时工程副本，报告实际 dispatch 数、GPU 像素变化、Shader 成功／失败恢复和配置交互；设备不满足条件时明确记录硬件执行跳过原因，不能把跳过当作实际 DXR 验证。
+
+
+多材质网格按 section 的 Slot 填入有效材质，Actor override 和只读草稿同样参与。`RayTriangle.color.w` 为 UV 查询索引的位模式（零表示无 UV），不是 alpha；CPU/HLSL 必须用位转换保持一致。四套 UV 在命中点重心插值后进入 `Surface.uv0..uv3` 与 `uvMask`，工程 `EvaluateMaterial` 入口不变。UV 资源上传、反射、根签名和历史签名随整套候选一起更新；Shader 失败仍保留上次有效管线。

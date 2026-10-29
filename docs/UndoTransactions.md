@@ -51,7 +51,7 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 | --- | --- |
 | `+ Sphere` / `+ Cube` / `Add Actor from mesh` | 记录新 Actor 的拷贝；撤销时按 id 删除，重做时追加 |
 | Content Mesh 拖入 Scene Viewport | 拖动仅预览；成功释放后将创建与最终位置记为一条 `Place Mesh`，撤销删除实例，重做恢复相同 ID、引用和变换；取消或无效目标不产生历史 |
-| Content 材质拖到 Actor | 悬停仅显示目标描边，不改选择或数据；释放后将命中实例的前后材质 ID 记为一条 `Assign Material`，撤销/重做只改该实例引用；相同材质、取消或无效目标不产生历史 |
+| Content 材质拖到 Actor | 悬停仅显示目标描边，不改选择或数据；释放后将命中实例对应 Slot 的前后绑定记为一条 `Assign Material`，撤销/重做只改该实例；相同材质、取消或无效目标不产生历史 |
 | `Duplicate` | 同上；多选时为每个 Actor 各记一条 |
 | Alt＋拖动 Gizmo（单个或整组） | 首次有效拖动时复制，松手后将全部副本的最终 Actor 快照作为一条记录；撤销删除副本并恢复原选择，重做恢复副本及其选择 |
 | `Delete`（单选或多选） | 记录每个 Actor 的拷贝与原始下标；撤销时按升序插回原位，当前仅选中其中一个恢复的 Actor |
@@ -73,6 +73,8 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 
 ## 多选
 
+灯光 Actor 与静态网格 Actor 共用创建、复制、删除和 Transform 事务，快照包含完整 `LightComponent`。Details 的颜色、强度、范围、半锥角、矩形尺寸与 Cast shadows 编辑也可撤销；连续拖动在松开后形成一条记录，同 Actor 同字段的相邻编辑按现有 700ms 窗口合并。回调按稳定 Actor ID 重新查找对象，不保存可随容器扩容失效的指针。
+
 - Outliner：`Ctrl` / `Shift` 点击切换成员；视口：`Ctrl` / `Shift` 点击同样切换。Shift 当前不做连续范围选择。
 - `selectedActor()` 始终是主 Actor（Gizmo 枢轴、Details 面板目标）；`selection()` 是完整集合。
 - 批量删除一次记录、一次撤销；整组 Gizmo 以主 Actor 为枢轴，对其他成员应用同一世界增量（旋转 / 缩放时同时更新位置）。
@@ -80,7 +82,7 @@ app/EditorSmoke.cpp                             命令 / 合并 / 撤销 / 多�
 ## 边界（未实现）
 
 1. Ctrl+D / Duplicate 按钮的多选复制仍是「每个 Actor 一条历史」；Alt＋拖动复制已经是整组一条。
-2. 材质参数草稿与 Shader 草稿未入栈；它们仍走 Apply / Save 两段式提交。Actor 名称、Mesh 引用和 Details 下拉的 Material 引用修改未入栈；Content 拖放材质引用与可见性修改已入栈。
+2. 材质参数草稿与 Shader 草稿未入栈；它们仍走 Apply / Save 两段式提交。Actor 名称修改未入栈；Details 的 Mesh 分配、材质 Slot 赋值／Reset、Content 拖放材质引用与可见性修改已入栈。
 3. 没有命名快照、跨会话持久化或撤销历史面板。
 4. 默认上限 64 步，可由 `setMaxSteps()` 调整，暂不暴露到设置界面。
 5. 批量删除撤销会恢复全部实例与顺序，但不会恢复原来的完整多选集合。

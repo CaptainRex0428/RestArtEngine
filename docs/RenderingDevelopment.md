@@ -76,6 +76,8 @@
 
 ## 当前源码基线与缺口
 
+五类灯光的场景／编辑／渲染契约见 [Lighting](Lighting.md)。`LightComponent` 保持平台无关；`Renderer/Lighting` 将可见光打包到共享 b7，Forward、Deferred、软件射线及 DXR 使用相同数据。新增字段必须同时维护反射、上传和 GI 历史键；灯光变化不触发网格几何重建。矩形普通着色为四点积分，路径追踪为面积/BRDF MIS，两种估计器不叠加；旧 Cornell 灯源与 Actor 列表按来源优先级互斥。
+
 以下列出当前实现与限制；不能仅据接口设计外推平台支持：
 
 | 项目 | 源码现状 | 后续缺口 |
@@ -185,3 +187,13 @@ Shader 作者语言与后端编译目标分开设计。当前 DX11 使用 HLSL/S
 6. PBR／NPR 的首批特性与共享 Pass 边界、材质契约、选择粒度和混合渲染范围，见上文双体系目标。
 
 这些讨论不阻止维护当前 DX11 功能；每次新增能力应朝以上边界收敛，并用实际运行结果更新现状。
+
+## 网格材质分区与四套 UV
+
+`MeshAsset::sections` 按连续三角形索引范围引用 `materialSlots`；每个 Actor 通过 `StaticMeshComponent::materialOverrides` 覆盖指定 Slot。Forward、Deferred、阴影与两种射线路径均解析对应面的有效材质，实时材质草稿按材质 GUID 覆盖每个使用它的 Slot。相机剔除仍按整个网格包围盒进行，随后按 section 提交；统计只累计实际提交的三角形。CPU BVH 在候选三角形阶段执行对应 Slot 的 Cull／Never 过滤，避免最近不可见面挡住后方可选表面。
+
+`MeshVertex` 继续使用 24 字节位置／法线；最多四套 UV 为可选独立数据流，无 UV 网格不承担四套坐标的存储开销。所有通道按最终顶点（含 UV 接缝拆点）对应，坐标保留源值，可超出 0–1。自定义 `EvaluateMaterial` 签名保持不变，通过 `Surface.uv0`、`uv1`、`uv2`、`uv3` 读取坐标，通过 `Surface.uvMask` 的低四位检查存在性；缺失通道为零。示例：`material.albedo = float3(frac(material.uv1), 0);`。通道号为 0–3，不要求作者同时使用全部通道。
+
+光栅透视插值 UV；软件三角光追、DXR 和 GI 用命中重心坐标插值同一数据。射线的 UV 顶点流由同一网格的实例共享，仅有 UV 的三角形保存引用，`RayTriangle` 保持 80 字节。带自定义分区／UV 的网格使用通用三角求交；原无属性内置图元继续使用解析优化。普通参数及 Slot 绑定无需重新编译 Shader，UV／分区原位修改遵守 `markGeometryModified()`，射线场景缓存和 GI 历史相应失效。
+
+验证入口 `--mesh-attributes-self-test` 覆盖多 Slot 与四 UV 的真实 GPU 输出；CPU 导入／资产格式与场景绑定测试独立运行。新增数据契约不代表纹理资产、纹理采样绑定、切线空间法线或其他图形后端已经实现。

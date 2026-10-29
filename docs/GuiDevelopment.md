@@ -17,25 +17,26 @@
 | 项目配置 | [ProjectSettings.cpp](../src/Editor/ProjectSettings.cpp) | `Project → Project Settings...` 打开独立可关闭窗口，左侧 Rendering 导航提供硬件光追／效果开关、GI 算法与采样预算，显示设备支持／请求／实际状态、累积进度和重启。修改自动反馈、显式保存，加入 Save All 与未保存退出提示；焦点不传给场景编辑。 |
 | 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选、Alt 拖动复制与 Content Mesh 拖入放置；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，默认品牌橙，可选主题强调色或自定义颜色。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
+| 底栏与命令控制台 | [EditorStatusBar.cpp](../src/Editor/EditorStatusBar.cpp)、[EditorConsole.cpp](../src/Editor/EditorConsole.cpp) | 固定底栏预留 DockSpace 高度，提供 Content／Output Log／Cmd／诊断工具与保存状态。独立无 UI 命令模型负责解析、注册、历史和补全；GUI 复用现有动作与撤销。日志为本会话编辑器提示和命令结果，Content 入口聚焦已有面板。 |
 | 视觉与字体 | [EditorTheme.cpp](../src/ImGui/EditorTheme.cpp)、[ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp) | 默认 Black、可选 Dark Blue；配色与共用几何集中，字体仍在适配层。`UI` 菜单承载主题子菜单，并以下拉末项 `Selection outline...` 打开独立的小设置窗口（开关、粗细、主题强调色、预设色或自定义颜色）；选择与本机 `RestArtEngine.ui.ini` 同步。没有完整设计 token、字体配置或跨屏 DPI 体系。 |
 
 Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理，不管理 Dock 节点。编辑器模块负责布局、控件与交互；Shader、Pass、GPU 资源和后端能力归渲染模块。跨模块改动先约定数据与预览契约。
 
 ## 系统材质窗口
 
-材质参数与工程共享 Shader 两页位于按需打开的系统独立 `MaterialWorkspace`，Scene 与 Details 中当前 Actor 实例的材质引用复用同一入口；Content 面板保留完整资产浏览（材质、网格、场景），材质编辑仍在独立窗口。Mesh 资产仍是几何数据，不新增虚构的 Mesh 材质绑定；Details 的材质入口严格取自当前实例，不汇总同 Mesh 的其他实例。
+材质参数与工程共享 Shader 两页位于按需打开的系统独立 `MaterialWorkspace`，Scene 与 Details 中当前 Actor 实例的材质引用复用同一入口；Content 面板保留完整资产浏览（材质、网格、场景），材质编辑仍在独立窗口。Mesh 资产保存几何、命名材质 Slot 与可选 UV 流；Details 的材质入口按当前实例的 Slot 覆盖、网格默认绑定和兼容回退解析，不汇总同 Mesh 的其他实例。
 
 编辑器通过锁定版 Win32/DX11 后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。普通工作区面板与工具窗自动外移／回嵌，不逐帧绑定主 viewport；DockSpace 宿主和主工具栏继续位于主窗口。普通系统浮窗由主窗口拥有，随主窗口最小化隐藏、恢复后显示；独立材质窗口保留无父窗口的策略。最小化路径继续提交仍需处理的平台窗口并维持 Dock 树，隐藏的场景浮窗不持续渲染。普通面板保留既有无关闭按钮的语义，可关闭工具窗沿各自状态关闭。场景目标尺寸与主 swapchain 分开，图像桌面矩形与纹理局部矩形显式映射，不能按主窗口边界裁掉外部视口。完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)。
 
 ## Scene / Details 信息分工
 
-Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部是完整 Content 浏览器（文件夹树、列表/网格资产区、导入与新建入口），中央视口和右侧设置延续原布局。界面图标统一放在 `assets/icons/<area>/`，命名与绘制规范见该目录 README；Outliner 小眼睛按 20px 渲染，由 `drawEyeIcon` 过程绘制（杏仁眼形 + 实心瞳孔，隐藏时加斜线），同目录 SVG/PNG 为设计源。World Outliner 每行先画 `Selectable`（名称、选中与右键菜单），再用它的行矩形把透明 `Button`（`ImDrawList` 自绘眼睛，可见／隐藏两态，隐藏加斜线）放到同一行左侧，两者共享行高与垂直中心；眼睛点击走 `setActorVisible`，产生一条可撤销的 Show/Hide 记录，隐藏行的名称用 `TextDisabled` 配色。Scene 只保留场景级参数（工程与场景信息、Actor / Mesh / Material 统计、背景 Sky / Black、Key light 与 Direct-light 阴影方式）；曝光（Exposure）留在 Viewport settings，作为所有光照与后处理之后的最终提亮系数；Actor 实例的全部编辑（名称、可见性、变换、Mesh / Material 分配）都在 Details，并附带该实例的 Mesh 几何与来源、当前 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
+Details 的信息主体是场景中具体选中的 Actor 实例，不是 Content 中的 Mesh 资产。默认布局继续为左上 Outliner、左下 Scene / Details，底部是完整 Content 浏览器（文件夹树、列表/网格资产区、导入与新建入口），中央视口和右侧设置延续原布局。界面图标统一放在 `assets/icons/<area>/`，命名与绘制规范见该目录 README；Outliner 小眼睛按 20px 渲染，由 `drawEyeIcon` 过程绘制（杏仁眼形 + 实心瞳孔，隐藏时加斜线），同目录 SVG/PNG 为设计源。World Outliner 每行先画 `Selectable`（名称、选中与右键菜单），再用它的行矩形把透明 `Button`（`ImDrawList` 自绘眼睛，可见／隐藏两态，隐藏加斜线）放到同一行左侧，两者共享行高与垂直中心；眼睛点击走 `setActorVisible`，产生一条可撤销的 Show/Hide 记录，隐藏行的名称用 `TextDisabled` 配色。Scene 只保留场景级参数（工程与场景信息、Actor / Mesh / Material 统计、背景 Sky / Black、Key light 与 Direct-light 阴影方式）；曝光（Exposure）留在 Viewport settings，作为所有光照与后处理之后的最终提亮系数；Actor 实例的全部编辑（名称、可见性、变换、Mesh / Material 分配）都在 Details，并附带该实例的 Mesh 几何与来源、各 Slot 的有效 Material；材质按钮继续打开系统独立窗口。共享网格不代表共享实例属性或共享材质。
 
 选场景／Outliner 的 Actor 显示 Details，浏览／导入 Mesh 资源不改变 Details 目标或强制切页；切页是一次性事件，不按已有选中状态每帧抢焦点。多选标识主实例；无选中、删除后失效选择、缺失 Mesh／Material 均给出明确状态，撤销恢复后重新按 Actor ID 解析。窄 Details 使用纵向信息和换行入口，长来源路径可换行；底部不重复放属性区。
 
 Content 的 List／Tiles Mesh 共用路径拖拽 payload；场景图像按本帧实际矩形建立接收区，排除工具栏、遮挡窗口和弹窗。拖动仅画包围盒与落点预览，释放投递时由 SceneEditor 创建、选中并记录一条放置历史。拾取与放置共用可见三角面命中规则（含材质双面与负缩放），无表面时使用 Y=0 地面；包围盒支持偏移防止枢轴埋入表面。Esc 取消整次资源拖拽，未投递或无效目标不修改场景和历史；资源拖拽期间抑制相机、Gizmo 和拾取。选中描边借用的 Actor ID 列表在本帧全部选择修改结束后绑定，避免创建实例使旧指针失效。
 
-Material 沿用相同 payload 与接收区，按最近可见三角面确定目标 Actor；悬停借用既有描边通道只标识该目标，不修改选择、材质或撤销历史。临时目标提示独立于选中描边开关，保留颜色与粗细，结束恢复偏好；Actor ID 存在编辑器成员中，保证渲染期间指针有效。释放只修改命中实例的材质引用并记录一条 `Assign Material`；相同材质、空白或取消不产生历史。Project 和只读 Engine 材质都可以引用，不改共享 Mesh 或材质参数。
+Material 沿用相同 payload 与接收区，按最近可见三角面确定目标 Actor 与材质 Slot；悬停借用既有描边通道只标识该目标，不修改选择、材质或撤销历史。临时目标提示独立于选中描边开关，保留颜色与粗细，结束恢复偏好；Actor ID 存在编辑器成员中，保证渲染期间指针有效。释放只修改命中实例对应 Slot 的材质引用并记录一条 `Assign Material`；相同材质、空白或取消不产生历史。Project 和只读 Engine 材质都可以引用，不改共享 Mesh 或材质参数。
 
 工作区增加为六面板，保留 `Details`、`Content & Editors` 和 `RestArtEngine.DockSpace.v1` 身份；新 `Scene` 加入旧 Details 所在组，不全局重置用户布局。恢复默认才重建六面板树。验证应覆盖实际 Mesh／Actor 点击联动、手动切页、旧 dock／浮窗迁移及新 context 读回、双主题截图和既有材质／视口／事务回归。
 

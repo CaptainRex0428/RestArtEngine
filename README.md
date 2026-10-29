@@ -59,7 +59,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 - 解析式 GPU 光追：内置 Sphere / Plane / Cube 用精确求交，其余网格走 `StructuredBuffer` 三角形路径，用于阴影与反射。**不是 DXR**。
 - 硬件光追：独立 DX12／DXR 1.1 通道执行场景反射和方向光阴影，在 `Project → Project Settings... → Rendering` 配置并随项目保存；设备能力、数据契约及边界见 [硬件光追](docs/HardwareRayTracing.md)。
 - 全局光照：Lambert／GGX 路径采样支持渐进累积与实时模式；实时间接光由 Forward／Deferred 消费，间接漫反射与镜面贡献独立可配。采样、滤波及限制见 [全局光照](docs/GlobalIllumination.md)。
-- 单方向光 + 程序化环境光；GGX 高光、Schlick Fresnel、ACES 近似色调映射。
+- 五类场景灯光：方向光、天光、矩形区域光、Spot 和点光；实时参数、Actor 编辑与场景保存。GGX 高光、Schlick Fresnel、ACES 近似色调映射，范围与阴影限制见 [灯光模块](docs/Lighting.md)。
 - 检查视图：Lit、Unlit、Albedo、World normals、World position、Roughness、Metallic、Specular F0、Linear depth、Direct diffuse / specular。
 - `Debug` 中的 Profiler 提供 CPU Trace / JSON 导出与异步 GPU Pass 计时；Frame Inspector 冻结单帧事件和真实渲染资源，支持通道及原始像素检查。具体范围见 [诊断工具](docs/Diagnostics.md)。
 
@@ -240,11 +240,12 @@ Projects/RayTracing_Simple/ <- 光追测试工程
 
 版本或 hash 不匹配时，Project Manager 提供「使用引用的引擎」「更新到当前引擎」「选择引擎…」；`engineRoot` 失效时会尝试按关联自动恢复，恢复不了则明确提示无法打开。
 
-仓库自带两个示例工程，Project Manager 扫描 `Projects/*/*.raproject` 自动列出：
+仓库自带以下示例工程，Project Manager 扫描 `Projects/*/*.raproject` 自动列出：
 
 | 工程 | 用途 |
 | --- | --- |
 | `Projects/Sandbox` | 通用演示：内置球 / 平面 / 立方体、程序化网格材质、基础光照与阴影。 |
+| [Projects/PathTracing_CornellBox](Projects/PathTracing_CornellBox/README.md) | 渐进式硬件路径追踪：红／绿房间、矩形顶灯、三颗不同粗糙度金属球；保存初始视角与照明。 |
 | `Projects/RayTracing_Simple` | 光追测试：康奈尔盒（红 / 蓝侧墙、白色地面与顶面）+ 两个镜面球。配合 `--rt` 观察解析光追的反射与阴影；关闭 `--rt` 即为纯光栅化对照。 |
 
 ```powershell
@@ -267,7 +268,7 @@ Forward : 背景 + 几何  →  绘制时直接着色
 ```
 
 - 常量缓冲契约（CPU / HLSL 双向锁定，运行时用 `D3DReflect` 校验）：
-  `b0 SceneConstants(144B)`、`b1 ObjectConstants(160B)`、`b2 RayConstants(5136B)`、`b3 ShadowConstants(160B)`。
+  `b0 SceneConstants(176B)`、`b1 ObjectConstants(160B)`、`b2 RayConstants(5136B)`、`b3 ShadowConstants(160B)`。
 - 资源契约：`t0..t2` G-buffer、`t3` shadow map（`Texture2DArray<float>`）、`t4` 三角形缓冲、`s0/s1` 采样器。
 - 材质唯一开放入口是 `Shaders/Materials/Standard.hlsli` 的 `EvaluateMaterial()`；引擎模板 `Shaders/Materials/Standard.hlsli` 不会被工程覆盖。
 
@@ -357,6 +358,7 @@ RestArtEngine.exe --self-test              # 渲染自测
 RestArtEngine.exe --editor-self-test       # 编辑器自测
 RestArtEngine.exe --hardware-rt-self-test  # 硬件执行、参数、Shader 与项目配置自测
 RestArtEngine.exe --gi-self-test           # 间接颜色、收敛与历史生命周期自测
+RestArtEngine.exe --lighting-self-test     # 五类灯光、有限阴影、矩形MIS与GI历史自测
 RestArtEngine.exe --path-tracing           # 本次启动启用路径追踪 GI，保留项目更新模式
 RestArtEngine.exe --hardware-rt            # 本次启动请求硬件光追
 RestArtEngine.exe --no-hardware-rt         # 本次启动关闭硬件光追
@@ -372,9 +374,9 @@ RestArtEngine.exe --help
 
 - 编辑器与光栅场景使用 **DirectX 11**，硬件光追使用同适配器 DX12／DXR 1.1 通道；`RenderBackend` 中的 OpenGL / DX12 / Vulkan / Null 仍是生命周期骨架，尚不支持完整场景后端切换。
 - 同时保留解析求交／三角形遍历、硬件预览与路径追踪 GI；实时模式使用有界历史和空间滤波，尚无运动重投影、透明／折射、发光材质或其他 GI 算法。
-- 顶点格式仅 Position + Normal：无 UV、切线、纹理、MTL、骨骼动画。
-- 单一方向光；无后处理栈、无 HDR 交换链、无 MSAA。
-- 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿、Actor 名称及 Mesh / Material 引用修改尚未纳入撤销历史；可见性开关和 H 已支持撤销。
+- 位置／法线顶点保持 24 字节，导入网格另存可选 UV 流：FBX 最多四套，OBJ 一套；面材质 ID 保留为可独立绑定的 Slot。尚无切线、纹理、MTL／DCC 材质图转换及骨骼动画导入。
+- 最多 32 盏可见直接灯，Sky 单独累加；普通光栅仅首个投影方向光使用阴影贴图，局部灯阴影需要光追。无后处理栈、无 HDR 交换链、无 MSAA。
+- 编辑器已有多选与部分编辑事务；尚无父子层级或通用组件系统。材质 / Shader 草稿和 Actor 名称尚未纳入撤销历史；Details 的 Mesh 分配、材质 Slot 赋值／Reset、Content 拖放赋材质、可见性开关和 H 已支持撤销。
 - 六个工作区面板的 Docking 悬浮限于主窗口；材质编辑器可使用独立系统窗口。尚无动态面板插件、命名布局或完整逐显示器字体 DPI 适配。
 - 主题切换（Black / Dark Blue、偏好保存）：`UI → Theme` 切换；入口与边界见 [编辑器指南](docs/EditorGuide.md#主题切换)。
 - 材质编辑器是参数式，没有节点图 / 材质继承。
@@ -400,8 +402,11 @@ RestArtEngine 自身以 **MIT** 许可发布，完整条款见 [LICENSE](LICENSE
 - [架构文档](docs/Architecture.md)：目录职责、**开发指引**（落点 / 约定 / 验证）、数据关系、UE 概念对照
 - [编辑事务](docs/UndoTransactions.md)：Godot UndoRedo / UE 事务源码研究与本仓库实现边界
 - [GUI 设计规范](docs/GuiDevelopment.md)：面板职责、视觉规则、交互契约与验收方法
-- [资产格式](docs/AssetFormat.md)：`.rasset` 容器、GUID、缩略图、场景 v3 与旧格式兼容
+- [资产格式](docs/AssetFormat.md)：`.rasset` 容器、GUID、缩略图、灯光场景 v4 与旧格式兼容
+- [灯光模块](docs/Lighting.md)：五类 Light Actor、编辑与持久化、光照来源和阴影支持范围
 - [工程管理](docs/ProjectManagement.md)：引擎身份、工程链接、Project Manager 流程
 - [引擎分发](docs/EngineDistribution.md)：发布目录、工程打包与迁移
 - [编辑器指南](docs/EditorGuide.md)：Actor / Mesh / Material / Shader 操作细节
 - [阴影方案](docs/ShadowMethods.md)：各方案资源路径、取舍与验证矩阵
+
+相机功能与操作：见 [Camera 系统](docs/Camera.md)，涵盖四分屏、Camera Actor、透视/正交、查看/操纵、独立预览、屏幕空间/渐进薄透镜景深与 v7 场景兼容。`--quad-view` 可直接进入四格编辑视图。
