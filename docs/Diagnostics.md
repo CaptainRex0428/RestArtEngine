@@ -18,6 +18,8 @@ RestArtEngine 的诊断设计覆盖性能、帧执行与画面数据三个方向
 
 ## 性能数据的含义
 
+命令行可用 `--trace-output <文件.json>` 自动录制主应用循环并在正常退出时导出 Chrome Trace。例如 `RestArtEngine --project <工程.raproject> --no-ui --frames 60 --trace-output <输出.json>`。录制从加载完成后的主循环开始；比较稳定帧时还应排除资源首次上传／光追结构首次构建的预热帧，保持项目、分辨率、VSync 和采样设置一致。`Mesh geometry upload`、`Software ray scene rebuild`、`DXR scene rebuild` 标识缓存失效时的 CPU 工作，不代表 GPU 执行耗时。
+
 CPU 帧耗时使用单调时钟，包含采集范围内的等待。CPU Scene Submit 衡量 CPU 提交渲染命令的时间；Present scope 可以包含 VSync 等待。它们均不能代替 GPU 执行时间。嵌套事件的耗时是包含子事件的 wall time，不能将所有行简单相加得到帧耗时。
 
 Trace 记录事件名、分类、线程、帧及父事件，最多保留 65,536 个事件，满后统计丢弃而不覆盖旧录制。Start 清空并开始新录制，Stop 保留数据，Clear 清空事件但保留录制开关。120 帧 wall time 历史独立于录制状态。界面快照取最近 512 个已完成事件，每帧最多显示 256 行；JSON 导出全部已保留 CPU 事件，首版不包含 GPU query 结果。录制热路径不写磁盘；导出由用户显式选择位置。首版选择 Chrome Trace JSON 的基础事件，便于在外部查看；Perfetto 提供[该格式导入](https://perfetto.dev/docs/getting-started/other-formats)，其 JSON 兼容是 [best effort](https://perfetto.dev/docs/faq)，并非原生 Perfetto SDK 集成。

@@ -15,6 +15,10 @@
 
 ## 四条开发要求与验收
 
+运行时静态网格缓存使用 `MeshAsset::geometryKey()`，不在每个阴影／GBuffer／描边 Pass 重扫全部几何字节。软件光追与 DXR 先比较可见 Actor、Transform、材质和几何版本，输入未变时复用已展开的数据；相机和光照更新继续通过场景常量及 GI 历史规则生效。几何原位编辑须调用 `markGeometryModified()`，契约见 [AssetFormat.md](AssetFormat.md)。DXR 当前仍采用世界空间展开数据，Actor 变换／材质编辑仍会触发重新展开；未将其描述为按 Mesh BLAS 和 TLAS 实例更新的实现。
+
+静态 Mesh Asset Details 按资产、几何、默认材质、Shader 版本及预览资源有效性刷新，不再固定每 0.3 秒重绘同一静态模型。预览取景和视口聚焦复用局部包围盒，变换八个角点求保守世界范围。路径追踪采样数、反弹数和 GPU 同步策略保持项目设置，不用缓存优化隐式降低画质。
+
 ### 1. 工程结构
 
 保持 `include/RestArtEngine/<模块>/` 与 `src/<模块>/` 的公共接口／实现分工，`app/` 负责启动与集成。Scene、Assets 不依赖图形 API 或编辑器；渲染参数及特性逻辑不依赖面板布局。引擎与工程资产仍按现有路径规则分离，`.raproject` 继续是纯数据工程。

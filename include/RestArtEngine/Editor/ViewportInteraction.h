@@ -3,6 +3,7 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <RestArtEngine/Scene/World.h>
 #include <RestArtEngine/Assets/AssetRegistry.h>
+#include <RestArtEngine/Assets/MeshQuery.h>
 #include <vector>
 #include <functional>
 
@@ -32,6 +33,7 @@ public:
     // True only for this draw's actual scene-picking path, including reselect.
     bool pickedThisFrame() const { return pickedThisFrame_; }
 private:
+    assets::MeshQueryCache meshQueries_;
     int operation_ = 0; // translate, rotate, scale
     bool local_ = false, snap_ = false;
     bool usingGizmo_ = false, hovered_ = false, focused_ = false, orbiting_ = false, panning_ = false;

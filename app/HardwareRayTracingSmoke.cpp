@@ -273,6 +273,21 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             difference("hardware vs raster", raster, hardware);
             pass("DXR dispatch counter increases and actual GPU scene output is visible");
 
+            // Same-size edits retain vector addresses: the explicit revision
+            // must invalidate both raster buffers and flattened DXR geometry.
+            auto* editedMesh = assets.findMesh(world.findActor(cube)->mesh.meshId);
+            const auto savedVertices = editedMesh->vertices;
+            for (auto& vertex : editedMesh->vertices) vertex.position[1] *= 1.7f;
+            editedMesh->markGeometryModified();
+            difference("in-place geometry revision", hardware, render());
+            editedMesh->vertices = savedVertices;
+            editedMesh->markGeometryModified();
+            require(changedPixels(hardware, render(), 1) == 0, "Restored geometry did not invalidate cached DXR buffers.");
+            settings.hardwareRayTracing = false;
+            require(changedPixels(raster, render(), 1) == 0, "Restored geometry did not invalidate cached raster buffers.");
+            settings.hardwareRayTracing = true;
+            pass("in-place mesh edits and restoration invalidate raster and DXR geometry caches");
+
             settings.hardwareRayTracingReflections = false;
             const auto noReflections = render();
             difference("reflection toggle", hardware, noReflections);

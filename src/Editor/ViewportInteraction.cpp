@@ -35,32 +35,25 @@ void focusActor(renderer::SceneSettings& settings, const scene::World& world,
     const auto* actor = world.findActor(selected);
     if (!actor || !validTransform(actor->transform)) return;
     const auto* mesh = library.findMesh(actor->mesh.meshId);
-    if (!mesh || mesh->vertices.empty()) return;
-    float minimum[3] = {1e30f, 1e30f, 1e30f};
-    float maximum[3] = {-1e30f, -1e30f, -1e30f};
-    for (const auto& vertex : mesh->vertices)
-        for (int axis = 0; axis < 3; ++axis) {
-            minimum[axis] = std::min(minimum[axis], vertex.position[axis]);
-            maximum[axis] = std::max(maximum[axis], vertex.position[axis]);
-        }
+    if (!mesh) return;
+    const auto& bounds = mesh->localBounds();
+    if (!bounds.valid) return;
+    const auto& minimum = bounds.minimum;
+    const auto& maximum = bounds.maximum;
     const float center[3] = {(minimum[0] + maximum[0]) * 0.5f, (minimum[1] + maximum[1]) * 0.5f,
         (minimum[2] + maximum[2]) * 0.5f};
-    float radius = 0.0f;
-    for (const auto& vertex : mesh->vertices) {
-        const float dx = vertex.position[0] - center[0];
-        const float dy = vertex.position[1] - center[1];
-        const float dz = vertex.position[2] - center[2];
-        radius = std::max(radius, std::sqrt(dx * dx + dy * dy + dz * dz));
-    }
     const XMMATRIX matrix = actorMatrix(actor->transform);
     const XMVECTOR worldCenter = XMVector3TransformCoord(
         XMVectorSet(center[0], center[1], center[2], 1.0f), matrix);
     settings.cameraTarget[0] = XMVectorGetX(worldCenter);
     settings.cameraTarget[1] = XMVectorGetY(worldCenter);
     settings.cameraTarget[2] = XMVectorGetZ(worldCenter);
-    const float scale = std::max({std::abs(actor->transform.scale[0]),
-        std::abs(actor->transform.scale[1]), std::abs(actor->transform.scale[2])});
-    const float worldRadius = std::max(radius * scale, 0.05f);
+    float worldRadius = .05f;
+    for (unsigned corner = 0; corner < 8; ++corner) {
+        const auto position = XMVectorSet(corner & 1 ? maximum[0] : minimum[0],
+            corner & 2 ? maximum[1] : minimum[1], corner & 4 ? maximum[2] : minimum[2], 1);
+        worldRadius = std::max(worldRadius, XMVectorGetX(XMVector3Length(XMVector3TransformCoord(position, matrix) - worldCenter)));
+    }
     const float fit = worldRadius / std::tan(XMConvertToRadians(25.0f)) * 1.45f;
     settings.cameraDistance = std::clamp(fit, 2.0f, 30.0f);
 }
@@ -107,23 +100,6 @@ bool applyMatrix(const XMFLOAT4X4& matrix, int operation, scene::Transform& tran
     return changed;
 }
 
-bool intersectTriangle(FXMVECTOR origin, FXMVECTOR direction, FXMVECTOR a,
-                       GXMVECTOR b, HXMVECTOR c, float& distance, bool twoSided, float orientation) {
-    const XMVECTOR edge1 = b - a, edge2 = c - a;
-    const XMVECTOR p = XMVector3Cross(direction, edge2);
-    const float determinant = XMVectorGetX(XMVector3Dot(edge1, p));
-    if (std::abs(determinant) < 1e-8f || (!twoSided && determinant * orientation <= 0)) return false;
-    const float inverse = 1.0f / determinant;
-    const XMVECTOR delta = origin - a;
-    const float u = XMVectorGetX(XMVector3Dot(delta, p)) * inverse;
-    if (u < 0 || u > 1) return false;
-    const XMVECTOR q = XMVector3Cross(delta, edge1);
-    const float v = XMVectorGetX(XMVector3Dot(direction, q)) * inverse;
-    if (v < 0 || u + v > 1) return false;
-    distance = XMVectorGetX(XMVector3Dot(edge2, q)) * inverse;
-    return distance >= 0;
-}
-
 struct ViewRay {
     XMVECTOR origin;
     XMVECTOR direction;
@@ -152,7 +128,7 @@ ViewRay viewRay(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATR
 }
 
 SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const assets::AssetLibrary& assets,
-                          const assets::MaterialAsset* materialOverride) {
+                          const assets::MaterialAsset* materialOverride, assets::MeshQueryCache& queries) {
     SurfaceHit hit;
     hit.distance = ray.length;
     for (const auto& actor : world.actors) {
@@ -162,32 +138,31 @@ SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const a
         if (!mesh || !material) continue;
         if (materialOverride && materialOverride->id == material->id) material = materialOverride;
         const XMMATRIX matrix = actorMatrix(actor.transform);
-        const float orientation = XMVectorGetX(XMMatrixDeterminant(matrix)) < 0 ? -1.0f : 1.0f;
-        for (std::size_t i = 0; i + 2 < mesh->indices.size(); i += 3) {
-            XMVECTOR vertices[3];
-            bool valid = true;
-            for (int j = 0; j < 3; ++j) {
-                const auto index = mesh->indices[i + j];
-                if (index >= mesh->vertices.size()) { valid = false; break; }
-                const float* p = mesh->vertices[index].position;
-                vertices[j] = XMVector3TransformCoord(XMVectorSet(p[0], p[1], p[2], 1), matrix);
-            }
-            float distance = 0;
-            if (valid && intersectTriangle(ray.origin, ray.direction, vertices[0], vertices[1], vertices[2], distance,
-                    material->twoSided, orientation) &&
-                distance < hit.distance) {
-                hit.actor = actor.id;
-                hit.distance = distance;
-                XMStoreFloat3(&hit.point, ray.origin + XMVectorScale(ray.direction, distance));
-                // Mirrored triangles reverse their winding; recover the authored
-                // front, then face the visible side toward the incoming ray.
-                auto normal = XMVectorScale(XMVector3Normalize(
-                    XMVector3Cross(vertices[1] - vertices[0], vertices[2] - vertices[0])), orientation);
-                if (XMVectorGetX(XMVector3Dot(normal, ray.direction)) > 0)
-                    normal = XMVectorNegate(normal);
-                XMStoreFloat3(&hit.normal, normal);
-            }
+        const float determinant = XMVectorGetX(XMMatrixDeterminant(matrix));
+        if (!std::isfinite(determinant) || determinant == 0) continue;
+        const auto inverse = XMMatrixInverse(nullptr, matrix);
+        XMFLOAT3 localOrigin, localDirection;
+        XMStoreFloat3(&localOrigin, XMVector3TransformCoord(ray.origin, inverse));
+        XMStoreFloat3(&localDirection, XMVector3TransformNormal(ray.direction, inverse));
+        const assets::MeshRay localRay{{localOrigin.x, localOrigin.y, localOrigin.z},
+            {localDirection.x, localDirection.y, localDirection.z}};
+        assets::MeshRayHit meshHit;
+        if (!queries.intersect(*mesh, localRay, hit.distance, material->twoSided,
+                1e-8f / std::abs(determinant), meshHit)) continue;
+        hit.actor = actor.id;
+        hit.distance = meshHit.distance;
+        XMStoreFloat3(&hit.point, ray.origin + XMVectorScale(ray.direction, meshHit.distance));
+        XMVECTOR vertices[3];
+        for (unsigned corner = 0; corner < 3; ++corner) {
+            const float* p = mesh->vertices[mesh->indices[meshHit.triangleOffset + corner]].position;
+            vertices[corner] = XMVector3TransformCoord(XMVectorSet(p[0], p[1], p[2], 1), matrix);
         }
+        // Local culling already accounts for the authored front. Recover the
+        // world normal from only the winning face, including mirrored Actors.
+        auto normal = XMVectorScale(XMVector3Normalize(XMVector3Cross(vertices[1] - vertices[0], vertices[2] - vertices[0])),
+            determinant < 0 ? -1.0f : 1.0f);
+        if (XMVectorGetX(XMVector3Dot(normal, ray.direction)) > 0) normal = XMVectorNegate(normal);
+        XMStoreFloat3(&hit.normal, normal);
     }
     return hit;
 }
@@ -207,18 +182,10 @@ const assets::MeshAsset* droppedMesh(const ImGuiPayload& payload, const assets::
 }
 
 bool meshBounds(const assets::MeshAsset& mesh, XMFLOAT3& minimum, XMFLOAT3& maximum) {
-    minimum = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
-    maximum = {-minimum.x, -minimum.y, -minimum.z};
-    if (mesh.vertices.empty() || mesh.indices.empty()) return false;
-    for (const auto& vertex : mesh.vertices) {
-        for (const auto value : vertex.position) if (!std::isfinite(value)) return false;
-        minimum.x = std::min(minimum.x, vertex.position[0]);
-        minimum.y = std::min(minimum.y, vertex.position[1]);
-        minimum.z = std::min(minimum.z, vertex.position[2]);
-        maximum.x = std::max(maximum.x, vertex.position[0]);
-        maximum.y = std::max(maximum.y, vertex.position[1]);
-        maximum.z = std::max(maximum.z, vertex.position[2]);
-    }
+    const auto& bounds = mesh.localBounds();
+    if (!bounds.valid || mesh.indices.empty()) return false;
+    minimum = {bounds.minimum[0], bounds.minimum[1], bounds.minimum[2]};
+    maximum = {bounds.maximum[0], bounds.maximum[1], bounds.maximum[2]};
     return true;
 }
 
@@ -308,6 +275,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                const assets::AssetRegistry& registry,
                                const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
                                const assets::MaterialAsset* materialOverride, bool keyboardBlocked) {
+    meshQueries_.retain(assets);
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
     settings.editorViewport = true;
@@ -511,7 +479,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         pickedThisFrame_ = true;
-        const auto hit = closestSurface(viewRay(settings, view, projection), world, assets, materialOverride).actor;
+        const auto hit = closestSurface(viewRay(settings, view, projection), world, assets, materialOverride, meshQueries_).actor;
         if ((io.KeyCtrl || io.KeyShift) && hit) {
             // Additive picking mirrors the Outliner: toggle membership and keep
             // the clicked Actor as the primary one.
@@ -541,7 +509,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
             drawDropHint(dropArea.Min, dropArea.Max, "Choose a mesh asset to place in the scene", false);
         } else if (!meshBounds(*mesh, minimum, maximum)) {
             drawDropHint(dropArea.Min, dropArea.Max, "This mesh has no usable geometry", false);
-        } else if (!dropTransform(ray, closestSurface(ray, world, assets, materialOverride), minimum, maximum, placement, contact)) {
+        } else if (!dropTransform(ray, closestSurface(ray, world, assets, materialOverride, meshQueries_), minimum, maximum, placement, contact)) {
             drawDropHint(dropArea.Min, dropArea.Max, "No placement surface here. Aim at visible geometry or the ground", false);
         } else {
             if (const auto* accepted = ImGui::AcceptDragDropPayload("RAE_ASSET",

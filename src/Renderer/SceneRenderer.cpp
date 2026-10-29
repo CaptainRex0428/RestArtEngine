@@ -310,6 +310,34 @@ bool mirroredTransform(const scene::Actor& actor) {
     return std::signbit(actor.transform.scale[0]) ^ std::signbit(actor.transform.scale[1]) ^
         std::signbit(actor.transform.scale[2]);
 }
+// Geometry data is immutable between explicit MeshAsset revisions. Compare the
+// small scene inputs before expanding triangles, not their multi-megabyte output.
+struct RaySceneInput {
+    scene::ActorId actor = 0;
+    assets::AssetId mesh = 0, material = 0;
+    assets::MeshGeometryKey geometry{};
+    assets::MeshPrimitive primitive{};
+    std::array<float, 14> values{}; // transform, base color, roughness, metallic
+    bool grid = false, twoSided = false;
+    bool operator==(const RaySceneInput&) const = default;
+};
+std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
+                                            const assets::MaterialAsset* preview) {
+    std::vector<RaySceneInput> result;
+    result.reserve(world.actors.size());
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        const auto* material = resolveMaterial(assets, actor.mesh.materialId, preview);
+        if (!mesh || !material) continue;
+        const auto& t = actor.transform;
+        result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(), mesh->primitive,
+            {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
+             t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
+             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided});
+    }
+    return result;
+}
 } // namespace
 
 struct SceneRenderer::Impl {
@@ -359,13 +387,16 @@ struct SceneRenderer::Impl {
     std::uint64_t rayTriangleHash = 0;
     UINT rayTriangleCount = 0;
     UINT raySceneActorCount = 0;
+    std::vector<RaySceneInput> raySceneInputs;
+    bool raySceneInputsValid = false;
     Clock::time_point rayLastUsed{};
     bool raySceneActive = false;
     std::uint64_t usageEpoch = 0;
     struct GpuMesh {
         ComPtr<ID3D11Buffer> vertices, indices;
         UINT count = 0;
-        std::uint64_t hash = 0, bytes = 0, lastUsedEpoch = 0;
+        assets::MeshGeometryKey geometry{};
+        std::uint64_t bytes = 0, lastUsedEpoch = 0;
         Clock::time_point lastUsed{};
     };
     std::unordered_map<assets::AssetId, GpuMesh> meshes;
@@ -577,20 +608,15 @@ struct SceneRenderer::Impl {
             mesh.indices.size() > std::numeric_limits<UINT>::max() / sizeof(std::uint32_t)) {
             error = "Invalid or oversized mesh: " + mesh.name; return false;
         }
-        std::uint64_t hash = 1469598103934665603ull;
-        const auto hashBytes = [&hash](const void* pointer, std::size_t size) {
-            const auto* bytes = static_cast<const unsigned char*>(pointer);
-            for (std::size_t i = 0; i < size; ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
-        };
-        hashBytes(mesh.vertices.data(), mesh.vertices.size() * sizeof(assets::MeshVertex));
-        hashBytes(mesh.indices.data(), mesh.indices.size() * sizeof(std::uint32_t));
-        if (const auto it = meshes.find(mesh.id); it != meshes.end() && it->second.hash == hash) {
+        const auto geometry = mesh.geometryKey();
+        if (const auto it = meshes.find(mesh.id); it != meshes.end() && it->second.geometry == geometry) {
             it->second.lastUsed = Clock::now();
             it->second.lastUsedEpoch = usageEpoch;
             return true;
         }
+        rae::diagnostics::TraceScope uploadTrace("Mesh geometry upload", "Renderer CPU");
         for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) { error = "Mesh index out of bounds: " + mesh.name; return false; }
-        GpuMesh gpu; gpu.hash = hash; gpu.count = static_cast<UINT>(mesh.indices.size());
+        GpuMesh gpu; gpu.geometry = geometry; gpu.count = static_cast<UINT>(mesh.indices.size());
         D3D11_BUFFER_DESC description{};
         description.ByteWidth = static_cast<UINT>(mesh.vertices.size() * sizeof(assets::MeshVertex));
         description.Usage = D3D11_USAGE_IMMUTABLE; description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
@@ -607,6 +633,11 @@ struct SceneRenderer::Impl {
 
     bool prepareRayTriangles(const scene::World& world, const assets::AssetLibrary& assets,
                              std::string& error, const assets::MaterialAsset* materialPreview) {
+        std::vector<RaySceneInput> nextInputs;
+        try { nextInputs = makeRaySceneInputs(world, assets, materialPreview); }
+        catch (const std::bad_alloc&) { error = "Unable to allocate ray scene input keys."; return false; }
+        if (raySceneInputsValid && nextInputs == raySceneInputs) return true;
+        rae::diagnostics::TraceScope gatherTrace("Software ray scene rebuild", "Renderer CPU");
         std::vector<RayTriangle> triangles;
         // Grow with the scene. The count check below only protects D3D11
         // structured-buffer addressability; no scene triangle budget drops
@@ -686,11 +717,15 @@ struct SceneRenderer::Impl {
             const auto* bytes = reinterpret_cast<const unsigned char*>(&triangle);
             for (std::size_t i = 0; i < sizeof(triangle); ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
         }
-        if (hash == rayTriangleHash && rayTriangleCount == triangles.size()) return true;
+        if (hash == rayTriangleHash && rayTriangleCount == triangles.size()) {
+            raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
+            return true;
+        }
         if (triangles.empty()) {
             rayTriangleHash = hash;
             rayTriangleCount = 0;
             rayTriangleBuffer.Reset(); rayTriangleView.Reset();
+            raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
             return true;
         }
         D3D11_BUFFER_DESC description{};
@@ -718,6 +753,7 @@ struct SceneRenderer::Impl {
         rayTriangleCount = static_cast<UINT>(triangles.size());
         rayTriangleBuffer = std::move(newRayTriangleBuffer);
         rayTriangleView = std::move(newRayTriangleView);
+        raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
         return true;
     }
 
@@ -729,8 +765,8 @@ struct SceneRenderer::Impl {
         context->VSSetShader(geometryVS.Get(), nullptr, 0);
         context->PSSetShader(pixelShader, nullptr, 0);
         context->OMSetDepthStencilState(depthEnabled.Get(), 0);
-        // Mesh assets can be edited or reloaded in-place with the same ID. Check
-        // content once per unique visible mesh each frame; shared actors reuse it.
+        // A revision/allocation key detects reloads and explicit geometry edits.
+        // Shadow, raster and outline passes share the already prepared buffers.
         std::unordered_set<assets::AssetId> preparedMeshes;
         preparedMeshes.reserve(std::min(world.actors.size(), assets.meshes.size()));
         for (const auto& actor : world.actors) {
@@ -1065,10 +1101,16 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
         if (!actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
         if (!mesh || mesh->vertices.empty()) continue;
+        const auto& bounds = mesh->localBounds();
+        if (!bounds.valid) continue;
         const XMMATRIX matrix = actorMatrix(actor);
-        for (const auto& vertex : mesh->vertices) {
+        // An affine transform of the cached local AABB conservatively bounds
+        // every vertex, without traversing a large mesh for each preview frame.
+        for (unsigned corner = 0; corner < 8; ++corner) {
             const XMVECTOR position = XMVector3TransformCoord(
-                XMVectorSet(vertex.position[0], vertex.position[1], vertex.position[2], 1.0f), matrix);
+                XMVectorSet((corner & 1) ? bounds.maximum[0] : bounds.minimum[0],
+                    (corner & 2) ? bounds.maximum[1] : bounds.minimum[1],
+                    (corner & 4) ? bounds.maximum[2] : bounds.minimum[2], 1.0f), matrix);
             minimum[0] = std::min(minimum[0], XMVectorGetX(position));
             minimum[1] = std::min(minimum[1], XMVectorGetY(position));
             minimum[2] = std::min(minimum[2], XMVectorGetZ(position));
@@ -1693,6 +1735,8 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
         state.rayTriangleHash = 0;
         state.rayTriangleCount = 0;
         state.raySceneActorCount = 0;
+        state.raySceneInputsValid = false;
+        state.raySceneInputs.clear();
         state.rayLastUsed = {};
     }
     // D3D11 owns pending GPU work. No Flush/idle wait and no residency claim.

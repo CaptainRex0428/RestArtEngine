@@ -15,6 +15,7 @@
 #include "HardwareRayTracing.h"
 #include <RestArtEngine/Assets/AssetLibrary.h>
 #include <RestArtEngine/Scene/World.h>
+#include <RestArtEngine/Core/TraceProfiler.h>
 
 #include <algorithm>
 #include <atomic>
@@ -232,9 +233,56 @@ bool finite3(FXMVECTOR value) {
     return std::isfinite(stored.x) && std::isfinite(stored.y) && std::isfinite(stored.z);
 }
 
+// These small inputs completely determine gather() output. Geometry changes
+// carry an explicit asset revision; moving the camera never scans mesh bytes.
+struct SceneInput {
+    scene::ActorId actor = 0;
+    assets::AssetId mesh = 0, material = 0;
+    assets::MeshGeometryKey geometry{};
+    std::array<float, 14> values{}; // transform, base color, roughness, metallic
+    bool grid = false, twoSided = false;
+    bool operator==(const SceneInput&) const = default;
+};
+std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
+                                  const assets::MaterialAsset* preview) {
+    std::vector<SceneInput> result;
+    result.reserve(world.actors.size());
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        const auto* material = preview && preview->id == actor.mesh.materialId ? preview : assets.findMaterial(actor.mesh.materialId);
+        if (!mesh || !material) continue;
+        const auto& t = actor.transform;
+        result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(),
+            {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
+             t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
+             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided});
+    }
+    return result;
+}
+
 bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             const assets::MaterialAsset* preview, std::vector<RayTriangle>& triangles,
             std::vector<XMFLOAT3>& positions, std::vector<XMFLOAT3>& normals, std::string& error) {
+    // Reserve once from topology counts. At ten million triangles, geometric
+    // vector growth otherwise briefly retains gigabytes of superseded storage.
+    std::size_t expectedTriangles = 0;
+    constexpr std::size_t maximumTriangles = std::numeric_limits<UINT>::max() / 3u;
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        const auto* material = preview && preview->id == actor.mesh.materialId ? preview : assets.findMaterial(actor.mesh.materialId);
+        if (!mesh || !material) continue;
+        const auto count = mesh->indices.size() / 3;
+        if (count > maximumTriangles - expectedTriangles) {
+            error = "DXR scene exceeds the addressable geometry size.";
+            return false;
+        }
+        expectedTriangles += count;
+    }
+    triangles.reserve(expectedTriangles);
+    positions.reserve(expectedTriangles * 3);
+    normals.reserve(expectedTriangles * 3);
     for (const auto& actor : world.actors) {
         if (!actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
@@ -430,6 +478,8 @@ struct HardwareRayTracing::Impl {
     std::uint64_t positionHash = 0, triangleHash = 0, normalHash = 0;
     std::uint32_t triangleCount = 0;
     bool geometryReady = false, capable = false;
+    std::vector<SceneInput> cachedSceneInputs;
+    bool sceneInputsValid = false;
     std::uint64_t dispatches = 0;
     HistoryKey historyKey{};
     bool historyValid = false;
@@ -816,6 +866,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         // later failure. Rebuild their identities on a safe retry as well.
         state.positionHash = state.triangleHash = state.normalHash = 0;
         state.geometryReady = false;
+        state.sceneInputsValid = false;
         state.giStatus.accumulatedSamples = 0;
         state.giStatus.effective = GlobalIlluminationMethod::Disabled;
         state.message = "Hardware ray tracing failed: " + error;
@@ -845,10 +896,19 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             !state.prepareOutput(frame.width, frame.height, dx11Done, error)) return fail();
         std::vector<RayTriangle> triangles;
         std::vector<XMFLOAT3> positions, normals;
-        if (!gather(world, assets, materialOverride, triangles, positions, normals, error)) return fail();
-        const auto positionHash = hashBytes(positions.data(), positions.size() * sizeof(XMFLOAT3));
-        const auto triangleHash = hashBytes(triangles.data(), triangles.size() * sizeof(RayTriangle));
-        const auto normalHash = hashBytes(normals.data(), normals.size() * sizeof(XMFLOAT3));
+        auto nextSceneInputs = sceneInputs(world, assets, materialOverride);
+        const bool sceneChanged = !state.sceneInputsValid || !state.geometryReady ||
+            !state.triangleData || !state.normalData || nextSceneInputs != state.cachedSceneInputs;
+        auto positionHash = state.positionHash, triangleHash = state.triangleHash, normalHash = state.normalHash;
+        auto triangleCount = state.triangleCount;
+        if (sceneChanged) {
+            rae::diagnostics::TraceScope gatherTrace("DXR scene rebuild", "Renderer CPU");
+            if (!gather(world, assets, materialOverride, triangles, positions, normals, error)) return fail();
+            positionHash = hashBytes(positions.data(), positions.size() * sizeof(XMFLOAT3));
+            triangleHash = hashBytes(triangles.data(), triangles.size() * sizeof(RayTriangle));
+            normalHash = hashBytes(normals.data(), normals.size() * sizeof(XMFLOAT3));
+            triangleCount = static_cast<std::uint32_t>(triangles.size());
+        }
         const bool pathRequested = frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
         const bool pathLit = pathRequested && frame.sceneConstants[34] == 0.0f;
         const bool realtime = frame.globalIllumination.mode == GlobalIlluminationMode::Realtime;
@@ -896,7 +956,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         std::array<unsigned char, 768> constants{};
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         const HardwareConstants hardware{frame.inverseViewProjection,
-            {frame.width, frame.height, static_cast<std::uint32_t>(triangles.size()), transportShadows ? 1u : 0u},
+            {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
             {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), 0, 0},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
             {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}};
@@ -908,7 +968,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (failed(state.allocator->Reset(), "Reset DXR allocator", error) ||
             failed(state.list->Reset(state.allocator.Get(), state.pipeline.Get()), "Reset DXR command list", error)) return fail();
         recording = true;
-        const bool rebuild = !state.geometryReady || positionHash != state.positionHash || triangles.size() != state.triangleCount;
+        const bool rebuild = !state.geometryReady || positionHash != state.positionHash || triangleCount != state.triangleCount;
         if (rebuild && !state.buildGeometry(positions, error)) {
             state.list->Close(); recording = false; state.geometryReady = false; return fail();
         }
@@ -954,7 +1014,8 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (failed(state.context11->Wait(state.fence11.Get(), completed), "Wait for hardware ray tracing in DX11", error)) return fail();
         if (failed(state.device->GetDeviceRemovedReason(), "Hardware ray tracing device status", error)) return fail();
         state.positionHash = positionHash; state.triangleHash = triangleHash; state.normalHash = normalHash;
-        state.triangleCount = static_cast<std::uint32_t>(triangles.size()); state.geometryReady = true;
+        state.triangleCount = triangleCount; state.geometryReady = true;
+        state.cachedSceneInputs = std::move(nextSceneInputs); state.sceneInputsValid = true;
         if (pathLit) {
             if (restart) ++state.giStatus.historyRevision;
             state.historyKey = nextHistory; state.historyValid = true;

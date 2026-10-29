@@ -1413,6 +1413,7 @@ void SceneEditor::showAssetDetails(std::string relativePath) {
 }
 
 void SceneEditor::openAssetDetails(const assets::AssetEntry& entry) {
+    assetDetailsMeshValid_ = false;
     assetDetailsError_.clear();
     assetDetailsPath_ = entry.relativePath;
     assetDetailsOpen_ = true;
@@ -1471,13 +1472,22 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
     } else if (entry->type == assets::AssetType::Mesh) {
         const auto* mesh = assets_.findMesh(entry->id);
         if (mesh) {
-            scene::World previewWorld;
-            previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
-            assetDetailsAge_ += ImGui::GetIO().DeltaTime;
-            if (assetDetailsAge_ > 0.3f) {
-                (void)renderer.renderScenePreview(previewWorld, assets_,
+            const auto* material = assets_.findMaterial(assets::EngineDefaultMaterialId);
+            const std::array<float, 5> values = material ? std::array<float, 5>{material->baseColor[0],
+                material->baseColor[1], material->baseColor[2], material->roughness, material->metallic} : std::array<float, 5>{};
+            const bool grid = material && material->grid, twoSided = material && material->twoSided;
+            const auto key = mesh->geometryKey();
+            if (!assetDetailsMeshValid_ || assetDetailsMeshId_ != mesh->id || assetDetailsMeshKey_ != key ||
+                assetDetailsShaderRevision_ != renderer.shaderRevision() || assetDetailsMaterialValues_ != values ||
+                assetDetailsMaterialGrid_ != grid || assetDetailsMaterialTwoSided_ != twoSided ||
+                !renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
+                scene::World previewWorld;
+                previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
+                assetDetailsMeshValid_ = renderer.renderScenePreview(previewWorld, assets_,
                     static_cast<std::uint32_t>(previewSize), assetDetailsError_, renderer::PreviewSlot::AssetDetails);
-                assetDetailsAge_ = 0.0f;
+                assetDetailsMeshId_ = mesh->id; assetDetailsMeshKey_ = key;
+                assetDetailsShaderRevision_ = renderer.shaderRevision(); assetDetailsMaterialValues_ = values;
+                assetDetailsMaterialGrid_ = grid; assetDetailsMaterialTwoSided_ = twoSided;
             }
             if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),

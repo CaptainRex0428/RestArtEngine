@@ -651,6 +651,7 @@ int wmain(int argc, wchar_t** argv) {
     std::filesystem::path captureDir;
     std::filesystem::path projectPath;
     std::filesystem::path enginePath;
+    std::filesystem::path traceOutput;
     SceneSettings settings;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -661,6 +662,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--gc-self-test") gcSelfTest = true;
             else if (arg == "--hardware-rt-self-test") hardwareRtSelfTest = true;
             else if (arg == "--gi-self-test") giSelfTest = true;
+            else if (arg == "--trace-output" && i + 1 < argc) traceOutput = argv[++i];
             else if (arg == "--capture-temp") temporaryCaptures = true;
             else if (arg == "--no-gc") disableGc = true;
             else if (arg == "--gc-settings" && i + 1 < argc) gcSettingsPath = argv[++i];
@@ -693,6 +695,7 @@ int wmain(int argc, wchar_t** argv) {
                     "--forward | --deferred   --rt (analytic)   --hardware-rt | --no-hardware-rt\n"
                     "--hardware-rt-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
+                    "--trace-output PATH (record application frames to Chrome Trace JSON)\n"
                     "F9/Capture: Save As dialog; --frames alone does not save an image.\n"
                     "--gc-settings PATH --gc-interval SECONDS --gc-idle SECONDS --gc-capture-age SECONDS --no-gc\n"
                     "--capture-temp (managed temporary final-frame capture; requires --frames, excludes --capture-dir)\n"
@@ -913,6 +916,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         auto previous = std::chrono::steady_clock::now();
         auto previousGc = previous;
+        if (!traceOutput.empty()) rae::diagnostics::profiler().start();
         while (running) {
             DiagnosticsFrameScope diagnosticFrame;
             {
@@ -1094,6 +1098,10 @@ int wmain(int argc, wchar_t** argv) {
             if (!selfTest) updateGarbageCollection(gc, renderer, ui, previousGc);
             ++frame;
             if (frameLimit && frame >= frameLimit) running = false;
+        }
+        if (!traceOutput.empty()) {
+            rae::diagnostics::profiler().stop();
+            if (!rae::diagnostics::profiler().save(traceOutput, error)) throw std::runtime_error(error);
         }
         ui.shutdown();
         const auto validationErrors = renderer.validationErrorCount();

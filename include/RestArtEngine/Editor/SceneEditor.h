@@ -174,6 +174,12 @@ private:
     std::string assetDetailsPath_;
     float assetDetailsAge_ = 1.0f;
     std::string assetDetailsError_;
+    bool assetDetailsMeshValid_ = false;
+    assets::AssetId assetDetailsMeshId_ = 0;
+    assets::MeshGeometryKey assetDetailsMeshKey_;
+    std::uint64_t assetDetailsShaderRevision_ = 0;
+    std::array<float, 5> assetDetailsMaterialValues_{};
+    bool assetDetailsMaterialGrid_ = false, assetDetailsMaterialTwoSided_ = false;
     float materialPreviewYaw_ = 0.65f, materialPreviewPitch_ = 0.18f, materialPreviewDistance_ = 3.0f;
     std::string contentError_;
     scene::World world_;

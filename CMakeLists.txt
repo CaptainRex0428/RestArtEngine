@@ -43,6 +43,7 @@ add_executable(RestArtEngine
     src/Renderer/SelectionOutline.cpp
     src/Renderer/D3D12/HardwareRayTracing.cpp
     src/Assets/AssetLibrary.cpp
+    src/Assets/MeshQuery.cpp
     src/Assets/AssetRegistry.cpp
     src/Assets/AssetFile.cpp
     src/Assets/AssetThumbnail.cpp
@@ -117,6 +118,14 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(MeshQueryTests tests/MeshQueryTests.cpp src/Assets/MeshQuery.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
+    target_include_directories(MeshQueryTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(MeshQueryTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(MeshQueryTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME MeshQueryTests COMMAND MeshQueryTests)
     add_executable(ProjectSettingsTests tests/ProjectSettingsTests.cpp src/Project/Project.cpp)
     target_include_directories(ProjectSettingsTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(ProjectSettingsTests PRIVATE UNICODE _UNICODE NOMINMAX)
