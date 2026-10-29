@@ -532,6 +532,68 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             uiFrame();
             uiFrame();
         };
+        const auto captureToolbarWidth = [&](int clientWidth, const char* screenshot, const char* expectedState) {
+            ContextScope scope(context);
+            const auto native = static_cast<HWND>(context->Viewports[0]->PlatformHandle);
+            RECT outer{}, client{};
+            require(native && GetWindowRect(native, &outer) && GetClientRect(native, &client),
+                "Cannot inspect the owned test window for toolbar sizing.");
+            const auto textureWidth = renderer.sceneTextureWidth(), textureHeight = renderer.sceneTextureHeight();
+            struct NativeSizeRestore {
+                HWND window;
+                int width, height;
+                bool restored = false;
+                ~NativeSizeRestore() {
+                    if (!restored) SetWindowPos(window, nullptr, 0, 0, width, height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            } nativeRestore{native, outer.right - outer.left, outer.bottom - outer.top};
+            const int borderWidth = nativeRestore.width - (client.right - client.left);
+            require(SetWindowPos(native, nullptr, 0, 0, clientWidth + borderWidth, nativeRestore.height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+                "Cannot resize the owned test window for the toolbar screenshot.");
+            require(GetClientRect(native, &client) != FALSE && client.right - client.left == clientWidth,
+                "Toolbar screenshot did not use the requested actual client width.");
+            require(renderer.resize(static_cast<std::uint32_t>(clientWidth),
+                static_cast<std::uint32_t>(client.bottom - client.top), error), error);
+            uiFrame();
+            uiFrame();
+            auto* toolbar = findWindow("RestArtEngine Editor");
+            (void)itemRect(toolbar, "###GIStatus");
+            const auto fullRectangle = ImGui::WindowRectRelToAbs(toolbar, toolbar->NavRectRel[ImGuiNavLayer_Main]);
+            require(fullRectangle.Min.x >= toolbar->ClipRect.Min.x && fullRectangle.Max.x <= toolbar->ClipRect.Max.x &&
+                fullRectangle.Min.y >= toolbar->ClipRect.Min.y && fullRectangle.Max.y <= toolbar->ClipRect.Max.y,
+                "GI toolbar status was clipped at the requested window width.");
+            require(uiText.find(expectedState) != std::string::npos,
+                "GI toolbar status does not describe the effective configuration.");
+            uiFrame(screenshot);
+            require(SetWindowPos(native, nullptr, 0, 0, nativeRestore.width, nativeRestore.height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+                "Cannot restore the owned test window size.");
+            nativeRestore.restored = true;
+            require(renderer.resize(textureWidth, textureHeight, error), error);
+            uiFrame();
+            uiFrame();
+        };
+        require(uiText.find("GI: Off") != std::string::npos,
+            "The toolbar hid the disabled GI state behind its hardware activity label.");
+        captureToolbarWidth(980, "gi-status-off-980.bmp", "GI: Off");
+        const auto beforeStatusClick = uiSettings;
+        input.mouse = itemRect(findWindow("RestArtEngine Editor"), "###GIStatus").GetCenter();
+        uiFrame();
+        require(uiText.find("Hardware preview has no diffuse color bleeding.") != std::string::npos,
+            "Disabled GI status did not explain the absence of diffuse color bleeding.");
+        click(input.mouse);
+        require(editor.projectSettingsOpen(), "The GI status button did not open Project Settings.");
+        require(uiSettings.globalIllumination == beforeStatusClick.globalIllumination &&
+            uiSettings.hardwareRayTracing == beforeStatusClick.hardwareRayTracing &&
+            uiSettings.hardwareRayTracingReflections == beforeStatusClick.hardwareRayTracingReflections &&
+            uiSettings.hardwareRayTracingShadows == beforeStatusClick.hardwareRayTracingShadows,
+            "Opening settings from GI status changed a rendering preference.");
+        require(uiText.find("GI is disabled. Hardware preview has no diffuse color bleeding.") != std::string::npos,
+            "The GI method section did not make its disabled color-bleeding behavior explicit.");
+        editor.closeProjectSettings();
+        uiFrame();
         // BeginMenuBar pushes its own ID scope, so a menu heading does not use
         // window->GetID(label). Use the same measured horizontal hit target as
         // the existing editor menu regression, then click the actual popup item.
@@ -616,6 +678,14 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             uiSettings.globalIllumination.indirectSpecular == firstSpecular &&
             uiSettings.hardwareRayTracingReflections == legacyReflections,
             "Indirect diffuse checkbox did not change only its independent GI contribution.");
+        require(!uiSettings.globalIllumination.indirectDiffuse &&
+            uiText.find("Indirect diffuse is off.") != std::string::npos,
+            "Disabled indirect diffuse had no nearby color-bleeding explanation.");
+        input.mouse = itemRect(findWindow("RestArtEngine Editor"), "###GIStatus").GetCenter();
+        uiFrame();
+        require(uiText.find("Requested indirect diffuse: Off") != std::string::npos &&
+            uiText.find("Diffuse color bleeding is disabled at the receiving surface.") != std::string::npos,
+            "GI status did not expose the disabled diffuse contribution.");
         click(itemRect(findChild("ProjectSettingsContent"), "Indirect specular (reflections)").GetCenter());
         require(uiSettings.globalIllumination.indirectDiffuse != firstDiffuse &&
             uiSettings.globalIllumination.indirectSpecular != firstSpecular &&
@@ -634,6 +704,34 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
                 renderer.globalIlluminationStatus().effectiveMode == renderer::GlobalIlluminationMode::Realtime,
                 "Restart accumulation did not restart the continuous GI history.");
         }
+        editor.closeProjectSettings();
+        uiFrame();
+        const bool activeRealtime = renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible;
+        captureToolbarWidth(1440, "gi-status-realtime-1440.bmp", activeRealtime ? "GI: Realtime" : "GI: Inactive");
+        if (activeRealtime) {
+            uiSettings.debugView = 2;
+            uiFrame();
+            uiFrame();
+            require(uiText.find("GI: Paused") != std::string::npos,
+                "The toolbar presented paused debug-view GI as actively accumulating.");
+            uiSettings.debugView = 0;
+            uiFrame();
+        }
+        uiSettings.hardwareRayTracing = false;
+        uiFrame();
+        uiFrame();
+        require(uiText.find("GI: Inactive") != std::string::npos,
+            "The toolbar did not distinguish an inactive GI request from disabled GI.");
+        uiSettings.hardwareRayTracing = true;
+        uiFrame();
+        uiFrame();
+        const auto beforeReopen = uiSettings.globalIllumination;
+        click(itemRect(findWindow("RestArtEngine Editor"), "###GIStatus").GetCenter());
+        require(editor.projectSettingsOpen() && uiSettings.globalIllumination == beforeReopen,
+            "Reopening GI settings from the live status changed the algorithm, mode or contributions.");
+        // Return keyboard ownership to the configuration before the Delete
+        // isolation check; the status entry itself is part of the main toolbar.
+        (void)itemRect(findChild("ProjectSettingsContent"), "GI mode");
         const auto actorCount = editor.world().actors.size();
         const auto selected = editor.selectedActor();
         input.event = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Delete, true); };

@@ -172,6 +172,295 @@ struct TraceFrame {
     TraceFrame() { rae::diagnostics::beginFrame(); }
     ~TraceFrame() { rae::diagnostics::endFrame(); }
 };
+
+Mask erodeMask(const Mask& mask, std::uint32_t width, std::uint32_t height, int radius) {
+    require(mask.size() == static_cast<std::size_t>(width) * height && radius >= 0,
+        "Invalid receiver mask dimensions.");
+    Mask result(mask.size());
+    for (int y = radius; y < static_cast<int>(height) - radius; ++y)
+        for (int x = radius; x < static_cast<int>(width) - radius; ++x) {
+            bool inside = true;
+            for (int dy = -radius; dy <= radius; ++dy)
+                for (int dx = -radius; dx <= radius; ++dx)
+                    inside &= mask[static_cast<std::size_t>(y + dy) * width + static_cast<std::size_t>(x + dx)] != 0;
+            result[static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)] = inside ? 1 : 0;
+        }
+    return result;
+}
+
+struct NeighbourMasks { Mask redSphere, blueCube; };
+NeighbourMasks neighbourReceiverMasks(const Pixels& albedo, const Pixels& normals,
+                                      std::uint32_t width, std::uint32_t height) {
+    require(albedo.size() == normals.size() && albedo.size() == static_cast<std::size_t>(width) * height * 4,
+        "Invalid neighbour receiver debug images.");
+    NeighbourMasks masks{Mask(albedo.size() / 4), Mask(albedo.size() / 4)};
+    for (std::size_t pixel = 0; pixel < masks.redSphere.size(); ++pixel) {
+        const auto p = pixel * 4;
+        const int r = albedo[p], g = albedo[p + 1], b = albedo[p + 2];
+        const bool red = r > 180 && r > g + 70 && r > b + 70;
+        const bool blue = b > 180 && b > r + 70 && b > g + 50;
+        // +X-facing, camera-visible part of the sphere looks toward the cube.
+        // The cube's -X face looks toward the sphere. These are GPU normals,
+        // not screen rectangles that might also include a donor or the floor.
+        masks.redSphere[pixel] = red && normals[p] >= 160 && normals[p + 1] >= 60 &&
+            normals[p + 1] <= 195 && normals[p + 2] >= 150 ? 1 : 0;
+        masks.blueCube[pixel] = blue && normals[p] <= 1 &&
+            std::abs(static_cast<int>(normals[p + 1]) - 128) <= 1 &&
+            std::abs(static_cast<int>(normals[p + 2]) - 128) <= 1 ? 1 : 0;
+    }
+    masks.redSphere = erodeMask(masks.redSphere, width, height, 2);
+    masks.blueCube = erodeMask(masks.blueCube, width, height, 2);
+    require(maskCount(masks.redSphere) >= 40 && maskCount(masks.blueCube) >= 40,
+        "GPU albedo/normal masks do not contain enough inner coloured receiver pixels (" +
+        std::to_string(maskCount(masks.redSphere)) + "/" + std::to_string(maskCount(masks.blueCube)) + ").");
+    return masks;
+}
+
+double channelDifference(const Pixels& high, const Pixels& low, const Mask& mask, unsigned channel) {
+    return meanColour(high, mask)[channel] - meanColour(low, mask)[channel];
+}
+std::size_t increasedChannelPixels(const Pixels& high, const Pixels& low, const Mask& mask, unsigned channel) {
+    require(high.size() == low.size() && high.size() == mask.size() * 4 && channel < 3,
+        "Invalid coloured-receiver comparison.");
+    std::size_t result = 0;
+    for (std::size_t pixel = 0; pixel < mask.size(); ++pixel)
+        if (mask[pixel] && high[pixel * 4 + channel] > low[pixel * 4 + channel]) ++result;
+    return result;
+}
+
+// Fixed receivers and fixed geometry isolate changes caused by their neighbour's
+// reflectance. The donor's target channel changes; the receiving material does
+// not. A neutral-floor-only test cannot establish this coloured-surface contract.
+void runNeighbourColourTransport(rae::renderer::SceneRenderer& renderer,
+                                const std::filesystem::path& output, Json& report) {
+    using namespace rae;
+    using Method = renderer::GlobalIlluminationMethod;
+    using Mode = renderer::GlobalIlluminationMode;
+    constexpr std::uint32_t width = 320, height = 240;
+    const auto previousWidth = renderer.sceneTextureWidth(), previousHeight = renderer.sceneTextureHeight();
+    struct RestoreSize {
+        renderer::SceneRenderer& renderer;
+        std::uint32_t width, height;
+        ~RestoreSize() {
+            try { std::string ignored; renderer.resize(width, height, ignored); renderer.resetGlobalIllumination(); }
+            catch (...) {}
+        }
+    } restore{renderer, previousWidth, previousHeight};
+    std::string error;
+    require(renderer.resize(width, height, error), error);
+    assets::AssetLibrary assets;
+    assets.createDefaults();
+    assets.materials.clear();
+    constexpr assets::AssetId redId = 201, blueId = 202, floorId = 203;
+    const std::array<float, 3> redPaint{.75f, .04f, .04f}, bluePaint{.04f, .1f, .75f};
+    const std::array<float, 3> redLow{.04f, .04f, .04f}, blueLow{.04f, .1f, .04f};
+    const auto material = [&](assets::AssetId id, const char* name, const std::array<float, 3>& colour, float roughness) {
+        assets::MaterialAsset value;
+        value.id = id; value.name = name; value.metallic = 0; value.roughness = roughness; value.grid = false;
+        std::copy(colour.begin(), colour.end(), value.baseColor);
+        assets.materials.push_back(value);
+    };
+    material(redId, "Painted red sphere", redPaint, .4f);
+    material(blueId, "Painted blue cube", bluePaint, .4f);
+    material(floorId, "Neutral neighbour floor", {.4f, .4f, .4f}, .85f);
+    const auto setColour = [&](assets::AssetId id, const std::array<float, 3>& colour) {
+        std::copy(colour.begin(), colour.end(), assets.findMaterial(id)->baseColor);
+    };
+    const auto painted = [&] {
+        setColour(redId, redPaint); setColour(blueId, bluePaint);
+        for (const auto id : {redId, blueId}) {
+            assets.findMaterial(id)->metallic = 0;
+            assets.findMaterial(id)->roughness = .4f;
+        }
+    };
+    scene::World world;
+    world.blackBackground = true;
+    const auto sphere = world.createActor("Coloured receiver sphere", 1, redId);
+    world.findActor(sphere)->transform.position[0] = -.8f;
+    world.findActor(sphere)->transform.position[1] = .75f;
+    for (auto& scale : world.findActor(sphere)->transform.scale) scale = .75f;
+    const auto cube = world.createActor("Coloured receiver cube", 3, blueId);
+    world.findActor(cube)->transform.position[0] = .8f;
+    world.findActor(cube)->transform.position[1] = .75f;
+    world.findActor(cube)->transform.scale[0] = .7f;
+    world.findActor(cube)->transform.scale[1] = .75f;
+    world.findActor(cube)->transform.scale[2] = .7f;
+    const auto floor = world.createActor("Coloured receiver neutral floor", 2, floorId);
+    for (auto& scale : world.findActor(floor)->transform.scale) scale = .25f;
+    renderer::SceneSettings settings;
+    settings.editorViewport = true;
+    settings.viewportWidth = width; settings.viewportHeight = height;
+    settings.cameraYaw = -.35f; settings.cameraPitch = .18f; settings.cameraDistance = 5.5f;
+    settings.cameraTarget[1] = .75f;
+    settings.hardwareRayTracing = true;
+    settings.hardwareRayTracingReflections = false;
+    settings.hardwareRayTracingShadows = true;
+    settings.globalIllumination.method = Method::PathTracing;
+    settings.globalIllumination.mode = Mode::Progressive;
+    settings.globalIllumination.indirectDiffuse = true;
+    settings.globalIllumination.indirectSpecular = false;
+    settings.globalIllumination.samplesPerFrame = 16;
+    settings.globalIllumination.targetSamples = 512;
+    settings.globalIllumination.maxBounces = 4;
+    const auto render = [&] {
+        TraceFrame frame;
+        std::string renderError;
+        require(renderer.render(settings, world, assets, renderError), renderError);
+        return readScene(renderer);
+    };
+    const auto masksForCurrentMaterials = [&] {
+        settings.debugView = 2;
+        const auto albedo = render();
+        settings.debugView = 3;
+        const auto normals = render();
+        settings.debugView = 0;
+        return neighbourReceiverMasks(albedo, normals, width, height);
+    };
+    const auto capture = [&](const char* name, std::uint32_t samples) {
+        settings.globalIllumination.targetSamples = samples;
+        renderer.resetGlobalIllumination();
+        Pixels image;
+        for (std::uint32_t frame = 0; frame <= samples; ++frame) {
+            image = render();
+            const auto status = renderer.globalIlluminationStatus();
+            require(status.effective == Method::PathTracing && status.effectiveMode == settings.globalIllumination.mode,
+                "Neighbour transport became unavailable: " + status.reason);
+            if (status.accumulatedSamples >= samples) break;
+        }
+        require(renderer.globalIlluminationStatus().accumulatedSamples == samples,
+            "Neighbour transport did not reach the requested sample count.");
+        savePixels(output / (std::string(name) + ".bmp"), image, width, height);
+        return image;
+    };
+    auto& metrics = report["metrics"]["colouredReceivers"];
+    const auto receiverMasks = masksForCurrentMaterials();
+    metrics["paintedRedSpherePixels"] = maskCount(receiverMasks.redSphere);
+    metrics["paintedBlueCubePixels"] = maskCount(receiverMasks.blueCube);
+    Pixels maskImage(static_cast<std::size_t>(width) * height * 4, 0);
+    for (std::size_t pixel = 0; pixel < receiverMasks.redSphere.size(); ++pixel) {
+        maskImage[pixel * 4] = receiverMasks.redSphere[pixel] ? 255 : 0;
+        maskImage[pixel * 4 + 2] = receiverMasks.blueCube[pixel] ? 255 : 0;
+        maskImage[pixel * 4 + 3] = 255;
+    }
+    savePixels(output / "neighbours-receiver-masks.bmp", maskImage, width, height);
+
+    settings.globalIllumination.indirectDiffuse = false;
+    const auto directBothHigh = capture("neighbours-direct-only", 64);
+    setColour(blueId, blueLow);
+    const auto directBlueLow = capture("neighbours-direct-blue-donor-low", 64);
+    setColour(blueId, bluePaint); setColour(redId, redLow);
+    const auto directRedLow = capture("neighbours-direct-red-donor-low", 64);
+    metrics["directOnlyRedReceiverMae"] = meanError(directBothHigh, directBlueLow, receiverMasks.redSphere);
+    metrics["directOnlyBlueReceiverMae"] = meanError(directBothHigh, directRedLow, receiverMasks.blueCube);
+    require(metrics["directOnlyRedReceiverMae"].get<double>() == 0 &&
+        metrics["directOnlyBlueReceiverMae"].get<double>() == 0,
+        "Changing a neighbour's colour affected the fixed receiver without indirect contributions.");
+
+    painted();
+    settings.globalIllumination.indirectDiffuse = true;
+    const auto paintedBothHigh = capture("neighbours-painted-indirect", 512);
+    setColour(blueId, blueLow);
+    const auto paintedBlueLow = capture("neighbours-painted-blue-donor-low", 512);
+    setColour(blueId, bluePaint); setColour(redId, redLow);
+    const auto paintedRedLow = capture("neighbours-painted-red-donor-low", 512);
+    const auto blueToRed = channelDifference(paintedBothHigh, paintedBlueLow, receiverMasks.redSphere, 2);
+    const auto redToBlue = channelDifference(paintedBothHigh, paintedRedLow, receiverMasks.blueCube, 0);
+    metrics["progressiveBlueToRedReceiverBlueDelta"] = blueToRed;
+    metrics["progressiveRedToBlueReceiverRedDelta"] = redToBlue;
+    metrics["paintedRedReceiverMeanRgb"] = meanColour(paintedBothHigh, receiverMasks.redSphere);
+    metrics["paintedBlueReceiverMeanRgb"] = meanColour(paintedBothHigh, receiverMasks.blueCube);
+    require(blueToRed > .0002 && redToBlue > .0002,
+        "Progressive GI did not produce the correct bidirectional colour change on fixed coloured receivers (" +
+        std::to_string(blueToRed) + "/" + std::to_string(redToBlue) + ").");
+    report["checks"].push_back("progressive bidirectional donor-colour transfer changes fixed painted receivers; direct-only receiver controls stay exact");
+    std::cout << "PASS: GI coloured receiver progressive transfer (blue->red=" << blueToRed << ", red->blue=" << redToBlue << ").\n";
+
+    painted(); setColour(redId, {.75f, 0, 0});
+    const auto pureRedMask = masksForCurrentMaterials().redSphere;
+    const auto saturatedRedHigh = capture("neighbours-saturated-red-blue-donor-high", 256);
+    setColour(blueId, blueLow);
+    const auto saturatedRedLow = capture("neighbours-saturated-red-blue-donor-low", 256);
+    const auto redForeignIncreases = increasedChannelPixels(saturatedRedHigh, saturatedRedLow, pureRedMask, 2);
+    metrics["saturatedRedForeignBlueIncreasedPixels"] = redForeignIncreases;
+    metrics["saturatedRedForeignBlueMeanDelta"] = channelDifference(saturatedRedHigh, saturatedRedLow, pureRedMask, 2);
+    require(redForeignIncreases == 0 && metrics["saturatedRedForeignBlueMeanDelta"].get<double>() == 0,
+        "A zero-blue diffuse red receiver reflected additional blue instead of absorbing it.");
+    painted(); setColour(blueId, {0, 0, .75f});
+    const auto pureBlueMask = masksForCurrentMaterials().blueCube;
+    const auto saturatedBlueHigh = capture("neighbours-saturated-blue-red-donor-high", 256);
+    setColour(redId, redLow);
+    const auto saturatedBlueLow = capture("neighbours-saturated-blue-red-donor-low", 256);
+    const auto blueForeignIncreases = increasedChannelPixels(saturatedBlueHigh, saturatedBlueLow, pureBlueMask, 0);
+    metrics["saturatedBlueForeignRedIncreasedPixels"] = blueForeignIncreases;
+    metrics["saturatedBlueForeignRedMeanDelta"] = channelDifference(saturatedBlueHigh, saturatedBlueLow, pureBlueMask, 0);
+    require(blueForeignIncreases == 0 && metrics["saturatedBlueForeignRedMeanDelta"].get<double>() == 0,
+        "A zero-red diffuse blue receiver reflected additional red instead of absorbing it.");
+    report["checks"].push_back("pure saturated diffuse receivers absorb their zero-reflectance foreign channels exactly instead of receiving an artificial colour boost");
+    std::cout << "PASS: GI pure saturated receiver absorption; increased foreign-channel pixels=0/0.\n";
+
+    painted();
+    settings.globalIllumination.mode = Mode::Realtime;
+    settings.globalIllumination.indirectDiffuse = false;
+    const auto realtimeDirectHigh = capture("neighbours-realtime-direct-only", 64);
+    setColour(blueId, blueLow);
+    const auto realtimeDirectBlueLow = capture("neighbours-realtime-direct-blue-donor-low", 64);
+    setColour(blueId, bluePaint); setColour(redId, redLow);
+    const auto realtimeDirectRedLow = capture("neighbours-realtime-direct-red-donor-low", 64);
+    metrics["realtimeDirectOnlyRedReceiverMae"] = meanError(realtimeDirectHigh, realtimeDirectBlueLow, receiverMasks.redSphere);
+    metrics["realtimeDirectOnlyBlueReceiverMae"] = meanError(realtimeDirectHigh, realtimeDirectRedLow, receiverMasks.blueCube);
+    require(metrics["realtimeDirectOnlyRedReceiverMae"].get<double>() == 0 &&
+        metrics["realtimeDirectOnlyBlueReceiverMae"].get<double>() == 0,
+        "Realtime donor colour changed a fixed receiver without indirect contributions.");
+    painted();
+    settings.globalIllumination.indirectDiffuse = true;
+    const auto realtimeBothHigh = capture("neighbours-realtime-painted-indirect", 256);
+    setColour(blueId, blueLow);
+    const auto realtimeBlueLow = capture("neighbours-realtime-blue-donor-low", 256);
+    setColour(blueId, bluePaint); setColour(redId, redLow);
+    const auto realtimeRedLow = capture("neighbours-realtime-red-donor-low", 256);
+    const auto realtimeBlueToRed = channelDifference(realtimeBothHigh, realtimeBlueLow, receiverMasks.redSphere, 2);
+    const auto realtimeRedToBlue = channelDifference(realtimeBothHigh, realtimeRedLow, receiverMasks.blueCube, 0);
+    metrics["realtimeBlueToRedReceiverBlueDelta"] = realtimeBlueToRed;
+    metrics["realtimeRedToBlueReceiverRedDelta"] = realtimeRedToBlue;
+    require(realtimeBlueToRed > .0002 && realtimeRedToBlue > .0002,
+        "Realtime GI did not transfer neighbour colour in both fixed coloured receiver masks (" +
+        std::to_string(realtimeBlueToRed) + "/" + std::to_string(realtimeRedToBlue) + ").");
+    report["checks"].push_back("realtime painted-neighbour transport is causal in both eroded inner receiver masks");
+    std::cout << "PASS: GI coloured receiver realtime transfer (blue->red=" << realtimeBlueToRed << ", red->blue=" << realtimeRedToBlue << ").\n";
+
+    // These are the reported material values, not modified user assets. Pure
+    // foreign diffuse reflectance is zero; high metallic further reduces the
+    // diffuse lobe. Record the measured strength rather than demanding a boost.
+    const std::array<float, 3> userRed{.9812f, 0, 0}, userBlue{0, .1294f, 1};
+    setColour(redId, userRed); setColour(blueId, userBlue);
+    assets.findMaterial(redId)->metallic = .313f; assets.findMaterial(redId)->roughness = .638f;
+    assets.findMaterial(blueId)->metallic = .867f; assets.findMaterial(blueId)->roughness = .744f;
+    settings.globalIllumination.mode = Mode::Progressive;
+    const auto userMasks = masksForCurrentMaterials();
+    settings.globalIllumination.indirectDiffuse = false;
+    settings.globalIllumination.indirectSpecular = false;
+    const auto userDirect = capture("neighbours-reported-materials-direct-only", 64);
+    settings.globalIllumination.indirectDiffuse = true;
+    settings.globalIllumination.indirectSpecular = true;
+    const auto userBothHigh = capture("neighbours-reported-materials-indirect", 512);
+    setColour(blueId, {0, .1294f, 0});
+    const auto userBlueLow = capture("neighbours-reported-materials-blue-donor-low", 512);
+    setColour(blueId, userBlue); setColour(redId, {0, 0, 0});
+    const auto userRedLow = capture("neighbours-reported-materials-red-donor-low", 512);
+    metrics["reportedBlueToRedReceiverBlueDelta"] = channelDifference(userBothHigh, userBlueLow, userMasks.redSphere, 2);
+    metrics["reportedRedToBlueReceiverRedDelta"] = channelDifference(userBothHigh, userRedLow, userMasks.blueCube, 0);
+    metrics["reportedRedReceiverMeanRgb"] = meanColour(userBothHigh, userMasks.redSphere);
+    metrics["reportedBlueReceiverMeanRgb"] = meanColour(userBothHigh, userMasks.blueCube);
+    metrics["reportedRedReceiverDirectMeanRgb"] = meanColour(userDirect, userMasks.redSphere);
+    metrics["reportedBlueReceiverDirectMeanRgb"] = meanColour(userDirect, userMasks.blueCube);
+    metrics["reportedMaterialValues"] = {{"red", {{"baseColor", userRed}, {"metallic", .313}, {"roughness", .638}}},
+        {"blue", {{"baseColor", userBlue}, {"metallic", .867}, {"roughness", .744}}}};
+    metrics["reportedForeignDiffuseReflectance"] = {{"redReceiverBlue", 0}, {"blueReceiverRed", 0}};
+    metrics["reportedNormalIncidenceForeignSpecularF0"] = {{"redReceiverBlue", .04 * (1 - .313)},
+        {"blueReceiverRed", .04 * (1 - .867)}};
+    report["checks"].push_back("reported high-metal pure-colour materials are measured separately without requiring exaggerated foreign-colour transfer");
+    std::cout << "PASS: GI reported material reference images/metrics recorded without changing user assets or lighting gain.\n";
+}
 } // namespace
 
 void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
@@ -948,6 +1237,8 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         settings = boundarySettings;
         (void)render();
         pass("realtime Forward/Deferred viewport crops match their zero-origin image exactly inside larger render targets");
+
+        runNeighbourColourTransport(renderer, output, report);
 
         report["dispatches"] = renderer.hardwareRayTracingDispatchCount() - dispatchStart;
         report["historyRevision"] = renderer.globalIlluminationStatus().historyRevision;

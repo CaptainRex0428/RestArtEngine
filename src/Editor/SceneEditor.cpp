@@ -2539,6 +2539,47 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
     ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
     ImGui::SameLine();
+    {
+        // Hardware activity alone does not imply that indirect lighting is on.
+        // Keep the actual GI state ahead of the long device/FPS text so it is
+        // visible in narrow layouts. This entry only opens the existing settings.
+        const auto giStatus = renderer.globalIlluminationStatus();
+        const bool giRequested = settings.globalIllumination.method != renderer::GlobalIlluminationMethod::Disabled;
+        const bool hardwareActive = settings.hardwareRayTracing && renderer.hardwareRayTracingActive();
+        const bool giEffective = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
+        std::string giLabel = "GI: Off";
+        if (giRequested) {
+            if (!hardwareActive) giLabel = "GI: Inactive";
+            else if (settings.debugView != 0) giLabel = "GI: Paused";
+            else if (!giEffective) giLabel = "GI: Inactive";
+            else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
+            else giLabel = "GI: Progressive " + std::to_string(giStatus.accumulatedSamples) + "/" +
+                std::to_string(giStatus.targetSamples);
+        }
+        if (ImGui::SmallButton((giLabel + "###GIStatus").c_str())) showProjectSettings();
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(giLabel.c_str());
+            ImGui::TextUnformatted("Click to open Project Settings.");
+            if (!giRequested) {
+                ImGui::TextUnformatted("Hardware preview has no diffuse color bleeding.");
+            } else {
+                ImGui::Text("Requested mode: %s", settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
+                    ? "Realtime" : "Progressive accumulation");
+                ImGui::Text("Requested indirect diffuse: %s", settings.globalIllumination.indirectDiffuse ? "On" : "Off");
+                ImGui::Text("Requested indirect specular: %s", settings.globalIllumination.indirectSpecular ? "On" : "Off");
+                if (!settings.globalIllumination.indirectDiffuse)
+                    ImGui::TextUnformatted("Diffuse color bleeding is disabled at the receiving surface.");
+                if (!settings.hardwareRayTracing)
+                    ImGui::TextUnformatted("GI is inactive because hardware ray tracing is disabled.");
+                else if (hardwareActive && settings.debugView != 0)
+                    ImGui::TextUnformatted("GI sampling is paused in this viewport debug mode.");
+                if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
+            }
+            ImGui::EndTooltip();
+        }
+    }
+    ImGui::SameLine();
     ImGui::TextDisabled("Project: %s | %s / %s | %.0f FPS | F1 UI, F2 pipeline, F11 fullscreen",
         project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
         renderer.adapterName().c_str(), ImGui::GetIO().Framerate);

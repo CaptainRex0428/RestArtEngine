@@ -89,6 +89,8 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
                 settings.hardwareRayTracing = true;
             changed = true;
         }
+        if (gi.method == renderer::GlobalIlluminationMethod::Disabled)
+            ImGui::TextWrapped("GI is disabled. Hardware preview has no diffuse color bleeding.");
         ImGui::TextWrapped("Selecting path tracing enables hardware ray tracing. Turning hardware off keeps your GI preference.");
         ImGui::BeginDisabled(gi.method != renderer::GlobalIlluminationMethod::PathTracing);
         int mode = static_cast<int>(gi.mode);
@@ -97,6 +99,8 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed = true;
         }
         changed |= ImGui::Checkbox("Indirect diffuse (color bleeding)", &gi.indirectDiffuse);
+        if (gi.method != renderer::GlobalIlluminationMethod::Disabled && !gi.indirectDiffuse)
+            ImGui::TextWrapped("Indirect diffuse is off. Diffuse color bleeding is disabled at the receiving surface.");
         changed |= ImGui::Checkbox("Indirect specular (reflections)", &gi.indirectSpecular);
         const auto sampleSlider = [&changed](const char* label, std::uint32_t& value, std::uint32_t maximum) {
             int edited = static_cast<int>(std::clamp(value, 1u, maximum));
