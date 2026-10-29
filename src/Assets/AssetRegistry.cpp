@@ -296,7 +296,7 @@ bool moveContentEntry(const std::filesystem::path& contentRoot, std::string_view
     error.clear();
     try {
         if (isEngineContentPath(relativePath) || isEngineContentPath(targetFolder))
-            throw std::runtime_error("Engine Content is read-only. Copy an asset to the project before editing.");
+            throw std::runtime_error("Engine is read-only. Copy an asset to the project before editing.");
         if (contentRoot.empty() || relativePath.empty()) throw std::runtime_error("Move needs a content root and a source path.");
         const auto checkedPath = [&](std::string_view text) {
             const auto relative = fs::path(std::u8string(text.begin(), text.end()));

@@ -3021,7 +3021,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         editor.showAssetDetails("engine://Materials/DefaultMaterial.rasset");
         capture("engine_asset_details_preroll", true);
         capture("engine_asset_details", true, true);
-        require(renderedUiText.find("Engine Content (read-only)") != std::string::npos,
+        require(renderedUiText.find("Engine (read-only)") != std::string::npos,
             "Engine asset details did not explain its source and protection.");
         editor.closeAssetDetails();
 
@@ -3047,7 +3047,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         saveMaterialCapture("engine_material_readonly_native.bmp");
         require(renderedUiText.find("Live preview") != std::string::npos && renderer.materialPreviewTexture(),
             "A clean read-only engine material must retain its preview sphere.");
-        require(renderedUiText.find("Engine Content - read-only") != std::string::npos,
+        require(renderedUiText.find("Engine - read-only") != std::string::npos,
             "Engine material editor lacks its read-only explanation.");
         click(materialRect("Grid").GetCenter());
         click(materialRect("Apply material").GetCenter());

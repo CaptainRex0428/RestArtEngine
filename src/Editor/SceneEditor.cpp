@@ -1136,7 +1136,7 @@ void SceneEditor::setSceneBackground(bool black) {
 }
 
 void SceneEditor::importMesh() {
-    if (assets::isEngineContentPath(contentFolder_)) { status_ = "Choose Project Content to import assets."; return; }
+    if (assets::isEngineContentPath(contentFolder_)) { status_ = "Choose Content to import assets."; return; }
     wchar_t path[32768]{};
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner = GetActiveWindow();
@@ -1280,13 +1280,13 @@ bool SceneEditor::copyMaterialToProject(assets::AssetId sourceId, std::string& e
         const auto resolvedFolder = std::filesystem::weakly_canonical(folder);
         const auto relative = resolvedFolder.lexically_relative(resolvedRoot);
         if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") {
-            error = "Project Materials must remain inside Project Content.";
+            error = "Project Materials must remain inside Content.";
             return false;
         }
         const auto resolvedEngine = std::filesystem::weakly_canonical(project_.engineRoot / "Content");
         const auto fromEngine = resolvedFolder.lexically_relative(resolvedEngine);
         if (resolvedFolder == resolvedEngine || (!fromEngine.empty() && !fromEngine.is_absolute() && *fromEngine.begin() != "..")) {
-            error = "Cannot copy into Engine Content. Choose a separate project.";
+            error = "Cannot copy into Engine. Choose a separate project.";
             return false;
         }
         std::filesystem::create_directories(folder);
@@ -1333,7 +1333,7 @@ bool SceneEditor::copyMaterialToProject(assets::AssetId sourceId, std::string& e
         selectContentFolder("Materials");
         selectedAsset_ = "Materials/" + filename;
         selectMaterial(id);
-        status_ = "Copied material to Project Content. Assign the copy to an Actor to use your edits.";
+        status_ = "Copied material to Content. Assign the copy to an Actor to use your edits.";
         return true;
     } catch (const std::exception& failure) {
         error = failure.what();
@@ -1501,7 +1501,7 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
     ImGui::Text("Name: %s", entry->name.c_str());
     ImGui::TextColored(imgui::assetTypeColor(entry->type), "Type: %s", assets::assetTypeName(entry->type));
     ImGui::Text("GUID: %s", entry->id ? assets::assetIdText(entry->id).c_str() : "-");
-    ImGui::TextDisabled("Source: %s", entry->readOnly() ? "Engine Content (read-only)" : "Project Content");
+    ImGui::TextDisabled("Source: %s", entry->readOnly() ? "Engine (read-only)" : "Content");
     ImGui::TextWrapped("Path: %s", entry->relativePath.c_str());
     char sizeBuffer[32]{};
     ImGui::Text("Size: %s", sizeLabel(entry->sizeBytes, sizeBuffer, sizeof(sizeBuffer)));
@@ -1581,7 +1581,7 @@ void SceneEditor::drawAssets() {
     if (ImGui::Button("View...")) ImGui::OpenPopup("##content-view");
     if (ImGui::BeginPopup("##content-view")) {
         ImGui::Checkbox("Show Sources", &contentSourcesVisible_);
-        if (ImGui::Checkbox("Show Engine Content", &contentEngineVisible_) && !contentEngineVisible_ && engineFolder)
+        if (ImGui::Checkbox("Show Engine", &contentEngineVisible_) && !contentEngineVisible_ && engineFolder)
             selectContentFolder(std::string());
         ImGui::Separator();
         if (ImGui::RadioButton("Tiles", contentGridView_)) contentGridView_ = true;
@@ -1611,14 +1611,14 @@ void SceneEditor::drawAssets() {
     ImGui::EndDisabled();
     // The source switch remains available when the Sources pane is collapsed.
     const bool currentEngine = assets::isEngineContentPath(contentFolder_);
-    const auto rootLabel = currentEngine ? "Engine Content" : "Project Content";
+    const auto rootLabel = currentEngine ? "Engine" : "Content";
     continueButtonRow(rootLabel);
     if (ImGui::SmallButton(rootLabel)) selectContentFolder(currentEngine ? std::string(assets::EngineContentPrefix) : std::string());
     ImGui::SameLine(0.0f, 3.0f);
     if (ImGui::SmallButton("v##content-source")) ImGui::OpenPopup("##content-source-menu");
     if (ImGui::BeginPopup("##content-source-menu")) {
-        if (ImGui::MenuItem("Project Content", nullptr, !currentEngine)) selectContentFolder(std::string());
-        if (contentEngineVisible_ && ImGui::MenuItem("Engine Content", nullptr, currentEngine)) selectContentFolder(std::string(assets::EngineContentPrefix));
+        if (ImGui::MenuItem("Content", nullptr, !currentEngine)) selectContentFolder(std::string());
+        if (contentEngineVisible_ && ImGui::MenuItem("Engine", nullptr, currentEngine)) selectContentFolder(std::string(assets::EngineContentPrefix));
         ImGui::EndPopup();
     }
     {
@@ -1719,7 +1719,7 @@ void SceneEditor::drawContentFolderTarget(const std::string& folder) {
 void SceneEditor::drawFolderTreeNode(const std::string& folder) {
     const auto children = registry_.childFolders(folder);
     const bool root = folder.empty() || folder == assets::EngineContentPrefix;
-    const auto label = root ? std::string(folder.empty() ? "Project Content" : "Engine Content") : leafName(folder);
+    const auto label = root ? std::string(folder.empty() ? "Content" : "Engine") : leafName(folder);
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (contentFolder_ == folder) flags |= ImGuiTreeNodeFlags_Selected;
     if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
@@ -1738,7 +1738,7 @@ void SceneEditor::drawFolderTreeNode(const std::string& folder) {
 }
 
 std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) const {
-    if (entry.readOnly()) return "Engine Content is read-only. Copy to Project to edit.";
+    if (entry.readOnly()) return "Engine is read-only. Copy to Project to edit.";
     if (entry.path.lexically_normal() == scenePath_.lexically_normal()) return "The open scene cannot be deleted.";
     if (entry.type == assets::AssetType::Mesh) {
         if (const auto* mesh = assets_.findMesh(entry.id); mesh && mesh->primitive != assets::MeshPrimitive::Imported)
@@ -1759,7 +1759,7 @@ std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) co
 
 void SceneEditor::drawAssetItemActions(const assets::AssetEntry& entry) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s\n%s\nDouble-click: Details%s", entry.name.c_str(), entry.relativePath.c_str(),
-        entry.readOnly() ? "Engine Content (read-only)" : "Project Content",
+        entry.readOnly() ? "Engine (read-only)" : "Content",
         entry.type == assets::AssetType::Mesh ? "\nDrag: place in Viewport" : entry.readOnly() ? "" : "\nDrag: move to a folder");
     if (!assetDragCancelled_ && ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload("RAE_ASSET", entry.relativePath.data(), entry.relativePath.size());
@@ -1806,7 +1806,7 @@ void SceneEditor::processContentActions() {
             : entry && entry->type == assets::AssetType::Scene ? "Scenes" : "";
         std::string error;
         if (!entry || entry->readOnly() || assets::isEngineContentPath(target)) {
-            contentError_ = "Engine Content is read-only. Copy to Project to edit.";
+            contentError_ = "Engine is read-only. Copy to Project to edit.";
         } else if (!root.empty() && target != root && !target.starts_with(root + "/")) {
             contentError_ = "This asset must remain inside Content/" + root + ".";
         } else if (mesh && mesh->primitive != assets::MeshPrimitive::Imported) {
@@ -1968,7 +1968,7 @@ void SceneEditor::drawContentDialogs() {
                 newFolderBuffer_.back() != '.' && newFolderBuffer_.back() != ' ' &&
                 newFolderBuffer_.find_first_of(std::string_view("/\\:*?\"<>|")) == std::string::npos;
             if (assets::isEngineContentPath(contentFolder_)) {
-                status_ = "Engine Content is read-only.";
+                status_ = "Engine is read-only.";
             } else if (!valid) {
                 status_ = "Folder names cannot be empty or contain path characters.";
             } else {
@@ -2012,7 +2012,7 @@ void SceneEditor::drawContentDialogs() {
             std::error_code code;
             const auto* entry = registry_.find(renameTarget_);
             if (!entry || entry->readOnly() || assets::isEngineContentPath(renameTarget_)) {
-                status_ = "Engine Content is read-only.";
+                status_ = "Engine is read-only.";
             } else if (!valid) {
                 status_ = "Asset names cannot be empty or contain path characters.";
             } else if (std::filesystem::exists(destination, code)) {
@@ -2166,7 +2166,7 @@ void SceneEditor::drawInstanceDetails() {
     // material workspace; it must follow this Actor, not the shared mesh.
     ImGui::SeparatorText("Assigned material");
     if (const auto* material = assets_.findMaterial(actor->mesh.materialId)) {
-        ImGui::TextDisabled("%s", readOnlyMaterial(*material) ? "Engine Content (read-only)" : "Project Content");
+        ImGui::TextDisabled("%s", readOnlyMaterial(*material) ? "Engine (read-only)" : "Content");
         const auto label = material->name + "###InstanceMaterial";
         const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
         const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
@@ -2245,8 +2245,8 @@ void SceneEditor::drawMaterial() {
     }
     ImGui::EndDisabled();
     const bool readOnly = readOnlyMaterial(materialDraft_);
-    if (readOnly) ImGui::TextWrapped("Engine Content - read-only. Copy to Project to customize this material.");
-    else ImGui::TextWrapped("Project Content. Parameters preview live. Apply confirms the draft; Save writes assets.");
+    if (readOnly) ImGui::TextWrapped("Engine - read-only. Copy to Project to customize this material.");
+    else ImGui::TextWrapped("Content. Parameters preview live. Apply confirms the draft; Save writes assets.");
     if (materialDraftDirty_) ImGui::TextColored({1,.7f,.25f,1}, "Live preview: draft not applied or saved.");
     else ImGui::TextDisabled("No unapplied material changes.");
     ImGui::BeginDisabled(readOnly);

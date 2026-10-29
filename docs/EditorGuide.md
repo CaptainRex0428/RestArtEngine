@@ -34,9 +34,9 @@ Scene Viewport 在自己的窗口中显示场景渲染纹理；拾取、相机�
 
 ## 内置引擎材质
 
-Content 的 Sources 区分 **Project Content** 和 **Engine Content**。`View > Show Engine Content` 控制引擎来源的可见性；隐藏 Sources 时仍可通过路径栏的根选择器切换。搜索、历史导航和向上导航在所选来源内工作。
+Content 的 Sources 区分 **Content** 和 **Engine**。`View > Show Engine` 控制引擎来源的可见性；隐藏 Sources 时仍可通过路径栏的根选择器切换。搜索、历史导航和向上导航在所选来源内工作。
 
-`Engine Content > Materials > DefaultMaterial` 是引擎随包提供的中性灰材质。新建 Sphere/Cube、从 Content 网格添加或拖入场景的 Actor 默认引用它；已有 Actor 的材质不会被替换，也不会因为浏览另一份材质而改变新 Actor 的默认值。可在实例 Details 的 Material 下拉中为已有 Actor 分配这份材质。New material 同样从这份默认参数开始，但创建的是具有独立 GUID 的可编辑项目资产。
+`Engine > Materials > DefaultMaterial` 是引擎随包提供的中性灰材质。新建 Sphere/Cube、从 Content 网格添加或拖入场景的 Actor 默认引用它；已有 Actor 的材质不会被替换，也不会因为浏览另一份材质而改变新 Actor 的默认值。可在实例 Details 的 Material 下拉中为已有 Actor 分配这份材质。New material 同样从这份默认参数开始，但创建的是具有独立 GUID 的可编辑项目资产。
 
 引擎资产在 Details 和材质窗口显示只读来源：可以预览和引用，参数、Apply、重命名、移动、删除均受保护。需要自定义时使用右键、Asset Details 或材质窗口中的 **Copy to Project**：在项目 Materials 下创建带新 GUID 的独立 `.rasset`，然后自动选中并打开副本。复制不会自动替换 Actor 的材质，需要在实例 Details 中分配。副本可按原流程预览 → Apply → Save；这些操作不会修改引擎默认材质。尚有未 Apply 的草稿时先处理草稿再复制。
 
