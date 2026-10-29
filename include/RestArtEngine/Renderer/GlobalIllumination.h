@@ -18,6 +18,9 @@ struct GlobalIlluminationSettings {
     // Select the first surface's indirect BRDF lobes. Direct light is unaffected.
     bool indirectDiffuse = true;
     bool indirectSpecular = true;
+    // Artistic gain of the receiving surface's indirect diffuse lobe only.
+    // Applied once per path, never to direct light or at every bounce.
+    float indirectDiffuseIntensity = 1.0f;
     std::uint32_t samplesPerFrame = 1;
     std::uint32_t targetSamples = 256;
     std::uint32_t maxBounces = 4;
@@ -27,6 +30,7 @@ struct GlobalIlluminationSettings {
 inline constexpr std::uint32_t kGiMaxSamplesPerFrame = 16;
 inline constexpr std::uint32_t kGiMaxTargetSamples = 65536;
 inline constexpr std::uint32_t kGiMaxBounces = 12;
+inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;
 
 struct GlobalIlluminationStatus {
     GlobalIlluminationMethod requested = GlobalIlluminationMethod::Disabled;

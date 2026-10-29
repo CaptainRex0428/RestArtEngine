@@ -99,6 +99,13 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed = true;
         }
         changed |= ImGui::Checkbox("Indirect diffuse (color bleeding)", &gi.indirectDiffuse);
+        ImGui::BeginDisabled(!gi.indirectDiffuse);
+        ImGui::TextUnformatted("Indirect diffuse intensity");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        changed |= ImGui::SliderFloat("##IndirectDiffuseIntensity", &gi.indirectDiffuseIntensity,
+            0.0f, renderer::kGiMaxIndirectDiffuseIntensity, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("1x keeps the reference lighting. Above 1x boosts color bleeding for artistic control; direct light and specular reflections are unchanged.");
         if (gi.method != renderer::GlobalIlluminationMethod::Disabled && !gi.indirectDiffuse)
             ImGui::TextWrapped("Indirect diffuse is off. Diffuse color bleeding is disabled at the receiving surface.");
         changed |= ImGui::Checkbox("Indirect specular (reflections)", &gi.indirectSpecular);

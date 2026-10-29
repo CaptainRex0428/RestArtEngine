@@ -150,6 +150,27 @@ double meanError(const Pixels& first, const Pixels& second, const Mask& mask) {
             difference += std::abs(static_cast<int>(first[pixel * 4 + channel]) - static_cast<int>(second[pixel * 4 + channel]));
     return difference / (static_cast<double>(maskCount(mask)) * 3.0 * 255.0);
 }
+// Reconstruct exposed radiance from unsaturated display pixels only for an
+// approximate gain-linearity check. This is not a raw HDR readback: quantized
+// ACES/gamma inversion has an explicit tolerance and clipped pixels are rejected.
+double reconstructedRadianceMean(const Pixels& image, const Mask& mask) {
+    double total = 0.0;
+    std::size_t count = 0;
+    for (std::size_t pixel = 0; pixel < mask.size(); ++pixel) {
+        if (!mask[pixel]) continue;
+        for (unsigned channel = 0; channel < 3; ++channel) {
+            const auto value = image[pixel * 4 + channel];
+            require(value < 250, "Gain-linearity fixture contains near-clipped display pixels.");
+            const double mapped = std::pow(static_cast<double>(value) / 255.0, 2.2);
+            const double a = 2.51 - 2.43 * mapped;
+            const double b = 0.03 - 0.59 * mapped;
+            total += (-b + std::sqrt(b * b + 0.56 * a * mapped)) / (2.0 * a);
+            ++count;
+        }
+    }
+    require(count != 0, "Empty gain-linearity receiver mask.");
+    return total / static_cast<double>(count);
+}
 std::size_t changedPixels(const Pixels& first, const Pixels& second, int tolerance = 2) {
     require(first.size() == second.size(), "Image sizes differ.");
     std::size_t result = 0;
@@ -663,6 +684,59 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
             "Multi-bounce lighting did not transfer the wall's red/blue colour onto the neutral floor.");
         pass("wall colour affects neutral-floor diffuse indirect lighting while direct-only lighting stays unchanged");
 
+        // Three shaded surfaces include secondary interreflection but stop
+        // before Russian roulette. With only the first diffuse lobe enabled,
+        // all three gains follow identical paths: a gain must be applied once,
+        // not compounded at secondary surfaces. Lower exposure avoids clipping.
+        const float gainOriginalExposure = settings.exposure;
+        settings.exposure = .2f;
+        settings.globalIllumination.maxBounces = 3;
+        settings.globalIllumination.indirectDiffuseIntensity = 1.0f;
+        const auto gainOne = advanceTo(256);
+        const auto gainOneHistory = renderer.globalIlluminationStatus().historyRevision;
+        settings.globalIllumination.indirectDiffuseIntensity = 3.0f;
+        const auto gainLiveFirst = render();
+        require(renderer.globalIlluminationStatus().historyRevision > gainOneHistory &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 16,
+            "Progressive diffuse gain did not immediately reset accumulated history.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(gainLiveFirst, render(), 0) == 0,
+            "Progressive gain change mixed old samples instead of producing a fresh image.");
+        const auto gainThree = advanceTo(256);
+        settings.globalIllumination.indirectDiffuseIntensity = 0.0f;
+        const auto gainZero = advanceTo(256);
+        settings.globalIllumination.indirectDiffuse = false;
+        settings.globalIllumination.indirectDiffuseIntensity = 3.0f;
+        const auto gainDisabled = advanceTo(256);
+        require(changedPixels(gainZero, gainDisabled, 0) == 0,
+            "Zero diffuse intensity differs from disabled indirect diffuse.");
+        settings.globalIllumination.indirectDiffuseIntensity = 8.0f;
+        require(changedPixels(gainDisabled, advanceTo(256), 0) == 0 &&
+            settings.globalIllumination.indirectDiffuseIntensity == 8.0f,
+            "Disabled diffuse gain changed direct lighting or lost the requested value.");
+        const auto zeroRadiance = reconstructedRadianceMean(gainZero, mask);
+        const auto oneRadiance = reconstructedRadianceMean(gainOne, mask);
+        const auto threeRadiance = reconstructedRadianceMean(gainThree, mask);
+        require(oneRadiance - zeroRadiance > .0005,
+            "Diffuse gain fixture has no measurable indirect contribution.");
+        const auto gainRatio = (threeRadiance - zeroRadiance) / (oneRadiance - zeroRadiance);
+        require(gainRatio > 2.7 && gainRatio < 3.3,
+            "Indirect diffuse gain is not approximately linear; it may affect direct light or compound per bounce.");
+        report["metrics"]["diffuseGainApproxExposedRadianceRatio3To1"] = gainRatio;
+        report["metrics"]["diffuseGainMeasurement"] =
+            "Inverted unsaturated RGBA8 ACES/gamma, not raw HDR; tolerance accounts for quantization.";
+        report["metrics"]["diffuseGainFloorMean1"] = meanColour(gainOne, mask);
+        report["metrics"]["diffuseGainFloorMean3"] = meanColour(gainThree, mask);
+        savePixels(output / "diffuse-gain-progressive-1.bmp", gainOne, width, height);
+        savePixels(output / "diffuse-gain-progressive-3.bmp", gainThree, width, height);
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.indirectDiffuseIntensity = 1.0f;
+        require(changedPixels(gainOne, advanceTo(256), 0) == 0,
+            "Restoring diffuse intensity 1 did not restore the physical-reference image.");
+        settings.exposure = gainOriginalExposure;
+        settings.globalIllumination.maxBounces = 4;
+        pass("progressive diffuse gain scales indirect light once, preserves direct light, resets live history and restores at one");
+
         // Separate GGX evidence uses a closer camera and a larger image so a
         // reviewer can inspect reflected wall edges and highlight spread. A
         // pixel difference alone cannot establish physically plausible blur.
@@ -679,6 +753,24 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         metal->roughness = .08f;
         const auto polished = advanceTo(256);
         savePixels(output / "ggx-metal-roughness-008.bmp", polished, 320, 240);
+        settings.debugView = 2;
+        const auto metalAlbedo = render();
+        Mask metalGainMask(metalAlbedo.size() / 4);
+        for (std::size_t pixel = 0; pixel < metalGainMask.size(); ++pixel) {
+            const auto at = pixel * 4;
+            metalGainMask[pixel] = metalAlbedo[at] >= 239 && metalAlbedo[at] <= 242 &&
+                metalAlbedo[at] == metalAlbedo[at + 1] && metalAlbedo[at] == metalAlbedo[at + 2] ? 1 : 0;
+        }
+        metalGainMask = erodeMask(metalGainMask, 320, 240, 2);
+        require(maskCount(metalGainMask) > 100, "Pure-metal gain isolation mask is empty.");
+        settings.debugView = 0;
+        settings.globalIllumination.indirectDiffuseIntensity = 3.0f;
+        const auto polishedGainThree = advanceTo(256);
+        require(meanError(polished, polishedGainThree, metalGainMask) == 0.0,
+            "Diffuse gain changed pure-metal indirect specular reflections, including reflected diffuse surfaces.");
+        report["metrics"]["diffuseGainMetalReceiverMae"] = meanError(polished, polishedGainThree, metalGainMask);
+        settings.globalIllumination.indirectDiffuseIntensity = 1.0f;
+        (void)advanceTo(256);
         const auto polishedHistory = renderer.globalIlluminationStatus().historyRevision;
         metal->roughness = .55f;
         const auto roughMetal = advanceTo(256);
@@ -888,6 +980,40 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         savePixels(output / "realtime-blue-wall.bmp", realtimeBlue, width, height);
         require(realtimeTransfer > .002,
             "Realtime diffuse transport did not transfer wall colour to the GPU-selected neutral floor.");
+
+        const auto realtimeGainHistory = renderer.globalIlluminationStatus().historyRevision;
+        settings.globalIllumination.indirectDiffuseIntensity = 3.0f;
+        const auto realtimeGainFirst = render();
+        require(renderer.globalIlluminationStatus().historyRevision > realtimeGainHistory &&
+            renderer.globalIlluminationStatus().accumulatedSamples == 16,
+            "Realtime diffuse gain did not invalidate its previous indirect-light history immediately.");
+        renderer.resetGlobalIllumination();
+        require(changedPixels(realtimeGainFirst, render(), 0) == 0,
+            "Realtime gain change blended the old gain into the fresh first frame.");
+        const auto realtimeGainThree = realtimeFrames(15);
+        const auto realtimeGainEffect = meanError(realtimeBlue, realtimeGainThree, mask);
+        const auto realtimeGainMean = meanColour(realtimeGainThree, mask);
+        require(realtimeGainEffect > .005 && realtimeGainMean[2] > realtimeBlueMean[2] + .005,
+            "Realtime diffuse gain failed to strengthen the blue donor's indirect contribution on the neutral floor.");
+        savePixels(output / "diffuse-gain-realtime-1.bmp", realtimeBlue, width, height);
+        savePixels(output / "diffuse-gain-realtime-3.bmp", realtimeGainThree, width, height);
+        report["metrics"]["realtimeDiffuseGainFloorMae"] = realtimeGainEffect;
+        report["metrics"]["realtimeDiffuseGainFloorMean3"] = realtimeGainMean;
+        settings.globalIllumination.indirectDiffuseIntensity = 0.0f;
+        const auto realtimeGainZero = realtimeFrames(16, true);
+        settings.globalIllumination.indirectDiffuse = false;
+        settings.globalIllumination.indirectDiffuseIntensity = 3.0f;
+        require(changedPixels(realtimeGainZero, realtimeFrames(16, true), 0) == 0,
+            "Realtime zero diffuse gain does not match the disabled contribution.");
+        settings.globalIllumination.indirectDiffuseIntensity = 8.0f;
+        require(changedPixels(realtimeGainZero, realtimeFrames(16, true), 0) == 0 &&
+            settings.globalIllumination.indirectDiffuseIntensity == 8.0f,
+            "Realtime disabled diffuse gain affects direct lighting or loses its authored setting.");
+        settings.globalIllumination.indirectDiffuse = true;
+        settings.globalIllumination.indirectDiffuseIntensity = 1.0f;
+        require(changedPixels(realtimeBlue, realtimeFrames(16, true), 0) == 0,
+            "Realtime diffuse gain did not restore its same-seed reference at one.");
+        pass("realtime diffuse gain updates visible transport, starts fresh history, matches disabled at zero and restores at one");
 
         settings.globalIllumination.indirectDiffuse = false;
         const auto realtimeBlueDirect = realtimeFrames(16, true);

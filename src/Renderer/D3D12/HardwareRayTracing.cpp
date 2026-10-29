@@ -212,6 +212,7 @@ struct HistoryKey {
     std::uint64_t positions = 0, triangles = 0, normals = 0;
     std::uint64_t pipelineRevision = 0, epoch = 0;
     std::uint32_t width = 0, height = 0, maxBounces = 0, method = 0, mode = 0, contributions = 0;
+    float indirectDiffuseIntensity = 1.0f;
     bool shadows = false;
     bool operator==(const HistoryKey&) const = default;
 };
@@ -924,6 +925,12 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         const bool transportShadows = pathRequested && realtime ? true : frame.shadows;
         const std::uint32_t contributions = (frame.globalIllumination.indirectDiffuse ? 1u : 0u) |
             (frame.globalIllumination.indirectSpecular ? 2u : 0u);
+        // Runtime callers may bypass project validation. Keep invalid floats out
+        // of both shader arithmetic and the equality-based HDR history key.
+        const float requestedDiffuseIntensity = frame.globalIllumination.indirectDiffuseIntensity;
+        const float indirectDiffuseIntensity = !frame.globalIllumination.indirectDiffuse ? 0.0f :
+            std::isfinite(requestedDiffuseIntensity)
+                ? std::clamp(requestedDiffuseIntensity, 0.0f, kGiMaxIndirectDiffuseIntensity) : 1.0f;
         const auto maxBounces = std::clamp(frame.globalIllumination.maxBounces, 1u, kGiMaxBounces);
         HistoryKey nextHistory{};
         nextHistory.sceneConstants = frame.sceneConstants;
@@ -938,6 +945,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         nextHistory.method = static_cast<std::uint32_t>(frame.globalIllumination.method);
         nextHistory.mode = static_cast<std::uint32_t>(frame.globalIllumination.mode);
         nextHistory.contributions = contributions; nextHistory.shadows = transportShadows;
+        nextHistory.indirectDiffuseIntensity = indirectDiffuseIntensity;
         const std::uint32_t requestedBatch = std::min(
             std::clamp(frame.globalIllumination.samplesPerFrame, 1u, kGiMaxSamplesPerFrame), targetSamples);
         const bool restart = pathLit && (!state.historyValid || !(nextHistory == state.historyKey) ||
@@ -962,7 +970,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
-            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), 0, 0},
+            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), indirectDiffuseIntensity, 0},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
             {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));

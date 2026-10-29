@@ -20,6 +20,7 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 | --- | --- | --- |
 | GI mode | Progressive accumulation | 渐进模式输出完整路径追踪画面；实时模式输出线性 HDR 间接光，供 Forward／Deferred 消费。 |
 | Indirect diffuse (color bleeding) | 开启 | 接收表面的间接漫反射贡献。 |
+| Indirect diffuse intensity | 1.0，范围 0–8 | 间接漫反射的艺术强度。1 保持原始光照，0 关闭该贡献，大于 1 强化互染；不改变直接光或间接镜面反射。 |
 | Indirect specular (reflections) | 开启 | 接收表面的间接镜面／粗糙反射贡献，独立于旧硬件反射开关。 |
 | Samples per frame | 1，范围 1–16 | 每次有效主场景提交的每像素路径样本预算；批次受剩余目标或历史预算限制。 |
 | Target samples／History samples | 256，范围 1–65536 | 渐进模式的停止目标，或实时模式的历史权重上限。 |
@@ -27,6 +28,10 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 | Restart accumulation | 手动操作 | 下一次主场景帧重新建立历史，不修改资产或项目参数。 |
 
 独立 `Ray-traced reflections` 只用于 GI 关闭时的硬件预览；GI 启用时保留该偏好，但由 `Indirect specular` 控制 GI 反射。`Ray-traced shadows` 用于硬件预览和渐进式完整画面；Realtime 模式将其禁用并保留偏好，主可见表面的直接光阴影沿用 Scene 中的 Forward／Deferred 阴影设置。
+
+`Indirect diffuse intensity` 在拖动时立即生效，并重新开始受影响的 GI 历史。关闭 `Indirect diffuse` 或 GI 时保留强度请求，重新开启继续使用该值。该倍率在首个接收表面的间接漫反射分量上只应用一次，后续反弹不重复相乘；实时与渐进模式使用同一规则。高于 1 的值是艺术控制，不代表物理反射率提高，也不会更改材质资产。它会一起增强间接漫反射的亮度和颜色，不是独立的饱和度旋钮。
+
+这里沿用现有 GI 贡献分类：直接灯光估计器、相机直接看到的背景不受倍率影响；通过漫反射路径采样得到的环境照明也属于该漫反射贡献，会一起缩放。
 
 命令行 `--path-tracing` 在本次启动请求路径追踪算法及硬件依赖；更新模式仍由项目配置选择。`--no-hardware-rt` 可覆盖硬件总开关。持久化仍由配置页保存。
 
@@ -86,13 +91,14 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
   "mode": "realtime",
   "indirectDiffuse": true,
   "indirectSpecular": true,
+  "indirectDiffuseIntensity": 1.0,
   "samplesPerFrame": 1,
   "targetSamples": 256,
   "maxBounces": 4
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，因此旧路径追踪项目仍按原渐进方式读取。算法和模式字符串、贡献布尔值及整数范围均严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 

@@ -688,9 +688,47 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         const bool legacyReflections = uiSettings.hardwareRayTracingReflections;
         const bool firstDiffuse = uiSettings.globalIllumination.indirectDiffuse;
         const bool firstSpecular = uiSettings.globalIllumination.indirectSpecular;
+        require(uiSettings.globalIllumination.indirectDiffuseIntensity == 1.0f,
+            "The default indirect diffuse intensity must preserve reference lighting.");
+        const auto gainRect = itemRect(findChild("ProjectSettingsContent"), "##IndirectDiffuseIntensity");
+        const auto historyBeforeGain = renderer.globalIlluminationStatus().historyRevision;
+        input.mouse = ImVec2(gainRect.Min.x + gainRect.GetWidth() * 0.35f, gainRect.GetCenter().y);
+        uiFrame();
+        input.event = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+        uiFrame();
+        const float pressedGain = uiSettings.globalIllumination.indirectDiffuseIntensity;
+        require(pressedGain > 1.0f && editor.projectSettingsDirty(),
+            "Pressing the diffuse intensity slider did not apply its value immediately.");
+        input.mouse.x = gainRect.Min.x + gainRect.GetWidth() * 0.55f;
+        uiFrame();
+        const float editedGain = uiSettings.globalIllumination.indirectDiffuseIntensity;
+        require(editedGain > pressedGain && uiSettings.globalIllumination.indirectDiffuse == firstDiffuse &&
+            uiSettings.globalIllumination.indirectSpecular == firstSpecular &&
+            uiSettings.hardwareRayTracingReflections == legacyReflections,
+            "Dragging diffuse intensity did not update live or changed another contribution.");
+        if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible)
+            require(renderer.globalIlluminationStatus().historyRevision > historyBeforeGain,
+                "Diffuse intensity dragging failed to invalidate live GI history.");
+        input.event = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+        uiFrame();
+        uiFrame("project-settings-diffuse-intensity.bmp");
+        const auto projectSettingsSize = findWindow("Project Settings")->Size;
+        {
+            ContextScope scope(context);
+            ImGui::SetWindowSize(findWindow("Project Settings"), ImVec2(560.0f, 390.0f));
+        }
+        uiFrame();
+        (void)itemRect(findChild("ProjectSettingsContent"), "##IndirectDiffuseIntensity");
+        uiFrame("project-settings-diffuse-intensity-compact.bmp");
+        {
+            ContextScope scope(context);
+            ImGui::SetWindowSize(findWindow("Project Settings"), projectSettingsSize);
+        }
+        uiFrame();
         click(itemRect(findChild("ProjectSettingsContent"), "Indirect diffuse (color bleeding)").GetCenter());
         require(uiSettings.globalIllumination.indirectDiffuse != firstDiffuse &&
             uiSettings.globalIllumination.indirectSpecular == firstSpecular &&
+            uiSettings.globalIllumination.indirectDiffuseIntensity == editedGain &&
             uiSettings.hardwareRayTracingReflections == legacyReflections,
             "Indirect diffuse checkbox did not change only its independent GI contribution.");
         require(!uiSettings.globalIllumination.indirectDiffuse &&
@@ -708,7 +746,8 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "Indirect specular checkbox changed another contribution or the standalone reflection preference.");
         click(itemRect(findChild("ProjectSettingsContent"), "Indirect diffuse (color bleeding)").GetCenter());
         require(uiSettings.globalIllumination.indirectDiffuse == firstDiffuse &&
-            uiSettings.globalIllumination.indirectSpecular != firstSpecular,
+            uiSettings.globalIllumination.indirectSpecular != firstSpecular &&
+            uiSettings.globalIllumination.indirectDiffuseIntensity == editedGain,
             "Restoring diffuse also reset the independently edited specular contribution.");
         (void)itemRect(findChild("ProjectSettingsContent"), "GI mode");
         uiFrame("project-settings-realtime.bmp");
@@ -768,7 +807,8 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "Saved GI algorithm, mode, contributions and sampling values did not survive reloading.");
         require(reloaded.rendering.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime &&
             reloaded.rendering.globalIllumination.indirectDiffuse == firstDiffuse &&
-            reloaded.rendering.globalIllumination.indirectSpecular != firstSpecular,
+            reloaded.rendering.globalIllumination.indirectSpecular != firstSpecular &&
+            reloaded.rendering.globalIllumination.indirectDiffuseIntensity == editedGain,
             "Project reload lost the Realtime mode or independent GI contribution choices.");
         require(Json::parse(contents(project.manifest))["hardwareRtSmokeUnknownField"]["preserve"] == 17,
             "Saving project settings destroyed an unrelated manifest field.");

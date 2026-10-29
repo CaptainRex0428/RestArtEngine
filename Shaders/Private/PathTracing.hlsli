@@ -46,7 +46,7 @@ float PathSmithG1(float normalDirection, float alphaSquared)
 }
 
 float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
-    bool includeDiffuse, bool includeSpecular, out float specularPdf)
+    bool includeDiffuse, bool includeSpecular, float diffuseIntensity, out float specularPdf)
 {
     specularPdf = 0.0;
     float nv = dot(normal, view);
@@ -64,6 +64,7 @@ float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
     float3 fresnel = Fresnel(vh, f0);
     float3 diffuse = (1.0 - fresnel) * (1.0 - material.metallic) * material.albedo / PI;
     if (!includeDiffuse) diffuse = 0.0;
+    diffuse *= diffuseIntensity;
     if (!includeSpecular) return diffuse;
     float geometry = PathSmithG1(nv, alphaSquared) * PathSmithG1(nl, alphaSquared);
     specularPdf = distribution * nh / max(4.0 * vh, 1e-8);
@@ -71,15 +72,18 @@ float3 PathBrdf(float3 normal, float3 view, float3 incoming, Surface material,
 }
 
 bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
-    Surface material, bool includeDiffuse, bool includeSpecular,
+    Surface material, bool includeDiffuse, bool includeSpecular, float diffuseIntensity,
     inout uint randomState, out float3 incoming, out float3 weight)
 {
     incoming = normal;
     weight = 0.0;
+    // Zero gain has the same lobe/PDF and random sequence as disabling diffuse.
+    includeDiffuse = includeDiffuse && diffuseIntensity > 0.0;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
     float specularEnergy = includeSpecular
         ? PathLuminance(Fresnel(saturate(dot(normal, view)), f0)) : 0.0;
-    float diffuseEnergy = includeDiffuse ? PathLuminance(material.albedo) * (1.0 - material.metallic) : 0.0;
+    float diffuseEnergy = includeDiffuse
+        ? PathLuminance(material.albedo) * (1.0 - material.metallic) * diffuseIntensity : 0.0;
     if (specularEnergy + diffuseEnergy <= 1e-8) return false;
     float specularProbability = includeSpecular
         ? (diffuseEnergy <= 1e-8 ? 1.0 : clamp(specularEnergy / (specularEnergy + diffuseEnergy), 0.05, 0.95))
@@ -108,7 +112,7 @@ bool PathSampleBrdf(float3 normal, float3 geometricNormal, float3 view,
     float nl = dot(normal, incoming);
     if (nl <= 1e-6 || dot(geometricNormal, incoming) <= 1e-6) return false;
     float specularPdf;
-    float3 brdf = PathBrdf(normal, view, incoming, material, includeDiffuse, includeSpecular, specularPdf);
+    float3 brdf = PathBrdf(normal, view, incoming, material, includeDiffuse, includeSpecular, diffuseIntensity, specularPdf);
     float pdf = specularProbability * specularPdf + (1.0 - specularProbability) * nl / PI;
     if (pdf <= 1e-12) return false;
     weight = brdf * nl / pdf;
@@ -125,7 +129,7 @@ float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
     float unusedPdf;
     // GI lobe switches control indirect transport. Direct highlights remain
     // part of the material's direct lighting in both modes.
-    float3 brdf = PathBrdf(normal, view, light, material, true, true, unusedPdf);
+    float3 brdf = PathBrdf(normal, view, light, material, true, true, 1.0, unusedPdf);
     return brdf * nl * max(lightDirectionIntensity.w, 0.0) * float3(1.0, 0.87, 0.72);
 }
 
@@ -203,7 +207,11 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
         // vertices retain both lobes, including diffuse GI seen in a mirror.
         bool includeDiffuse = depth != 0 || (giOptions.y & 1u) != 0;
         bool includeSpecular = depth != 0 || (giOptions.y & 2u) != 0;
-        if (!PathSampleBrdf(normal, geometricNormal, -direction, material, includeDiffuse, includeSpecular,
+        // Artistic gain belongs only to the first receiving diffuse lobe.
+        // Scaling all throughput would also amplify mirrors; repeating it at
+        // every bounce would exponentially amplify transport. Direct stays at 1.
+        float diffuseIntensity = depth == 0 ? traceOptions.z : 1.0;
+        if (!PathSampleBrdf(normal, geometricNormal, -direction, material, includeDiffuse, includeSpecular, diffuseIntensity,
             randomState, incoming, weight)) break;
         throughput *= weight;
         if (!all(isfinite(throughput)) || !any(throughput > 0.0)) break;

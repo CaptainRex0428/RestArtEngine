@@ -13,6 +13,7 @@
 #include <vector>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -37,6 +38,9 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
         throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
     if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
         throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
+    if (!std::isfinite(settings.indirectDiffuseIntensity) || settings.indirectDiffuseIntensity < 0.0f ||
+        settings.indirectDiffuseIntensity > renderer::kGiMaxIndirectDiffuseIntensity)
+        throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
     const auto range = [](const char* key, std::uint32_t value, std::uint32_t maximum) {
         if (value < 1 || value > maximum)
             throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
@@ -88,6 +92,15 @@ RenderingSettings readRenderingSettings(const Json& value) {
         };
         readContribution("indirectDiffuse", settings.globalIllumination.indirectDiffuse);
         readContribution("indirectSpecular", settings.globalIllumination.indirectSpecular);
+        if (gi.contains("indirectDiffuseIntensity")) {
+            const auto& encoded = gi.at("indirectDiffuseIntensity");
+            if (!encoded.is_number())
+                throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
+            const double intensity = encoded.get<double>();
+            if (!std::isfinite(intensity) || intensity < 0.0 || intensity > renderer::kGiMaxIndirectDiffuseIntensity)
+                throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
+            settings.globalIllumination.indirectDiffuseIntensity = static_cast<float>(intensity);
+        }
         const auto readCount = [&gi](const char* key, std::uint32_t& result, std::uint32_t maximum) {
             if (!gi.contains(key)) return;
             const auto& count = gi.at(key);
@@ -856,6 +869,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
             ? "realtime" : "progressive";
         gi["indirectDiffuse"] = settings.globalIllumination.indirectDiffuse;
         gi["indirectSpecular"] = settings.globalIllumination.indirectSpecular;
+        gi["indirectDiffuseIntensity"] = settings.globalIllumination.indirectDiffuseIntensity;
         gi["samplesPerFrame"] = settings.globalIllumination.samplesPerFrame;
         gi["targetSamples"] = settings.globalIllumination.targetSamples;
         gi["maxBounces"] = settings.globalIllumination.maxBounces;

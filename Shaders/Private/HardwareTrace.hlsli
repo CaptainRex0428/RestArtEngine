@@ -4,7 +4,7 @@ cbuffer HardwareConstants : register(b5)
 {
     row_major float4x4 inverseViewProjection;
     uint4 outputInfo; // width, height, triangle count, hardware shadows enabled
-    float4 traceOptions; // reflections enabled, reserved
+    float4 traceOptions; // reflections enabled, sample cap, indirect diffuse intensity, reserved
     uint4 accumulationInfo; // sample offset, sample batch, max surface bounces, GI method
     uint4 giOptions; // update mode, first-surface lobe mask, realtime pass, independent sample sequence
 };
