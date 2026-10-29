@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include "HardwareRayTracing.h"
+#include "../MeshAttributes.h"
 #include <RestArtEngine/Assets/AssetLibrary.h>
 #include <RestArtEngine/Scene/World.h>
 #include <RestArtEngine/Core/TraceProfiler.h>
@@ -197,20 +198,25 @@ struct RayTriangle {
 struct HardwareConstants {
     std::array<float, 16> inverseViewProjection;
     std::uint32_t outputInfo[4];
-    float traceOptions[4];
+    float traceOptions[4]; // reflections, realtime history cap, indirect diffuse intensity, reserved
     std::uint32_t accumulationInfo[4]; // sample offset, batch, bounces, GI method
     std::uint32_t giOptions[4]; // mode, contribution bits, pass, continuous sample sequence
+    std::array<float, 16> areaLight;
+    std::array<float, 4> thinLens;
 };
-static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 128);
+static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 208);
 
 // Compare the full frame contract rather than one combined frame hash. Geometry
 // hashes are the same immutable-content identities used by the upload cache.
 // Exposure is a resolve operation and is deliberately removed from this key.
 struct HistoryKey {
-    std::array<float, 36> sceneConstants;
+    std::array<float, 44> sceneConstants;
     std::array<float, 16> inverseViewProjection;
-    std::uint64_t positions = 0, triangles = 0, normals = 0;
-    std::uint64_t pipelineRevision = 0, epoch = 0;
+    std::array<float, 4> thinLens;
+    LightingConstants lighting;
+    std::array<float, 16> areaLight;
+    std::uint64_t positions = 0, triangles = 0, normals = 0, uvVertices = 0, uvTriangles = 0;
+    std::uint64_t pipelineRevision = 0, epoch = 0, viewId = 1;
     std::uint32_t width = 0, height = 0, maxBounces = 0, method = 0, mode = 0, contributions = 0;
     float indirectDiffuseIntensity = 1.0f;
     bool shadows = false;
@@ -244,6 +250,7 @@ struct SceneInput {
     bool grid = false, twoSided = false, cullFront = false;
     assets::MaterialDepthTest depthTest = assets::MaterialDepthTest::Less;
     bool depthWrite = true;
+    std::uint32_t slot = 0;
     bool operator==(const SceneInput&) const = default;
 };
 std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
@@ -251,33 +258,37 @@ std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::Ass
     std::vector<SceneInput> result;
     result.reserve(world.actors.size());
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        const auto* material = preview && preview->id == actor.mesh.materialId ? preview : assets.findMaterial(actor.mesh.materialId);
-        if (!mesh || !material) continue;
+        if (!mesh) continue;
         const auto& t = actor.transform;
-        result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(),
-            {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
-             t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
-             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
-             material->effectiveCullMode() == assets::MaterialCullMode::Front,
-             material->depthTest, material->depthWrite});
+        for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot) {
+            const auto id = actor.mesh.materialForSlot(*mesh, slot);
+            const auto* material = preview && preview->id == id ? preview : assets.findMaterial(id);
+            if (!material) continue;
+            result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(),
+                {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
+                 t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
+                 material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
+                 material->effectiveCullMode() == assets::MaterialCullMode::Front,
+                 material->depthTest, material->depthWrite, static_cast<std::uint32_t>(slot)});
+        }
     }
     return result;
 }
 
 bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             const assets::MaterialAsset* preview, std::vector<RayTriangle>& triangles,
-            std::vector<XMFLOAT3>& positions, std::vector<XMFLOAT3>& normals, std::string& error) {
+            std::vector<XMFLOAT3>& positions, std::vector<XMFLOAT3>& normals,
+            meshAttributes::RayUvData& uvData, std::string& error) {
     // Reserve once from topology counts. At ten million triangles, geometric
     // vector growth otherwise briefly retains gigabytes of superseded storage.
     std::size_t expectedTriangles = 0;
     constexpr std::size_t maximumTriangles = std::numeric_limits<UINT>::max() / 3u;
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        const auto* material = preview && preview->id == actor.mesh.materialId ? preview : assets.findMaterial(actor.mesh.materialId);
-        if (!mesh || !material) continue;
+        if (!mesh) continue;
         const auto count = mesh->indices.size() / 3;
         if (count > maximumTriangles - expectedTriangles) {
             error = "DXR scene exceeds the addressable geometry size.";
@@ -289,10 +300,16 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
     positions.reserve(expectedTriangles * 3);
     normals.reserve(expectedTriangles * 3);
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        const auto* material = preview && preview->id == actor.mesh.materialId ? preview : assets.findMaterial(actor.mesh.materialId);
-        if (!mesh || !material) continue;
+        if (!mesh) continue;
+        std::vector<const assets::MaterialAsset*> materials;
+        for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot) {
+            const auto id = actor.mesh.materialForSlot(*mesh, slot);
+            materials.push_back(preview && preview->id == id ? preview : assets.findMaterial(id));
+        }
+        meshAttributes::validateSections(*mesh);
+        const auto uvOffset = uvData.appendMesh(*mesh);
         if (mesh->indices.size() % 3 != 0) { error = "DXR mesh is not triangulated: " + mesh->name; return false; }
         const auto& t = actor.transform;
         const XMMATRIX matrix = XMMatrixScaling(t.scale[0], t.scale[1], t.scale[2]) *
@@ -301,6 +318,10 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
         const XMMATRIX normalMatrix = XMMatrixTranspose(XMMatrixInverse(nullptr, matrix));
         const bool mirrored = std::signbit(t.scale[0]) ^ std::signbit(t.scale[1]) ^ std::signbit(t.scale[2]);
         for (std::size_t index = 0; index < mesh->indices.size(); index += 3) {
+            const auto slot = mesh->materialSlotForIndex(static_cast<std::uint32_t>(index));
+            if (slot >= materials.size()) { error = "DXR material section index is invalid."; return false; }
+            const auto* material = materials[slot];
+            if (!material) continue;
             XMVECTOR points[3], vertexNormals[3];
             for (unsigned vertex = 0; vertex < 3; ++vertex) {
                 const auto offset = mesh->indices[index + vertex];
@@ -321,7 +342,8 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             RayTriangle triangle{};
             XMStoreFloat3(&triangle.position0, points[0]); XMStoreFloat3(&triangle.position1, points[1]);
             XMStoreFloat3(&triangle.position2, points[2]); XMStoreFloat3(&triangle.normal, faceNormal);
-            triangle.color = {material->baseColor[0], material->baseColor[1], material->baseColor[2], 1};
+            triangle.color = {material->baseColor[0], material->baseColor[1], material->baseColor[2],
+                uvData.appendTriangle(*mesh, index, uvOffset)};
             triangle.properties = {material->roughness, material->metallic, 3,
                 static_cast<float>((material->grid ? 1u : 0u) | (material->twoSided ? 2u : 0u) |
                     (material->effectiveCullMode() == assets::MaterialCullMode::Front ? 4u : 0u))};
@@ -362,7 +384,7 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
     if (failed(utils->CreateReflection(&buffer, IID_PPV_ARGS(&reflection)), "Reflect DXR shader", error)) return false;
     D3D12_SHADER_DESC description{};
     if (failed(reflection->GetDesc(&description), "Read DXR shader reflection", error)) return false;
-    bool scene = false, hardware = false, acceleration = false, triangles = false, normals = false;
+    bool scene = false, hardware = false, lighting = false, acceleration = false, triangles = false, normals = false;
     unsigned uavMask = 0;
     for (UINT index = 0; index < description.BoundResources; ++index) {
         D3D12_SHADER_INPUT_BIND_DESC binding{};
@@ -373,14 +395,17 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             auto* constants = reflection->GetConstantBufferByName(binding.Name);
             D3D12_SHADER_BUFFER_DESC constantDescription{};
             if (failed(constants->GetDesc(&constantDescription), "Read DXR constant buffer", error)) return false;
-            if (constantDescription.Size != (isScene ? 144u : 128u)) {
+            if (constantDescription.Size != (isScene ? 176u : 208u)) {
                 error = std::string(binding.Name) + ": DXR constant buffer size does not match the CPU contract."; return false;
             }
             struct Field { const char* name; UINT offset, size; };
             static constexpr Field sceneFields[] = {{"viewProjection",0,64},{"cameraPosition",64,16},{"baseColor",80,16},
-                {"lightDirectionIntensity",96,16},{"parameters",112,16},{"viewportDebug",128,16}};
+                {"lightDirectionIntensity",96,16},{"parameters",112,16},{"viewportDebug",128,16},
+                {"cameraForward",144,16},{"cameraLensParams",160,16}};
             static constexpr Field hardwareFields[] = {{"inverseViewProjection",0,64},{"outputInfo",64,16},
-                {"traceOptions",80,16},{"accumulationInfo",96,16},{"giOptions",112,16}};
+                {"traceOptions",80,16},{"accumulationInfo",96,16},{"giOptions",112,16},
+                {"areaLightCenter",128,16},{"areaLightU",144,16},{"areaLightV",160,16},{"areaLightRadiance",176,16},
+                {"thinLens",192,16}};
             const Field* fields = isScene ? sceneFields : hardwareFields;
             const auto count = isScene ? std::size(sceneFields) : std::size(hardwareFields);
             for (std::size_t fieldIndex = 0; fieldIndex < count; ++fieldIndex) {
@@ -400,6 +425,46 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
                 }
             }
             if (isScene) scene = true; else hardware = true;
+        } else if (binding.Type == D3D_SIT_CBUFFER && binding.BindPoint == 7) {
+            if (std::strcmp(binding.Name, "LightingConstants") != 0) {
+                error = "DXR b7 must be the shared LightingConstants buffer."; return false;
+            }
+            auto* constants = reflection->GetConstantBufferByName(binding.Name);
+            D3D12_SHADER_BUFFER_DESC lightingDescription{};
+            if (FAILED(constants->GetDesc(&lightingDescription)) || lightingDescription.Size != sizeof(LightingConstants)) {
+                error = "DXR LightingConstants must match the 3104-byte CPU layout."; return false;
+            }
+            const char* fields[] = {"lightInfo", "skyColor", "sceneLights"};
+            const UINT offsets[] = {0, 16, 32};
+            const UINT sizes[] = {16, 16, sizeof(GpuLight) * maxSceneLights};
+            for (UINT field = 0; field < std::size(fields); ++field) {
+                auto* variable = constants->GetVariableByName(fields[field]);
+                D3D12_SHADER_VARIABLE_DESC layout{};
+                D3D12_SHADER_TYPE_DESC type{};
+                if (FAILED(variable->GetDesc(&layout)) || layout.StartOffset != offsets[field] || layout.Size != sizes[field] ||
+                    FAILED(variable->GetType()->GetDesc(&type))) {
+                    error = std::string("DXR lighting field layout mismatch: ") + fields[field]; return false;
+                }
+                if (field < 2) {
+                    if (type.Type != D3D_SVT_FLOAT || type.Class != D3D_SVC_VECTOR || type.Rows != 1 || type.Columns != 4 || type.Elements != 0) {
+                        error = std::string("DXR lighting field must be float4: ") + fields[field]; return false;
+                    }
+                } else {
+                    if (type.Class != D3D_SVC_STRUCT || type.Elements != maxSceneLights || type.Members != 6) {
+                        error = "DXR sceneLights requires 32 six-vector light structures."; return false;
+                    }
+                    const char* members[] = {"positionType", "directionRange", "colorIntensity", "axisUWidth", "axisVHeight", "spotShadow"};
+                    for (UINT memberIndex = 0; memberIndex < std::size(members); ++memberIndex) {
+                        D3D12_SHADER_TYPE_DESC member{};
+                        if (FAILED(variable->GetType()->GetMemberTypeByName(members[memberIndex])->GetDesc(&member)) ||
+                            member.Offset != memberIndex * 16 || member.Type != D3D_SVT_FLOAT || member.Class != D3D_SVC_VECTOR ||
+                            member.Rows != 1 || member.Columns != 4 || member.Elements != 0) {
+                            error = std::string("DXR lighting member layout mismatch: ") + members[memberIndex]; return false;
+                        }
+                    }
+                }
+            }
+            lighting = true;
         } else if (binding.Type == D3D_SIT_STRUCTURED && (binding.BindPoint == 4 || binding.BindPoint == 8)) {
             // DXC exposes a structured resource as RESOURCE_BIND_INFO with a
             // single $Element variable. Validate the element itself, since a
@@ -438,6 +503,18 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
                 normals = true;
             }
         }
+        else if (binding.Type == D3D_SIT_STRUCTURED &&
+                 ((binding.BindPoint == 10 && std::strcmp(binding.Name, "rayUvVertices") == 0) ||
+                  (binding.BindPoint == 11 && std::strcmp(binding.Name, "rayUvTriangles") == 0))) {
+            auto* resource = reflection->GetConstantBufferByName(binding.Name);
+            D3D12_SHADER_VARIABLE_DESC variable{}; D3D12_SHADER_TYPE_DESC type{};
+            auto* element = resource->GetVariableByIndex(0);
+            if (FAILED(element->GetDesc(&variable)) || FAILED(element->GetType()->GetDesc(&type)) ||
+                variable.Size != 16 || type.Class != D3D_SVC_VECTOR || type.Rows != 1 || type.Columns != 4 ||
+                type.Type != (binding.BindPoint == 10 ? D3D_SVT_FLOAT : D3D_SVT_UINT)) {
+                error = "DXR UV resources require tightly packed float4 / uint4 elements."; return false;
+            }
+        }
         else if (binding.Type == D3D_SIT_RTACCELERATIONSTRUCTURE && binding.BindPoint == 7) acceleration = true;
         else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 4 &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
@@ -446,8 +523,8 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
         else { error = std::string("Unexpected DXR shader resource: ") + binding.Name; return false; }
     }
     UINT x = 0, y = 0, z = 0; reflection->GetThreadGroupSize(&x, &y, &z);
-    if (!(scene && hardware && acceleration && triangles && normals) || uavMask != 0x1fu || x != 8 || y != 8 || z != 1) {
-        error = "DXR shader must preserve b0/b5, t4/t7/t8, u0..u4 and the 8x8x1 thread-group contract."; return false;
+    if (!(scene && hardware && lighting && acceleration && triangles && normals) || uavMask != 0x1fu || x != 8 || y != 8 || z != 1) {
+        error = "DXR shader must preserve b0/b5/b7, t4/t7/t8, u0..u4 and the 8x8x1 thread-group contract."; return false;
     }
     return true;
 }
@@ -479,9 +556,9 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D11ShaderResourceView> indirectView;
     bool indirectReady = false;
     std::uint32_t width = 0, height = 0;
-    ComPtr<ID3D12Resource> constants, triangleData, normalData;
+    ComPtr<ID3D12Resource> constants, triangleData, normalData, uvVertexData, uvTriangleData;
     ComPtr<ID3D12Resource> vertexData, instanceData, blas, tlas, scratch;
-    std::uint64_t positionHash = 0, triangleHash = 0, normalHash = 0;
+    std::uint64_t positionHash = 0, triangleHash = 0, normalHash = 0, uvVertexHash = 0, uvTriangleHash = 0;
     std::uint32_t triangleCount = 0;
     bool geometryReady = false, capable = false;
     std::vector<SceneInput> cachedSceneInputs;
@@ -817,12 +894,15 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     if (!validateShader(state.utils.Get(), result.Get(), error)) return false;
     ComPtr<IDxcBlob> shader;
     if (failed(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shader), nullptr), "Get DXR shader object", error)) return false;
-    D3D12_ROOT_PARAMETER parameters[6]{};
+    D3D12_ROOT_PARAMETER parameters[9]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[0].Descriptor.ShaderRegister = 0;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[1].Descriptor.ShaderRegister = 5;
     parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[2].Descriptor.ShaderRegister = 4;
     parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[3].Descriptor.ShaderRegister = 7;
     parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[4].Descriptor.ShaderRegister = 8;
+    parameters[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[6].Descriptor.ShaderRegister = 7;
+    parameters[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[7].Descriptor.ShaderRegister = 10;
+    parameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[8].Descriptor.ShaderRegister = 11;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     range.NumDescriptors = 5; range.BaseShaderRegister = 0;
     parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -870,7 +950,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
         // Uploads/acceleration structures may already have changed before a
         // later failure. Rebuild their identities on a safe retry as well.
-        state.positionHash = state.triangleHash = state.normalHash = 0;
+        state.positionHash = state.triangleHash = state.normalHash = state.uvVertexHash = state.uvTriangleHash = 0;
         state.geometryReady = false;
         state.sceneInputsValid = false;
         state.giStatus.accumulatedSamples = 0;
@@ -902,27 +982,31 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             !state.prepareOutput(frame.width, frame.height, dx11Done, error)) return fail();
         std::vector<RayTriangle> triangles;
         std::vector<XMFLOAT3> positions, normals;
+        meshAttributes::RayUvData uvData;
         auto nextSceneInputs = sceneInputs(world, assets, materialOverride);
         const bool sceneChanged = !state.sceneInputsValid || !state.geometryReady ||
-            !state.triangleData || !state.normalData || nextSceneInputs != state.cachedSceneInputs;
+            !state.triangleData || !state.normalData || !state.uvVertexData || !state.uvTriangleData || nextSceneInputs != state.cachedSceneInputs;
         auto positionHash = state.positionHash, triangleHash = state.triangleHash, normalHash = state.normalHash;
+        auto uvVertexHash = state.uvVertexHash, uvTriangleHash = state.uvTriangleHash;
         auto triangleCount = state.triangleCount;
         if (sceneChanged) {
             rae::diagnostics::TraceScope gatherTrace("DXR scene rebuild", "Renderer CPU");
-            if (!gather(world, assets, materialOverride, triangles, positions, normals, error)) return fail();
+            if (!gather(world, assets, materialOverride, triangles, positions, normals, uvData, error)) return fail();
             positionHash = hashBytes(positions.data(), positions.size() * sizeof(XMFLOAT3));
             triangleHash = hashBytes(triangles.data(), triangles.size() * sizeof(RayTriangle));
             normalHash = hashBytes(normals.data(), normals.size() * sizeof(XMFLOAT3));
+            uvVertexHash = hashBytes(uvData.vertices.data(), uvData.vertices.size() * sizeof(meshAttributes::PackedUv));
+            uvTriangleHash = hashBytes(uvData.triangles.data(), uvData.triangles.size() * sizeof(meshAttributes::UvTriangle));
             triangleCount = static_cast<std::uint32_t>(triangles.size());
         }
         const bool pathRequested = frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
         const bool pathLit = pathRequested && frame.sceneConstants[34] == 0.0f;
         const bool realtime = frame.globalIllumination.mode == GlobalIlluminationMode::Realtime;
         const bool realtimeLit = pathLit && realtime;
-        // Realtime exports indirect transport only. Its secondary illumination
-        // always needs physical visibility; the raster pass independently owns
-        // the primary surface's chosen direct shadow technique.
-        const bool transportShadows = pathRequested && realtime ? true : frame.shadows;
+        // Realtime exports indirect transport only and normally keeps physical
+        // visibility for secondary illumination. The global Disabled selection
+        // is an explicit override for all light shadowing, including transport.
+        const bool transportShadows = frame.sceneConstants[35] < 1.5f && (pathRequested && realtime ? true : frame.shadows);
         const std::uint32_t contributions = (frame.globalIllumination.indirectDiffuse ? 1u : 0u) |
             (frame.globalIllumination.indirectSpecular ? 2u : 0u);
         // Runtime callers may bypass project validation. Keep invalid floats out
@@ -939,8 +1023,13 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         nextHistory.sceneConstants[34] = 0.0f; // debug views pause without poisoning HDR history
         nextHistory.sceneConstants[35] = 0.0f; // GI uses its own hardware shadow visibility
         nextHistory.inverseViewProjection = frame.inverseViewProjection;
+        nextHistory.thinLens = frame.thinLens;
+        nextHistory.lighting = frame.lighting;
+        nextHistory.areaLight = frame.areaLight;
         nextHistory.positions = positionHash; nextHistory.triangles = triangleHash; nextHistory.normals = normalHash;
+        nextHistory.uvVertices = uvVertexHash; nextHistory.uvTriangles = uvTriangleHash;
         nextHistory.pipelineRevision = state.pipelineRevision; nextHistory.epoch = frame.historyEpoch;
+        nextHistory.viewId = frame.viewId;
         nextHistory.width = frame.width; nextHistory.height = frame.height; nextHistory.maxBounces = maxBounces;
         nextHistory.method = static_cast<std::uint32_t>(frame.globalIllumination.method);
         nextHistory.mode = static_cast<std::uint32_t>(frame.globalIllumination.mode);
@@ -963,16 +1052,23 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             !state.upload(triangles.data(), triangles.size() * sizeof(RayTriangle), state.triangleData, error)) return fail();
         if ((!state.normalData || normalHash != state.normalHash) &&
             !state.upload(normals.data(), normals.size() * sizeof(XMFLOAT3), state.normalData, error)) return fail();
+        if ((!state.uvVertexData || uvVertexHash != state.uvVertexHash) &&
+            !state.upload(uvData.vertices.data(), uvData.vertices.size() * sizeof(meshAttributes::PackedUv), state.uvVertexData, error)) return fail();
+        if ((!state.uvTriangleData || uvTriangleHash != state.uvTriangleHash) &&
+            !state.upload(uvData.triangles.data(), uvData.triangles.size() * sizeof(meshAttributes::UvTriangle), state.uvTriangleData, error)) return fail();
         // Root CBVs are 256-byte aligned. Separate immutable constants for the
         // two realtime dispatches prevent the resolve pass from overwriting
         // the trace pass's pass/sequence values before either executes.
-        std::array<unsigned char, 768> constants{};
+        constexpr std::size_t lightingOffset = 768;
+        constexpr std::size_t lightingBytes = (sizeof(LightingConstants) + 255) & ~std::size_t(255);
+        std::array<unsigned char, lightingOffset + lightingBytes> constants{};
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
+        std::memcpy(constants.data() + lightingOffset, &frame.lighting, sizeof(frame.lighting));
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
             {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), indirectDiffuseIntensity, 0},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
-            {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}};
+            {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}, frame.areaLight, frame.thinLens};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));
         auto resolve = hardware;
         resolve.giOptions[2] = 1;
@@ -1002,6 +1098,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.list->SetComputeRootShaderResourceView(3, state.tlas->GetGPUVirtualAddress());
         state.list->SetComputeRootShaderResourceView(4, state.normalData->GetGPUVirtualAddress());
         state.list->SetComputeRootDescriptorTable(5, state.descriptors->GetGPUDescriptorHandleForHeapStart());
+        state.list->SetComputeRootConstantBufferView(6, state.constants->GetGPUVirtualAddress() + lightingOffset);
+        state.list->SetComputeRootShaderResourceView(7, state.uvVertexData->GetGPUVirtualAddress());
+        state.list->SetComputeRootShaderResourceView(8, state.uvTriangleData->GetGPUVirtualAddress());
         state.list->Dispatch((frame.width + 7) / 8, (frame.height + 7) / 8, 1);
         // Resolve reads the full trace image and its guides, including neighbor
         // pixels. A UAV barrier must make every trace thread's writes visible.
@@ -1027,6 +1126,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (failed(state.context11->Wait(state.fence11.Get(), completed), "Wait for hardware ray tracing in DX11", error)) return fail();
         if (failed(state.device->GetDeviceRemovedReason(), "Hardware ray tracing device status", error)) return fail();
         state.positionHash = positionHash; state.triangleHash = triangleHash; state.normalHash = normalHash;
+        state.uvVertexHash = uvVertexHash; state.uvTriangleHash = uvTriangleHash;
         state.triangleCount = triangleCount; state.geometryReady = true;
         state.cachedSceneInputs = std::move(nextSceneInputs); state.sceneInputsValid = true;
         if (pathLit) {

@@ -8,6 +8,8 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
 
 namespace rae::assets::detail {
 namespace {
@@ -59,8 +61,23 @@ void validateMesh(const ufbx_mesh& mesh) {
     }
 }
 
-void appendInstance(MeshAsset& result, const ufbx_node& node, MeshImportDiagnostics& diagnostics,
-    const AssetImportOptions& options) {
+struct MaterialSections {
+    std::unordered_map<const ufbx_material*, std::uint32_t> slots;
+    std::unordered_map<const ufbx_material*, std::string> keys;
+    std::vector<std::vector<std::uint32_t>> indices;
+    std::uint32_t slot(MeshAsset& result, const ufbx_material* material) {
+        if (const auto found = slots.find(material); found != slots.end()) return found->second;
+        const auto index = static_cast<std::uint32_t>(result.materialSlots.size());
+        std::string name = material ? std::string(material->name.data, material->name.length) : "Default";
+        if (name.empty()) name = "Material";
+        result.materialSlots.push_back({name, material ? keys.at(material) : "fbx:default", 0});
+        slots.emplace(material, index); indices.emplace_back();
+        return index;
+    }
+};
+
+void appendInstance(MeshAsset& result, MaterialSections& sections, const ufbx_node& node,
+    MeshImportDiagnostics& diagnostics, const AssetImportOptions& options) {
     const auto& mesh = *node.mesh;
     if (!mesh.num_triangles) return;
     const auto& transform = node.geometry_to_world;
@@ -81,9 +98,19 @@ void appendInstance(MeshAsset& result, const ufbx_node& node, MeshImportDiagnost
     for (double component : normalTransform.v) {
         if (!std::isfinite(component)) throw std::runtime_error("FBX normal transform is not finite.");
     }
+    std::vector<std::uint32_t> localSlots;
+    for (const auto* material : node.materials) localSlots.push_back(sections.slot(result, material));
     std::vector<std::uint32_t> triangleIndices(mesh.max_face_triangles * 3);
-    for (const auto face : mesh.faces) {
+    for (std::size_t faceIndex = 0; faceIndex < mesh.faces.count; ++faceIndex) {
+        const auto face = mesh.faces.data[faceIndex];
         if (face.num_indices < 3) continue;
+        std::uint32_t materialSlot = 0;
+        if (localSlots.empty()) materialSlot = sections.slot(result, nullptr);
+        else {
+            const auto localSlot = faceIndex < mesh.face_material.count ? mesh.face_material.data[faceIndex] : 0u;
+            if (localSlot >= localSlots.size()) throw std::runtime_error("FBX face material index is out of range.");
+            materialSlot = localSlots[localSlot];
+        }
         ufbx_panic panic{};
         const auto triangleCount = ufbx_catch_triangulate_face(&panic, triangleIndices.data(),
             triangleIndices.size(), &mesh, face);
@@ -95,11 +122,22 @@ void appendInstance(MeshAsset& result, const ufbx_node& node, MeshImportDiagnost
         for (std::size_t triangle = 0; triangle < cornerCount; triangle += 3) {
             std::array<MeshVertex, 3> vertices{};
             std::array<ufbx_vec3, 3> sourceNormals{};
+            std::array<std::array<std::array<float, 2>, MaxMeshUvChannels>, 3> texcoords{};
             for (std::size_t corner = 0; corner < 3; ++corner) {
                 const auto orderedCorner = reverseWinding && corner != 0 ? 3 - corner : corner;
                 const auto index = triangleIndices[triangle + orderedCorner];
                 if (index >= mesh.num_indices || index >= mesh.vertex_position.indices.count)
                     throw std::runtime_error("FBX triangulated vertex index is out of range.");
+                for (std::size_t channel = 0; channel < std::min<std::size_t>(mesh.uv_sets.count, MaxMeshUvChannels); ++channel) {
+                    const auto& uv = mesh.uv_sets.data[channel].vertex_uv;
+                    if (!uv.exists) continue;
+                    if (index >= uv.indices.count || uv.indices.data[index] >= uv.values.count)
+                        throw std::runtime_error("FBX UV corner index is out of range.");
+                    const auto value = uv.values.data[uv.indices.data[index]];
+                    texcoords[corner][channel] = {static_cast<float>(value.x), static_cast<float>(value.y)};
+                    for (float component : texcoords[corner][channel])
+                        if (!std::isfinite(component)) throw std::runtime_error("FBX UV coordinates must be finite floats.");
+                }
                 const auto positionIndex = mesh.vertex_position.indices.data[index];
                 if (positionIndex >= mesh.vertex_position.values.count)
                     throw std::runtime_error("FBX vertex attribute index is out of range.");
@@ -154,9 +192,11 @@ void appendInstance(MeshAsset& result, const ufbx_node& node, MeshImportDiagnost
                 for (std::size_t axis = 0; axis < 3; ++axis)
                     vertices[corner].normal[axis] = static_cast<float>(normal.v[axis]);
             }
-            for (const auto& vertex : vertices) {
-                result.indices.push_back(static_cast<std::uint32_t>(result.vertices.size()));
-                result.vertices.push_back(vertex);
+            for (std::size_t corner = 0; corner < vertices.size(); ++corner) {
+                sections.indices[materialSlot].push_back(static_cast<std::uint32_t>(result.vertices.size()));
+                result.vertices.push_back(vertices[corner]);
+                for (std::size_t channel = 0; channel < MaxMeshUvChannels; ++channel)
+                    if (!result.uvNames[channel].empty()) result.uvChannels[channel].push_back(texcoords[corner][channel]);
             }
         }
     }
@@ -229,7 +269,44 @@ bool readFbxMesh(const std::filesystem::path& path, MeshAsset& output, std::stri
         result.vertices.reserve(totalCorners);
         result.indices.reserve(totalCorners);
         MeshImportDiagnostics importDiagnostics;
-        for (const auto* node : scene->nodes) if (node->mesh) appendInstance(result, *node, importDiagnostics, options);
+        for (const auto* mesh : scene->meshes) {
+            if (mesh->uv_sets.count > MaxMeshUvChannels)
+                importDiagnostics.droppedUvChannels += mesh->uv_sets.count - MaxMeshUvChannels;
+            for (std::size_t channel = 0; channel < std::min<std::size_t>(mesh->uv_sets.count, MaxMeshUvChannels); ++channel) {
+                const auto& uv = mesh->uv_sets.data[channel];
+                if (!uv.vertex_uv.exists) continue;
+                for (const auto& value : uv.vertex_uv.values)
+                    if (!std::isfinite(static_cast<float>(value.x)) || !std::isfinite(static_cast<float>(value.y)))
+                        throw std::runtime_error("FBX UV coordinates must be finite floats.");
+                if (result.uvNames[channel].empty()) {
+                    result.uvNames[channel] = std::string(uv.name.data, uv.name.length);
+                    if (result.uvNames[channel].empty()) result.uvNames[channel] = "UV" + std::to_string(channel);
+                    result.uvChannels[channel].reserve(totalCorners);
+                }
+            }
+        }
+        MaterialSections sections;
+        std::unordered_map<std::string, unsigned> materialNames;
+        // Only materials declared on imported mesh instances participate in
+        // slot identities. Orphan source records (including equal names) must
+        // not renumber an otherwise unique bound material on reimport.
+        for (const auto* node : scene->nodes) {
+            if (!node->mesh || !node->mesh->num_triangles) continue;
+            for (const auto* material : node->materials) {
+                if (!material || sections.keys.contains(material)) continue;
+                const std::string name(material->name.data, material->name.length);
+                sections.keys.emplace(material, "fbx:" + name + ":" + std::to_string(materialNames[name]++));
+            }
+        }
+        for (const auto* node : scene->nodes)
+            if (node->mesh) appendInstance(result, sections, *node, importDiagnostics, options);
+        for (std::size_t slot = 0; slot < sections.indices.size(); ++slot) {
+            const auto& indices = sections.indices[slot];
+            if (indices.empty()) continue;
+            result.sections.push_back({static_cast<std::uint32_t>(result.indices.size()),
+                static_cast<std::uint32_t>(indices.size()), static_cast<std::uint32_t>(slot)});
+            result.indices.insert(result.indices.end(), indices.begin(), indices.end());
+        }
         if (result.indices.empty()) throw std::runtime_error("FBX contains no renderable mesh faces after skipping " +
             std::to_string(importDiagnostics.skippedDegenerateTriangles) + " degenerate triangle(s).");
         output = std::move(result);

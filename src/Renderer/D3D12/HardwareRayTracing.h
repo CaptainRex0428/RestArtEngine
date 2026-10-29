@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Renderer/Lighting.h>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -19,13 +20,21 @@ namespace rae::renderer::d3d12 {
 // Internal DX11/DX12 bridge. Native resource ownership stays in this module;
 // neither project data nor scene/assets depend on the bridge or on DirectX.
 struct Frame {
-    std::array<float, 36> sceneConstants{};
+    std::array<float, 44> sceneConstants{};
     std::array<float, 16> inverseViewProjection{};
+    // Focus metres, aperture radius metres, enabled, reserved. Only progressive
+    // path sampling consumes this lens; realtime DOF is a display operation.
+    std::array<float, 4> thinLens{};
+    LightingConstants lighting;
+    // Centre/enabled, half-axis U/environment scale, half-axis V/reserved,
+    // emitted radiance/reserved. Kept outside the locked raster b0 contract.
+    std::array<float, 16> areaLight{0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,0};
     std::uint32_t width = 0, height = 0;
     bool reflections = true, shadows = true;
     GlobalIlluminationSettings globalIllumination;
     // Changed by the owning scene renderer for explicit restart or re-enable.
     std::uint64_t historyEpoch = 0;
+    std::uint64_t viewId = 1;
 };
 
 class HardwareRayTracing {

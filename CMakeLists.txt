@@ -42,6 +42,9 @@ add_executable(RestArtEngine
     app/GarbageCollectionSmoke.cpp
     app/HardwareRayTracingSmoke.cpp
     app/GlobalIlluminationSmoke.cpp
+    app/LightingSmoke.cpp
+    app/CameraSmoke.cpp
+    app/MeshAttributesSmoke.cpp
     app/RenderScaleSmoke.cpp
     app/MaterialRenderStateSmoke.cpp
     src/Core/Engine.cpp
@@ -49,6 +52,7 @@ add_executable(RestArtEngine
     src/Core/TraceProfiler.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
+    src/Renderer/Lighting.cpp
     src/Renderer/SelectionOutline.cpp
     src/Renderer/D3D12/HardwareRayTracing.cpp
     src/Assets/AssetLibrary.cpp
@@ -66,6 +70,8 @@ add_executable(RestArtEngine
     src/ImGui/WindowChrome.cpp
     src/Editor/EditorDockManager.cpp
     src/Editor/EditorCommands.cpp
+    src/Editor/EditorConsole.cpp
+    src/Editor/EditorStatusBar.cpp
     src/Editor/SceneEditor.cpp
     src/Editor/ProjectSettings.cpp
     src/Editor/DiagnosticsPanel.cpp
@@ -135,7 +141,49 @@ add_executable(GenerateEngineMeshes EXCLUDE_FROM_ALL tools/GenerateEngineMeshes.
 target_include_directories(GenerateEngineMeshes PRIVATE include vendor/nlohmann/single_include)
 target_link_libraries(GenerateEngineMeshes PRIVATE ufbx)
 target_compile_definitions(GenerateEngineMeshes PRIVATE NOMINMAX)
+add_executable(GenerateCornellBox EXCLUDE_FROM_ALL tools/GenerateCornellBox.cpp
+    src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetFile.cpp
+    src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+target_include_directories(GenerateCornellBox PRIVATE include vendor/nlohmann/single_include)
+target_link_libraries(GenerateCornellBox PRIVATE ufbx)
+target_compile_definitions(GenerateCornellBox PRIVATE NOMINMAX)
+if(MSVC)
+    target_compile_options(GenerateCornellBox PRIVATE /W4 /permissive- /utf-8)
+endif()
 if(BUILD_TESTING)
+    add_executable(CameraMathTests tests/CameraMathTests.cpp)
+    target_include_directories(CameraMathTests PRIVATE include)
+    target_compile_definitions(CameraMathTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(CameraMathTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME CameraMathTests COMMAND CameraMathTests)
+    foreach(MESH_ATTRIBUTE_TEST IN ITEMS MeshAttributeTests MeshSlotSceneTests)
+        add_executable(${MESH_ATTRIBUTE_TEST} tests/${MESH_ATTRIBUTE_TEST}.cpp
+            src/Assets/AssetImport.cpp src/Assets/AssetOperations.cpp src/Assets/FbxImporter.cpp
+            src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp src/Assets/MeshQuery.cpp
+            src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+        target_include_directories(${MESH_ATTRIBUTE_TEST} PRIVATE include vendor/nlohmann/single_include)
+        target_link_libraries(${MESH_ATTRIBUTE_TEST} PRIVATE ufbx)
+        target_compile_definitions(${MESH_ATTRIBUTE_TEST} PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(${MESH_ATTRIBUTE_TEST} PRIVATE /W4 /permissive- /utf-8)
+        endif()
+        add_test(NAME ${MESH_ATTRIBUTE_TEST} COMMAND ${MESH_ATTRIBUTE_TEST})
+    endforeach()
+    add_executable(LightingPackingTests tests/LightingPackingTests.cpp src/Renderer/Lighting.cpp)
+    target_include_directories(LightingPackingTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(LightingPackingTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(LightingPackingTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME LightingPackingTests COMMAND LightingPackingTests)
+    add_executable(EditorConsoleTests tests/EditorConsoleTests.cpp src/Editor/EditorConsole.cpp)
+    target_include_directories(EditorConsoleTests PRIVATE include)
+    if(MSVC)
+        target_compile_options(EditorConsoleTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME EditorConsoleTests COMMAND EditorConsoleTests)
     add_executable(MaterialRenderStateTests tests/MaterialRenderStateTests.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp
         src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp)
@@ -210,6 +258,19 @@ if(BUILD_TESTING)
         target_compile_options(AssetLifecycleTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME AssetLifecycleTests COMMAND AssetLifecycleTests)
+    foreach(PERSISTENCE_TEST IN ITEMS MeshPersistenceTests ScenePersistenceTests MaterialPersistenceTests LightTests CameraPersistenceTests)
+        add_executable(${PERSISTENCE_TEST} tests/${PERSISTENCE_TEST}.cpp
+            src/Assets/AssetImport.cpp src/Assets/FbxImporter.cpp
+            src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+            src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+        target_include_directories(${PERSISTENCE_TEST} PRIVATE include vendor/nlohmann/single_include)
+        target_link_libraries(${PERSISTENCE_TEST} PRIVATE ufbx)
+        target_compile_definitions(${PERSISTENCE_TEST} PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(${PERSISTENCE_TEST} PRIVATE /W4 /permissive- /utf-8)
+        endif()
+        add_test(NAME ${PERSISTENCE_TEST} COMMAND ${PERSISTENCE_TEST})
+    endforeach()
     add_executable(GarbageCollectorTests tests/GarbageCollectorTests.cpp src/Core/GarbageCollector.cpp)
     target_include_directories(GarbageCollectorTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(GarbageCollectorTests PRIVATE UNICODE _UNICODE NOMINMAX)

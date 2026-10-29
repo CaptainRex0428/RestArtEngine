@@ -135,6 +135,7 @@ MeshAsset cubeMesh() {
 } // namespace
 
 void AssetLibrary::createDefaults() {
+    persistedMeshes_.clear();
     meshes.clear(); materials.clear();
     meshes.push_back(sphereMesh()); meshes.push_back(planeMesh()); meshes.push_back(cubeMesh());
     MaterialAsset copper; copper.id=1; copper.name="Copper";
@@ -187,7 +188,18 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
         MeshAsset mesh; mesh.name=detail::pathUtf8(path.stem()); mesh.primitive=MeshPrimitive::Imported;
         mesh.sourcePath=detail::pathUtf8(std::filesystem::absolute(path).lexically_normal());
         std::vector<Vec3> positions,normals;
-        std::size_t textureCount=0,lineNumber=0;
+        std::vector<std::array<float, 2>> textures;
+        std::size_t lineNumber=0;
+        std::unordered_map<std::string, std::uint32_t> slots;
+        std::vector<std::vector<std::uint32_t>> sectionIndices;
+        std::string materialName;
+        const auto slotForName = [&](const std::string& name) {
+            if (const auto found = slots.find(name); found != slots.end()) return found->second;
+            const auto slot = static_cast<std::uint32_t>(mesh.materialSlots.size());
+            mesh.materialSlots.push_back({name.empty() ? "Default" : name, "obj:" + name, 0});
+            slots.emplace(name, slot); sectionIndices.emplace_back();
+            return slot;
+        };
         std::string line;
         while (std::getline(stream,line)) {
             ++lineNumber;
@@ -205,10 +217,24 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
                         normals.push_back(value);
                     } else positions.push_back(value);
                 } else if (command=="vt") {
-                    float value=0; if (!(input>>value) || !std::isfinite(value)) throw std::runtime_error("Invalid OBJ texture coordinate.");
-                    ++textureCount;
+                    std::array<float, 2> value{};
+                    if (!(input >> value[0]) || !std::isfinite(value[0])) throw std::runtime_error("Invalid OBJ texture coordinate.");
+                    input >> std::ws;
+                    if (!input.eof() && (!(input >> value[1]) || !std::isfinite(value[1])))
+                        throw std::runtime_error("Invalid OBJ texture coordinate.");
+                    input >> std::ws;
+                    float third = 0;
+                    if (!input.eof() && (!(input >> third) || !std::isfinite(third)))
+                        throw std::runtime_error("Invalid OBJ texture coordinate.");
+                    textures.push_back(value);
+                } else if (command=="usemtl") {
+                    std::getline(input >> std::ws, materialName);
+                    while (!materialName.empty() && std::isspace(static_cast<unsigned char>(materialName.back()))) materialName.pop_back();
+                    if (materialName.empty()) throw std::runtime_error("OBJ usemtl requires a material name.");
+                    (void)slotForName(materialName);
                 } else if (command=="f") {
-                    struct Corner {std::size_t position; std::size_t normal=0; bool hasNormal=false;};
+                    const auto materialSlot = slotForName(materialName);
+                    struct Corner {std::size_t position; std::size_t normal=0, texture=0; bool hasNormal=false, hasTexture=false;};
                     std::vector<Corner> face; std::string token;
                     while (input>>token) {
                         const auto slash=token.find('/');
@@ -216,7 +242,7 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
                         if (slash!=std::string::npos) {
                             const auto second=token.find('/',slash+1);
                             const auto texture=token.substr(slash+1,second==std::string::npos?std::string::npos:second-slash-1);
-                            if (!texture.empty()) (void)objIndex(texture,textureCount);
+                            if (!texture.empty()) { corner.texture=objIndex(texture,textures.size()); corner.hasTexture=true; }
                             if (second!=std::string::npos) {
                                 const auto normal=token.substr(second+1);
                                 if (normal.empty()) throw std::runtime_error("Missing normal index after second slash.");
@@ -232,8 +258,13 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
                         const auto normal=normalOf(positions[triangle[0].position],positions[triangle[1].position],positions[triangle[2].position]);
                         for (const auto& corner:triangle) {
                             const auto& p=positions[corner.position]; const auto& n=corner.hasNormal?normals[corner.normal]:normal;
-                            mesh.indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size()));
+                            if (corner.hasTexture && mesh.uvNames[0].empty()) {
+                                mesh.uvNames[0] = "UV0";
+                                mesh.uvChannels[0].resize(mesh.vertices.size());
+                            }
+                            sectionIndices[materialSlot].push_back(static_cast<std::uint32_t>(mesh.vertices.size()));
                             mesh.vertices.push_back({{p[0],p[1],p[2]},{n[0],n[1],n[2]}});
+                            if (!mesh.uvNames[0].empty()) mesh.uvChannels[0].push_back(corner.hasTexture ? textures[corner.texture] : std::array<float,2>{});
                         }
                     }
                 }
@@ -241,6 +272,13 @@ bool AssetLibrary::importObj(const std::filesystem::path& path, AssetId& result,
             } catch (const std::exception& e) {throw std::runtime_error("OBJ line " + std::to_string(lineNumber) + ": " + e.what());}
         }
         if (stream.bad()) throw std::runtime_error("Failed reading OBJ.");
+        for (std::size_t slot = 0; slot < sectionIndices.size(); ++slot) {
+            const auto& indices = sectionIndices[slot];
+            if (indices.empty()) continue;
+            mesh.sections.push_back({static_cast<std::uint32_t>(mesh.indices.size()),
+                static_cast<std::uint32_t>(indices.size()), static_cast<std::uint32_t>(slot)});
+            mesh.indices.insert(mesh.indices.end(), indices.begin(), indices.end());
+        }
         if (mesh.indices.empty()) throw std::runtime_error("OBJ contains no renderable faces.");
         do { mesh.id = generateAssetId(); } while (findMesh(mesh.id));
         meshes.push_back(std::move(mesh));
@@ -266,6 +304,60 @@ bool AssetLibrary::importFbx(const std::filesystem::path& path, AssetId& result,
     }
 }
 
+namespace {
+bool persistMaterial(const MaterialAsset& material, const std::filesystem::path& path, std::string& error) {
+    auto file = makeMaterialAssetFile(material);
+    AssetFile stored;
+    std::string readError;
+    if (path.extension() == ".rasset" && readAssetFileHeader(path, stored, readError) &&
+        stored.type == AssetFileType::Material && stored.id == material.id && stored.name == material.name &&
+        stored.manifest.contains("payload") && stored.manifest.at("payload") == file.manifest.at("payload")) {
+        error.clear();
+        return true;
+    }
+    attachThumbnail(file, renderMaterialThumbnail(material));
+    return writeAssetFile(path, file, error);
+}
+
+void validateMeshForPersistence(const MeshAsset& mesh) {
+    detail::readId(detail::Json(mesh.id));
+    if (mesh.name.empty() || mesh.vertices.empty() || mesh.indices.empty() || mesh.indices.size() % 3 != 0)
+        throw std::runtime_error("Mesh must have a name and indexed triangle geometry.");
+    if (mesh.primitive == MeshPrimitive::Imported && mesh.id <= 3)
+        throw std::runtime_error("Imported mesh IDs 1 to 3 are reserved.");
+    for (const auto index : mesh.indices)
+        if (index >= mesh.vertices.size()) throw std::runtime_error("Mesh index is outside the vertex buffer.");
+    for (const auto& vertex : mesh.vertices) {
+        double normalLength = 0;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(vertex.position[axis]) || !std::isfinite(vertex.normal[axis]))
+                throw std::runtime_error("Mesh contains non-finite geometry.");
+            normalLength += double(vertex.normal[axis]) * vertex.normal[axis];
+        }
+        if (normalLength < 1e-12) throw std::runtime_error("Mesh contains zero normals.");
+    }
+}
+} // namespace
+
+bool AssetLibrary::saveMaterial(AssetId id, const std::filesystem::path& folder, std::string& error) const {
+    try {
+        const auto* material = findMaterial(id);
+        if (!material) throw std::runtime_error("Cannot save a material that is not loaded.");
+        if (std::count_if(materials.begin(), materials.end(), [id](const auto& item) { return item.id == id; }) != 1)
+            throw std::runtime_error("Duplicate material ID.");
+        if (material->origin == AssetOrigin::Engine || isEngineAssetId(id))
+            throw std::runtime_error("Engine material is read-only. Copy it to the project before saving.");
+        detail::validateMaterial(*material);
+        const auto existing = storedAssetPaths(folder, AssetFileType::Material);
+        std::unordered_set<std::string> reserved;
+        const auto path = saveAssetPath(folder, materialAssetFileName(*material), id, existing, reserved);
+        return persistMaterial(*material, path, error);
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        return false;
+    }
+}
+
 bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::string& error) const {
     try {
         const auto existing = storedAssetPaths(folder, AssetFileType::Material);
@@ -284,7 +376,7 @@ bool AssetLibrary::saveMaterials(const std::filesystem::path& folder, std::strin
             // GUID owns its existing file, irrespective of browser move/rename.
             // New assets use a GUID suffix when their display names collide.
             const auto path = saveAssetPath(folder, materialAssetFileName(material), material.id, existing, reserved);
-            if (!writeAssetFile(path, makeMaterialAssetFile(material), error)) return false;
+            if (!persistMaterial(material, path, error)) return false;
         }
         // Legacy sources and unrelated files belong to the project. Saving is
         // not permission to remove them, including old .raasset containers.
@@ -428,8 +520,54 @@ bool AssetLibrary::loadEngineMeshes(const std::filesystem::path& folder, std::st
     }
 }
 
+void AssetLibrary::pruneMeshPersistence() const {
+    std::erase_if(persistedMeshes_, [this](const auto& entry) {
+        const auto* mesh = findMesh(entry.first);
+        return !mesh || mesh->origin != AssetOrigin::Project || mesh->primitive != MeshPrimitive::Imported ||
+            mesh->geometryKey() != entry.second.geometry;
+    });
+}
+
+void AssetLibrary::rememberMeshPersisted(AssetId id, const std::filesystem::path& path) const noexcept {
+    // Erase first: a failed stat/allocation must not preserve an obsolete clean
+    // baseline. The file/library transaction has already succeeded at this point.
+    persistedMeshes_.erase(id);
+    try {
+        const auto* mesh = findMesh(id);
+        if (!mesh || mesh->origin != AssetOrigin::Project || mesh->primitive != MeshPrimitive::Imported ||
+            path.extension() != ".rasset" || !std::filesystem::is_regular_file(path)) return;
+        MeshPersistence baseline;
+        baseline.geometry = mesh->geometryKey();
+        baseline.name = mesh->name;
+        baseline.sourcePath = mesh->sourcePath;
+        baseline.primitive = mesh->primitive;
+        baseline.materialSlots = mesh->materialSlots;
+        baseline.uvNames = mesh->uvNames;
+        baseline.targetPath = pathKey(std::filesystem::weakly_canonical(std::filesystem::absolute(path)));
+        baseline.size = std::filesystem::file_size(path);
+        baseline.modified = std::filesystem::last_write_time(path);
+        persistedMeshes_.emplace(id, std::move(baseline));
+    } catch (...) { /* A missing baseline safely retries serialization next save. */ }
+}
+
+bool AssetLibrary::meshPersistenceMatches(const MeshAsset& mesh, const std::filesystem::path& path) const {
+    const auto found = persistedMeshes_.find(mesh.id);
+    if (found == persistedMeshes_.end()) return false;
+    const auto& baseline = found->second;
+    if (baseline.geometry != mesh.geometryKey() || baseline.name != mesh.name ||
+        baseline.sourcePath != mesh.sourcePath || baseline.primitive != mesh.primitive ||
+        baseline.materialSlots != mesh.materialSlots || baseline.uvNames != mesh.uvNames ||
+        baseline.targetPath != pathKey(std::filesystem::weakly_canonical(std::filesystem::absolute(path)))) return false;
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size != baseline.size) return false;
+    const auto modified = std::filesystem::last_write_time(path, error);
+    return !error && modified == baseline.modified;
+}
+
 bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& error) const {
     try {
+        pruneMeshPersistence();
         const auto existing = storedAssetPaths(folder, AssetFileType::StaticMesh);
         std::unordered_set<AssetId> ids;
         std::unordered_set<std::string> reserved;
@@ -441,9 +579,13 @@ bool AssetLibrary::saveMeshes(const std::filesystem::path& folder, std::string& 
         for (const auto& mesh : meshes) {
             if (mesh.origin == AssetOrigin::Engine || mesh.primitive != MeshPrimitive::Imported) continue;
             const auto path = saveAssetPath(folder, meshAssetFileName(mesh), mesh.id, existing, reserved);
+            if (meshPersistenceMatches(mesh, path)) continue;
+            persistedMeshes_.erase(mesh.id);
+            validateMeshForPersistence(mesh);
             auto file = makeMeshAssetFile(mesh);
             attachThumbnail(file, renderMeshThumbnail(mesh));
             if (!writeAssetFile(path, file, error)) return false;
+            rememberMeshPersisted(mesh.id, path);
         }
         error.clear();
         return true;
@@ -462,6 +604,7 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
         if (!std::filesystem::is_directory(folder)) { error.clear(); return true; }
         if (detail::contentLink(folder)) throw std::runtime_error("Mesh directory must not be linked.");
         auto staged = meshes;
+        std::unordered_map<AssetId, std::filesystem::path> loadedPaths;
         std::unordered_set<AssetId> ids;
         const auto files = detail::contentFiles(folder);
         for (int pass = 0; pass < 2; ++pass) {
@@ -479,6 +622,7 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
                 if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
                 MeshAsset mesh;
                 if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+                loadedPaths.emplace(mesh.id, path);
                 const auto existing = std::find_if(staged.begin(), staged.end(),
                     [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
                 if (existing != staged.end()) *existing = std::move(mesh);
@@ -486,6 +630,8 @@ bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& 
             }
         }
         meshes = std::move(staged);
+        pruneMeshPersistence();
+        for (const auto& [id, path] : loadedPaths) rememberMeshPersisted(id, path);
         error.clear();
         return true;
     } catch (const std::exception& e) {

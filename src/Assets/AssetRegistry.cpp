@@ -125,7 +125,7 @@ void AssetRegistry::setEngineContentRoot(std::filesystem::path root) {
     folders_.clear();
 }
 
-bool AssetRegistry::scan(std::string& error) {
+bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
     error.clear();
     entries_.clear();
     folders_.clear();
@@ -174,7 +174,7 @@ bool AssetRegistry::scan(std::string& error) {
                 std::string headerError;
                 if (readAssetFileHeader(path, header, headerError)) {
                     entry.id = header.id;
-                    (void)readAssetThumbnail(path, entry.thumbnail, headerError);
+                    if (loadPreviews) (void)readAssetThumbnail(path, entry.thumbnail, headerError);
                     switch (header.type) {
                     case AssetFileType::Material: entry.type = AssetType::Material; break;
                     case AssetFileType::StaticMesh: entry.type = AssetType::Mesh; break;
@@ -186,7 +186,7 @@ bool AssetRegistry::scan(std::string& error) {
                 entry.type = assetTypeFromPath(path);
                 if (entry.type == AssetType::Unknown) continue;
             }
-            if (entry.type == AssetType::Scene) {
+            if (loadPreviews && entry.type == AssetType::Scene) {
                 // A GPU-rendered sidecar wins; the CPU layout stays as a fallback.
                 Thumbnail sidecar;
                 std::string thumbError;

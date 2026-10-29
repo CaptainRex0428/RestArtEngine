@@ -482,6 +482,150 @@ void runNeighbourColourTransport(rae::renderer::SceneRenderer& renderer,
     report["checks"].push_back("reported high-metal pure-colour materials are measured separately without requiring exaggerated foreign-colour transfer");
     std::cout << "PASS: GI reported material reference images/metrics recorded without changing user assets or lighting gain.\n";
 }
+void runAreaLightTransport(rae::renderer::SceneRenderer& renderer,
+    const std::filesystem::path& output, Json& report) {
+    using namespace rae;
+    constexpr std::uint32_t width = 160, height = 120;
+    std::string error;
+    require(renderer.resize(width, height, error), error);
+    scene::World world;
+    world.blackBackground = true;
+    world.environment.overrideLighting = true;
+    world.environment.directionalIntensity = world.environment.environmentIntensity = 0;
+    auto& light = world.environment.areaLight;
+    light.enabled = true;
+    light.center[1] = 3;
+    light.halfAxisU[0] = light.halfAxisV[2] = .7f;
+    std::fill(std::begin(light.radiance), std::end(light.radiance), 10.0f);
+    assets::AssetLibrary assets;
+    assets.createDefaults();
+    assets.materials.clear();
+    assets::MaterialAsset diffuse;
+    diffuse.id = 901; diffuse.name = "Area light neutral receiver";
+    diffuse.metallic = 0; diffuse.roughness = .8f; diffuse.grid = false;
+    std::fill(std::begin(diffuse.baseColor), std::end(diffuse.baseColor), .65f);
+    assets.materials.push_back(diffuse);
+    auto mirror = diffuse;
+    mirror.id = 902; mirror.name = "Area light mirror";
+    mirror.metallic = 1; mirror.roughness = .04f;
+    std::fill(std::begin(mirror.baseColor), std::end(mirror.baseColor), .95f);
+    assets.materials.push_back(mirror);
+    renderer::SceneSettings settings;
+    settings.editorViewport = true;
+    settings.viewportWidth = width; settings.viewportHeight = height;
+    settings.hardwareRayTracing = true;
+    settings.cameraYaw = 0; settings.cameraPitch = .1f; settings.cameraDistance = 6;
+    settings.cameraTarget[1] = 1.3f;
+    settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+    settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Progressive;
+    settings.globalIllumination.samplesPerFrame = 16;
+    settings.globalIllumination.targetSamples = 128;
+    settings.globalIllumination.maxBounces = 1;
+    const auto render = [&] {
+        TraceFrame frame;
+        require(renderer.render(settings, world, assets, error), error);
+        return readScene(renderer);
+    };
+    const auto capture = [&](const char* name) {
+        Pixels pixels;
+        for (unsigned frame = 0; frame < 10; ++frame) {
+            pixels = render();
+            const auto status = renderer.globalIlluminationStatus();
+            require(status.effective == renderer::GlobalIlluminationMethod::PathTracing,
+                "Rectangle test needs active progressive DXR: " + status.reason);
+            if (status.accumulatedSamples >= settings.globalIllumination.targetSamples) {
+                savePixels(output / (std::string(name) + ".bmp"), pixels, width, height);
+                return pixels;
+            }
+        }
+        throw std::runtime_error("Rectangle test did not reach its sample budget.");
+    };
+    const auto front = capture("area-emitter-front");
+    require(visiblePixels(front, 180) > 30, "Rectangle emitter is not visible to primary rays.");
+    light.halfAxisV[2] *= -1;
+    const auto back = capture("area-emitter-back");
+    require(visiblePixels(back) == 0, "Rectangle emitter radiates from its back face.");
+    light.halfAxisV[2] *= -1;
+    const auto blocker = world.createActor("Primary occluder", 3, diffuse.id);
+    auto& blockTransform = world.findActor(blocker)->transform;
+    blockTransform.position[1] = 2; blockTransform.position[2] = 2;
+    blockTransform.scale[0] = blockTransform.scale[1] = 3;
+    blockTransform.scale[2] = .1f;
+    const auto blocked = capture("area-emitter-occluded");
+    require(visiblePixels(blocked) == 0, "Rectangle emitter shines through opaque foreground geometry.");
+    world.removeActor(blocker);
+    const auto floor = world.createActor("Diffuse floor", 2, diffuse.id);
+    std::fill(std::begin(world.findActor(floor)->transform.scale), std::end(world.findActor(floor)->transform.scale), .3f);
+    settings.debugView = 2; const auto floorAlbedo = render();
+    settings.debugView = 3; const auto floorNormals = render();
+    const auto receiver = floorMask(floorAlbedo, floorNormals, width, height);
+    require(maskCount(receiver) > 100, "Rectangle test did not identify its floor receiver.");
+    settings.debugView = 0;
+    const auto lit = capture("area-floor-lit");
+    const auto litMean = meanColour(lit, receiver);
+    require(litMean[0] > .12, "Rectangle light does not illuminate diffuse surfaces.");
+    const auto ceiling = world.createActor("Geometry behind emitter", 3, diffuse.id);
+    auto& ceilingTransform = world.findActor(ceiling)->transform;
+    ceilingTransform.position[1] = 3.2f;
+    ceilingTransform.scale[0] = ceilingTransform.scale[2] = 3;
+    ceilingTransform.scale[1] = .05f;
+    const auto behind = capture("area-floor-light-backstop");
+    require(meanError(lit, behind, receiver) < .001,
+        "Geometry beyond the sampled rectangle incorrectly shadows its finite light segment.");
+    world.findActor(ceiling)->transform.position[1] = 1.5f;
+    const auto shadowed = capture("area-floor-shadowed");
+    settings.debugView = 2; const auto shadowAlbedo = render();
+    settings.debugView = 3; const auto shadowNormals = render();
+    const auto shadowReceiver = floorMask(shadowAlbedo, shadowNormals, width, height);
+    settings.debugView = 0;
+    require(maskCount(shadowReceiver) > 30 && meanColour(shadowed, shadowReceiver)[0] < litMean[0] * .5,
+        "Opaque geometry did not shadow the floor from the rectangle.");
+    settings.hardwareRayTracingShadows = false;
+    const auto noShadows = capture("area-floor-shadows-disabled");
+    require(meanColour(noShadows, shadowReceiver)[0] > meanColour(shadowed, shadowReceiver)[0] + .1,
+        "Progressive hardware shadow switch did not disable rectangle shadows.");
+    settings.hardwareRayTracingShadows = true;
+    world.removeActor(ceiling);
+    world.removeActor(floor);
+    const auto sphere = world.createActor("Mirror sphere", 1, mirror.id);
+    world.findActor(sphere)->transform.position[1] = 1.1f;
+    settings.debugView = 2;
+    const auto sphereAlbedo = render();
+    settings.debugView = 0;
+    const auto specular = capture("area-mirror-highlight");
+    std::size_t highlightedSpherePixels = 0;
+    for (std::size_t pixel = 0; pixel < specular.size(); pixel += 4)
+        if (sphereAlbedo[pixel] > 240 && sphereAlbedo[pixel + 1] > 240 && sphereAlbedo[pixel + 2] > 240 &&
+            specular[pixel] > 60 && specular[pixel + 1] > 60 && specular[pixel + 2] > 60)
+            ++highlightedSpherePixels;
+    require(highlightedSpherePixels > 3, "Near-mirror sphere has no actual reflected rectangle highlight.");
+    const auto revision = renderer.globalIlluminationStatus().historyRevision;
+    std::fill(std::begin(light.radiance), std::end(light.radiance), 2.0f);
+    (void)render();
+    require(renderer.globalIlluminationStatus().historyRevision > revision &&
+        renderer.globalIlluminationStatus().accumulatedSamples == 16,
+        "Rectangle radiance edit did not restart accumulation immediately.");
+    light.enabled = false;
+    const auto disabled = capture("area-disabled");
+    require(visiblePixels(disabled) == 0, "Disabled rectangle or zero environment still lights the scene.");
+    settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+    light.enabled = true;
+    const auto realtimeDispatch = renderer.hardwareRayTracingDispatchCount();
+    const auto realtimeLit = capture("area-realtime-lit");
+    require(renderer.globalIlluminationStatus().effective == renderer::GlobalIlluminationMethod::PathTracing &&
+        renderer.globalIlluminationStatus().effectiveMode == renderer::GlobalIlluminationMode::Realtime &&
+        renderer.hardwareRayTracingDispatchCount() > realtimeDispatch && visiblePixels(realtimeLit) > 3,
+        "Realtime rectangle lighting did not execute GI and illuminate the scene.");
+    light.enabled = false;
+    const auto realtimeDark = capture("area-realtime-disabled");
+    require(visiblePixels(realtimeDark) == 0,
+        "Disabled realtime rectangle retained direct or historical indirect lighting.");
+    report["metrics"]["areaLightFloorMean"] = litMean;
+    report["metrics"]["areaLightPrimaryPixels"] = visiblePixels(front, 180);
+    report["metrics"]["areaLightMirrorHighlightPixels"] = highlightedSpherePixels;
+    report["checks"].push_back("single-sided rectangle primary visibility, occlusion, finite shadow segment, diffuse/mirror transport, radiance reset and realtime lighting");
+    std::cout << "PASS: GI rectangle emitter, diffuse/mirror MIS, finite shadows, live history reset and realtime lighting.\n";
+}
 } // namespace
 
 void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
@@ -1365,6 +1509,7 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         pass("realtime Forward/Deferred viewport crops match their zero-origin image exactly inside larger render targets");
 
         runNeighbourColourTransport(renderer, output, report);
+        runAreaLightTransport(renderer, output, report);
 
         report["dispatches"] = renderer.hardwareRayTracingDispatchCount() - dispatchStart;
         report["historyRevision"] = renderer.globalIlluminationStatus().historyRevision;

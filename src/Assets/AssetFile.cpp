@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <unordered_set>
 #include <random>
 
 namespace rae::assets {
@@ -280,15 +281,17 @@ Json blobRange(std::size_t offset, std::size_t size) {
     return Json{{"offset", offset}, {"size", size}};
 }
 
+std::size_t meshUnsigned(const Json& value, const char* field);
+
 bool readBlob(const AssetFile& file, const Json& range, std::size_t elementSize,
               std::size_t count, std::vector<std::uint8_t>& out, std::string& error) {
-    const auto offset = range.at("offset").get<std::size_t>();
-    const auto size = range.at("size").get<std::size_t>();
+    const auto offset = meshUnsigned(range.at("offset"), "blob offset");
+    const auto size = meshUnsigned(range.at("size"), "blob size");
     if (offset > file.blobs.size() || size > file.blobs.size() - offset) {
         error = "Mesh blob range is outside the asset data.";
         return false;
     }
-    if (size != elementSize * count) {
+    if (count > std::numeric_limits<std::size_t>::max() / elementSize || size != elementSize * count) {
         error = "Mesh blob size does not match its element count.";
         return false;
     }
@@ -297,9 +300,53 @@ bool readBlob(const AssetFile& file, const Json& range, std::size_t elementSize,
     return true;
 }
 
+std::size_t meshUnsigned(const Json& value, const char* field) {
+    if (!value.is_number_unsigned() && (!value.is_number_integer() || value.get<std::int64_t>() < 0))
+        throw std::runtime_error(std::string(field) + " must be a nonnegative integer.");
+    const auto result = value.get<std::uint64_t>();
+    if (result > std::numeric_limits<std::size_t>::max())
+        throw std::runtime_error(std::string(field) + " exceeds the supported range.");
+    return static_cast<std::size_t>(result);
+}
+
+void validateMeshAttributes(const MeshAsset& mesh) {
+    std::unordered_set<std::string> keys;
+    for (const auto& slot : mesh.materialSlots) {
+        if (slot.name.empty()) throw std::runtime_error("Mesh material slot names cannot be empty.");
+        const auto& effectiveKey = slot.sourceKey.empty() ? slot.name : slot.sourceKey;
+        if (!keys.insert(effectiveKey).second)
+            throw std::runtime_error("Mesh material slot effective identities must be unique (sourceKey, or name when absent).");
+        if (slot.defaultMaterialId) detail::readId(Json(slot.defaultMaterialId));
+    }
+    if (mesh.sections.empty() && mesh.materialSlots.size() > 1)
+        throw std::runtime_error("A multi-material mesh requires explicit sections.");
+    std::size_t nextIndex = 0;
+    for (const auto& section : mesh.sections) {
+        if (section.firstIndex != nextIndex || !section.indexCount || section.indexCount % 3 ||
+            section.materialSlot >= mesh.materialSlotCount() || nextIndex > mesh.indices.size() ||
+            section.indexCount > mesh.indices.size() - nextIndex)
+            throw std::runtime_error("Mesh sections must be contiguous triangle ranges with valid material slots.");
+        nextIndex += section.indexCount;
+    }
+    if (!mesh.sections.empty() && nextIndex != mesh.indices.size())
+        throw std::runtime_error("Mesh sections must cover the entire index buffer.");
+    for (std::size_t channel = 0; channel < MaxMeshUvChannels; ++channel) {
+        const auto& uv = mesh.uvChannels[channel];
+        if (uv.empty()) {
+            if (!mesh.uvNames[channel].empty()) throw std::runtime_error("An absent UV channel cannot have a name.");
+            continue;
+        }
+        if (uv.size() != mesh.vertices.size()) throw std::runtime_error("UV streams must match the mesh vertex count.");
+        for (const auto& value : uv)
+            for (float component : value)
+                if (!std::isfinite(component)) throw std::runtime_error("Mesh UV coordinates must be finite.");
+    }
+}
+
 } // namespace
 
 AssetFile makeMeshAssetFile(const MeshAsset& mesh) {
+    validateMeshAttributes(mesh);
     AssetFile file;
     file.type = AssetFileType::StaticMesh;
     file.id = mesh.id;
@@ -310,19 +357,12 @@ AssetFile makeMeshAssetFile(const MeshAsset& mesh) {
     if (vertexBytes) std::memcpy(file.blobs.data(), mesh.vertices.data(), vertexBytes);
     if (indexBytes)
         std::memcpy(file.blobs.data() + vertexBytes, mesh.indices.data(), indexBytes);
-    Json bounds{{"min", {0.0f, 0.0f, 0.0f}}, {"max", {0.0f, 0.0f, 0.0f}}};
-    if (!mesh.vertices.empty()) {
-        for (int axis = 0; axis < 3; ++axis) {
-            bounds["min"][axis] = mesh.vertices.front().position[axis];
-            bounds["max"][axis] = mesh.vertices.front().position[axis];
-        }
-        for (const auto& vertex : mesh.vertices) {
-            for (int axis = 0; axis < 3; ++axis) {
-                bounds["min"][axis] = std::min(bounds["min"][axis].get<float>(), vertex.position[axis]);
-                bounds["max"][axis] = std::max(bounds["max"][axis].get<float>(), vertex.position[axis]);
-            }
-        }
-    }
+    // JSON lookup/conversion for every coordinate dominated large mesh saves.
+    // The geometry revision also governs the cached numeric bounds.
+    const auto& localBounds = mesh.localBounds();
+    if (!mesh.vertices.empty() && !localBounds.valid)
+        throw std::runtime_error("Cannot serialize non-finite mesh bounds.");
+    Json bounds{{"min", localBounds.minimum}, {"max", localBounds.maximum}};
     file.manifest = Json{
         {"payload", Json{
             {"primitive", primitiveName(mesh.primitive)},
@@ -337,7 +377,32 @@ AssetFile makeMeshAssetFile(const MeshAsset& mesh) {
             }},
         }},
     };
-    if (!mesh.sourcePath.empty()) file.manifest["payload"]["sourcePath"] = mesh.sourcePath;
+    auto& payload = file.manifest["payload"];
+    if (!mesh.sourcePath.empty()) payload["sourcePath"] = mesh.sourcePath;
+    // Optional attributes leave legacy/no-attribute containers byte-compatible.
+    if (!mesh.materialSlots.empty() || !mesh.sections.empty() || mesh.uvChannelMask()) payload["meshAttributesVersion"] = 1;
+    if (!mesh.materialSlots.empty()) {
+        payload["materialSlots"] = Json::array();
+        for (const auto& slot : mesh.materialSlots)
+            payload["materialSlots"].push_back({{"name",slot.name},{"sourceKey",slot.sourceKey},{"defaultMaterialId",slot.defaultMaterialId}});
+    }
+    if (!mesh.sections.empty()) {
+        payload["sections"] = Json::array();
+        for (const auto& section : mesh.sections)
+            payload["sections"].push_back({{"firstIndex",section.firstIndex},{"indexCount",section.indexCount},{"materialSlot",section.materialSlot}});
+    }
+    if (mesh.uvChannelMask()) {
+        payload["uvChannels"] = Json::array();
+        for (std::size_t channel = 0; channel < MaxMeshUvChannels; ++channel) {
+            const auto& uv = mesh.uvChannels[channel];
+            if (uv.empty()) continue;
+            const auto offset = file.blobs.size(), size = uv.size() * sizeof(uv.front());
+            file.blobs.resize(offset + size);
+            std::memcpy(file.blobs.data() + offset, uv.data(), size);
+            payload["uvChannels"].push_back({{"channel",channel},{"name",mesh.uvNames[channel]},
+                {"blob",blobRange(offset,size)}});
+        }
+    }
     return file;
 }
 
@@ -346,8 +411,10 @@ bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& erro
     if (file.type != AssetFileType::StaticMesh) { error = "The asset is not a static mesh."; return false; }
     try {
         const auto& payload = file.manifest.at("payload");
-        const auto vertexCount = payload.at("vertexCount").get<std::size_t>();
-        const auto indexCount = payload.at("indexCount").get<std::size_t>();
+        if (payload.contains("meshAttributesVersion") && meshUnsigned(payload.at("meshAttributesVersion"), "meshAttributesVersion") != 1)
+            throw std::runtime_error("Unsupported mesh attributes version.");
+        const auto vertexCount = meshUnsigned(payload.at("vertexCount"), "vertexCount");
+        const auto indexCount = meshUnsigned(payload.at("indexCount"), "indexCount");
         if (payload.at("vertexStride").get<std::size_t>() != sizeof(MeshVertex)) {
             error = "Mesh vertex stride is not supported.";
             return false;
@@ -385,6 +452,50 @@ bool readMeshAssetFile(const AssetFile& file, MeshAsset& mesh, std::string& erro
             }
             if (normalLength < 1e-12) throw std::runtime_error("Mesh normals cannot be zero.");
         }
+        if (payload.contains("materialSlots")) {
+            const auto& slots = payload.at("materialSlots");
+            if (!slots.is_array()) throw std::runtime_error("materialSlots must be an array.");
+            for (const auto& slot : slots) {
+                MeshMaterialSlot value;
+                value.name = slot.at("name").get<std::string>();
+                value.sourceKey = slot.value("sourceKey", std::string());
+                if (slot.contains("defaultMaterialId")) {
+                    const auto& id = slot.at("defaultMaterialId");
+                    if (meshUnsigned(id, "defaultMaterialId")) value.defaultMaterialId = detail::readId(id);
+                }
+                loaded.materialSlots.push_back(std::move(value));
+            }
+        }
+        if (payload.contains("sections")) {
+            const auto& sections = payload.at("sections");
+            if (!sections.is_array()) throw std::runtime_error("sections must be an array.");
+            for (const auto& section : sections) {
+                const auto first = meshUnsigned(section.at("firstIndex"), "firstIndex");
+                const auto count = meshUnsigned(section.at("indexCount"), "indexCount");
+                const auto slot = meshUnsigned(section.at("materialSlot"), "materialSlot");
+                if (first > UINT32_MAX || count > UINT32_MAX || slot > UINT32_MAX)
+                    throw std::runtime_error("Mesh section fields exceed the supported range.");
+                loaded.sections.push_back({static_cast<std::uint32_t>(first),static_cast<std::uint32_t>(count),static_cast<std::uint32_t>(slot)});
+            }
+        }
+        if (payload.contains("uvChannels")) {
+            const auto& channels = payload.at("uvChannels");
+            if (!channels.is_array() || channels.size() > MaxMeshUvChannels)
+                throw std::runtime_error("uvChannels must be an array of at most four streams.");
+            unsigned mask = 0;
+            for (const auto& channel : channels) {
+                const auto index = meshUnsigned(channel.at("channel"), "UV channel");
+                if (index >= MaxMeshUvChannels || (mask & (1u << index)))
+                    throw std::runtime_error("UV channel index is duplicate or outside [0,3].");
+                mask |= 1u << index;
+                std::vector<std::uint8_t> uvBytes;
+                if (!readBlob(file, channel.at("blob"), sizeof(std::array<float,2>), vertexCount, uvBytes, error)) return false;
+                loaded.uvChannels[index].resize(vertexCount);
+                if (!uvBytes.empty()) std::memcpy(loaded.uvChannels[index].data(), uvBytes.data(), uvBytes.size());
+                loaded.uvNames[index] = channel.value("name", std::string());
+            }
+        }
+        validateMeshAttributes(loaded);
         mesh = std::move(loaded);
         return true;
     } catch (const std::exception& exception) {

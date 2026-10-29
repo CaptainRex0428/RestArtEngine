@@ -17,6 +17,10 @@
 #include "GlobalIlluminationSmoke.h"
 #include "RenderScaleSmoke.h"
 #include "MaterialRenderStateSmoke.h"
+#include "LightingSmoke.h"
+#include "CameraSmoke.h"
+#include <RestArtEngine/Editor/CameraNavigation.h>
+#include "MeshAttributesSmoke.h"
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -644,8 +648,9 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false, editorSelfTest = false, gcSelfTest = false, showUI = true, vsync = true;
     bool hardwareRtSelfTest = false;
+    bool quadView = false;
     bool giSelfTest = false, pathTracingOverride = false;
-    bool renderScaleTest = false, materialRenderStateTest = false;
+    bool renderScaleTest = false, materialRenderStateTest = false, lightingSelfTest = false, meshAttributesSelfTest = false, cameraSelfTest = false;
     std::optional<bool> hardwareRtOverride;
     bool temporaryCaptures = false, explicitCaptureDir = false, disableGc = false;
     std::optional<double> gcInterval, gcIdle, gcCaptureAge;
@@ -667,6 +672,10 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--gi-self-test") giSelfTest = true;
             else if (arg == "--render-scale-test") renderScaleTest = true;
             else if (arg == "--material-render-state-self-test") materialRenderStateTest = true;
+            else if (arg == "--camera-self-test") cameraSelfTest = true;
+            else if (arg == "--quad-view") quadView = true;
+            else if (arg == "--lighting-self-test") lightingSelfTest = true;
+            else if (arg == "--mesh-attributes-self-test") meshAttributesSelfTest = true;
             else if (arg == "--trace-output" && i + 1 < argc) traceOutput = argv[++i];
             else if (arg == "--capture-temp") temporaryCaptures = true;
             else if (arg == "--no-gc") disableGc = true;
@@ -701,6 +710,10 @@ int wmain(int argc, wchar_t** argv) {
                     "--hardware-rt-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
                     "--render-scale-test (10M triangles, 1080p hardware realtime GI benchmark)\n"
                     "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
+                    "--camera-self-test (projection, depth of field, previews and GI validation)\n"
+                    "--quad-view (start the editor with four independent camera views)\n"
+                    "--lighting-self-test (five light types, live parameters and GPU validation)\n"
+                    "--mesh-attributes-self-test (material slots and UV0-3 GPU validation)\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
                     "--trace-output PATH (record application frames to Chrome Trace JSON)\n"
                     "F9/Capture: Save As dialog; --frames alone does not save an image.\n"
@@ -717,9 +730,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (projectPath.empty() && !arg.starts_with("--")) projectPath = argv[i];
             else throw std::runtime_error("Unsupported argument: " + arg + ". This scene currently runs on DX11. Use --help.");
         }
-        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest))
+        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest))
             throw std::runtime_error("--capture-temp requires --frames and cannot be combined with --capture-dir or self-tests.");
-        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest) && !explicitCaptureDir)
+        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest) && !explicitCaptureDir)
             captureDir = std::filesystem::temp_directory_path() / "RestArtEngine/Validation";
         rae::GarbageCollector gc;
         std::string gcError;
@@ -731,7 +744,7 @@ int wmain(int argc, wchar_t** argv) {
         if (disableGc) gcSettings.enabled = false;
         if (!gc.setSettings(gcSettings, gcError)) throw std::runtime_error(gcError);
         // Validation outputs are durable evidence; self-tests use isolated GC services.
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) {
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) {
             std::error_code tempError;
             const auto root = std::filesystem::temp_directory_path(tempError) / "RestArtEngine/Captures";
             if (tempError || !gc.initializeTemporaryCaptures(root, gcError)) {
@@ -757,7 +770,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::filesystem::remove_all(path, cleanupCode);
             }
         } tempProjectCleanup;
-        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) {
+        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             if (!runProjectManager(engineRoot, project, gc, error)) {
                 if (!error.empty()) throw std::runtime_error(error);
@@ -768,7 +781,7 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
-            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest) {
+            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest) {
                 std::error_code copyCode;
                 isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
                     ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
@@ -794,7 +807,7 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIcon = loadEngineIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
-        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest;
+        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest;
         const auto title = windowTitle(project.name);
         const RECT monitor = primaryMonitorRect();
         SceneRenderer renderer;
@@ -890,6 +903,17 @@ int wmain(int argc, wchar_t** argv) {
         if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
         rae::editor::SceneEditor editor;
         if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
+        editor.applyStartupCamera(settings);
+        if (quadView) editor.setQuadView(true);
+        if (!showUI && editor.world().defaultCameraActor) {
+            const auto* authored = editor.world().findActor(editor.world().defaultCameraActor);
+            if (authored && authored->camera) {
+                settings.cameraLens = *authored->camera;
+                settings.cameraPose.emplace();
+                std::copy_n(authored->transform.position, 3, settings.cameraPose->position);
+                std::copy_n(authored->transform.rotation, 3, settings.cameraPose->rotation);
+            }
+        }
         struct FileDropScope {
             rae::imgui::ImGuiLayer& ui;
             ~FileDropScope() { ui.setFileDropHandler({}); }
@@ -917,6 +941,18 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (renderScaleTest) {
             runRenderScaleSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (meshAttributesSelfTest) {
+            runMeshAttributesSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (cameraSelfTest) {
+            runCameraSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (lightingSelfTest) {
+            runLightingSmoke(renderer, captureDir);
             return 0;
         }
         if (materialRenderStateTest) {
@@ -1060,26 +1096,19 @@ int wmain(int argc, wchar_t** argv) {
                     }
                 }
             }
-            if (!showUI && mainWindowFocused && !io.WantCaptureMouse && !selfTest) {
+            if (!showUI && mainWindowFocused && !io.WantCaptureMouse && !io.WantTextInput && !selfTest &&
+                editor.viewedCamera() == 0) {
+                rae::editor::NavigationInput navigation;
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
-                    settings.cameraYaw -= io.MouseDelta.x * .006f;
-                    settings.cameraPitch = std::clamp(settings.cameraPitch + io.MouseDelta.y * .006f,
-                        SceneSettings::minPitch, SceneSettings::maxPitch);
+                    navigation.orbitX = io.MouseDelta.x;
+                    navigation.orbitY = io.MouseDelta.y;
                 }
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-                    const float p = std::clamp(settings.cameraPitch, SceneSettings::minPitch, SceneSettings::maxPitch);
-                    const float y = settings.cameraYaw;
-                    const float cp = std::cos(p), sp = std::sin(p);
-                    const float cy = std::cos(y), sy = std::sin(y);
-                    const float scale = std::clamp(settings.cameraDistance, 2.5f, 30.0f) * 0.002f;
-                    const float dx = io.MouseDelta.x * scale;
-                    const float dy = io.MouseDelta.y * scale;
-                    // Grab style pan: the camera moves opposite to the cursor drag.
-                    settings.cameraTarget[0] += -cy * dx - sy * sp * dy;
-                    settings.cameraTarget[1] += cp * dy;
-                    settings.cameraTarget[2] += sy * dx - cy * sp * dy;
+                    navigation.panX = io.MouseDelta.x;
+                    navigation.panY = io.MouseDelta.y;
                 }
-                settings.cameraDistance = std::clamp(settings.cameraDistance - io.MouseWheel * .4f, 2.5f, 14.0f);
+                navigation.dolly = io.MouseWheel;
+                rae::editor::applyNavigation(settings, navigation, io.DisplaySize.y);
             }
             bool capture = mainWindowFocused && ImGui::IsKeyPressed(ImGuiKey_F9, false);
             settings.viewportX = settings.viewportY = settings.viewportWidth = settings.viewportHeight = 0;
@@ -1144,11 +1173,19 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "D3D11 debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
             << "; validation errors: " << validationErrors << '\n';
         if (validationErrors) throw std::runtime_error("D3D11 validation reported errors");
+        if (frameLimit > 0 && settings.globalIllumination.method != GlobalIlluminationMethod::Disabled) {
+            const auto gi = renderer.globalIlluminationStatus();
+            std::cout << "GI effective: " << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing" : "disabled")
+                << "; mode: " << (gi.effectiveMode == GlobalIlluminationMode::Progressive ? "progressive" : "realtime")
+                << "; samples: " << gi.accumulatedSamples << '/' << gi.targetSamples
+                << "; DXR dispatches: " << renderer.hardwareRayTracingDispatchCount() << '\n';
+            if (!gi.reason.empty()) std::cout << "GI status: " << gi.reason << '\n';
+        }
         std::cout << "Completed " << frame << " frames.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

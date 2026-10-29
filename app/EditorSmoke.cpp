@@ -530,14 +530,20 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
                 const auto& rect = viewport->WorkRect;
                 const auto origin = ImGui::GetMainViewport()->Pos;
                 const bool external = viewport->Viewport != ImGui::GetMainViewport();
-                require(std::abs(settings.viewportX - (external ? 0.0f : rect.Min.x - origin.x)) <= 1 &&
+                if (!editor.quadView() && settings.cameraLens.aspectRatio == 0) require(std::abs(settings.viewportX - (external ? 0.0f : rect.Min.x - origin.x)) <= 1 &&
                     std::abs(settings.viewportY - (external ? 0.0f : rect.Min.y - origin.y)) <= 1 &&
                     std::abs(settings.viewportWidth - rect.GetWidth()) <= 2 &&
                     std::abs(settings.viewportHeight - rect.GetHeight()) <= 2,
                     "Scene renderer rectangle differs from this frame's dock content rectangle.");
-                if (external)
-                    require(renderer.sceneTextureWidth() == static_cast<unsigned>(settings.viewportWidth) &&
-                        renderer.sceneTextureHeight() == static_cast<unsigned>(settings.viewportHeight),
+                const auto& image = editor.cameraImageRect();
+                require(image[0] >= rect.Min.x - 1 && image[1] >= rect.Min.y - 1 &&
+                    image[2] <= rect.Max.x + 1 && image[3] <= rect.Max.y + 1 &&
+                    std::abs(image[2] - image[0] - settings.viewportWidth) <= 1 &&
+                    std::abs(image[3] - image[1] - settings.viewportHeight) <= 1,
+                    "Camera image/interaction rectangle escapes the viewport or disagrees with the rendered image.");
+                if (!editor.quadView() && external && settings.cameraLens.aspectRatio == 0)
+                    require(renderer.sceneTextureWidth() == std::max(256u, static_cast<unsigned>(settings.viewportWidth)) &&
+                        renderer.sceneTextureHeight() == std::max(256u, static_cast<unsigned>(settings.viewportHeight)),
                         "External scene target does not match its complete floating image rectangle.");
             }
         }
@@ -2584,17 +2590,15 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     // Delete, and Delete while a text editor owns the keyboard.
     const auto projectPoint = [&](float x, float y, float z) {
         using namespace DirectX;
-        const float distance = settings.cameraDistance;
-        const float pitch = settings.cameraPitch;
-        const auto target = XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 1.f);
-        const auto eye = XMVectorAdd(target, XMVectorSet(
-            distance * std::cos(pitch) * std::sin(settings.cameraYaw),
-            distance * std::sin(pitch), distance * std::cos(pitch) * std::cos(settings.cameraYaw), 0.f));
-        const auto view = XMMatrixLookAtRH(eye, target, XMVectorSet(0, 1, 0, 0));
-        const auto projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.f),
-            static_cast<float>(settings.viewportWidth) / settings.viewportHeight, .05f, 100.f);
+        const auto camera = rae::camera::evaluate(renderer::resolveCamera(settings),
+            static_cast<float>(settings.viewportWidth) / settings.viewportHeight);
+        XMFLOAT4X4 viewValues{}, projectionValues{};
+        std::memcpy(&viewValues, camera.view.data(), sizeof(viewValues));
+        std::memcpy(&projectionValues, camera.projection.data(), sizeof(projectionValues));
+        const auto view = XMLoadFloat4x4(&viewValues), projection = XMLoadFloat4x4(&projectionValues);
+        const auto& image = editor.cameraImageRect();
         const auto position = XMVector3Project(XMVectorSet(x, y, z, 1),
-            mainOrigin().x + settings.viewportX, mainOrigin().y + settings.viewportY,
+            image[0], image[1],
             static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight),
             0, 1, projection, view, XMMatrixIdentity());
         return ImVec2(XMVectorGetX(position), XMVectorGetY(position));
@@ -2939,6 +2943,154 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 checkInstances(beforeMaterial);
                 require(editor.undoStack().cursor() == history && editor.undoStack().size() == historySize,
                     "Canceled or invalid Material drop changed undo history.");
+            }
+            {
+                // Real imported split mesh: the same Actor has independently
+                // assigned slots, and the hit face selects the drag destination.
+                const auto source = output / "material-slots-ui.obj";
+                const auto writeSlotSource = [&](bool reversed) {
+                    std::ofstream stream(source, std::ios::binary | std::ios::trunc);
+                    stream << "v -1.4 .25 0\nv -.1 .25 0\nv -.1 1.75 0\nv -1.4 1.75 0\n"
+                        "v .1 .25 0\nv 1.4 .25 0\nv 1.4 1.75 0\nv .1 1.75 0\n"
+                        "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n";
+                    const char* left = "usemtl Left\nf 1/1 2/2 3/3\nf 1/1 3/3 4/4\n";
+                    const char* right = "usemtl Right\nf 5/1 6/2 7/3\nf 5/1 7/3 8/4\n";
+                    stream << (reversed ? right : left) << (reversed ? left : right);
+                    stream.close(); require(stream.good(), "Could not write slot UI source fixture.");
+                };
+                writeSlotSource(false);
+                assets::AssetId splitMeshId = 0;
+                require(assets.importObj(source, splitMeshId, error), error);
+                auto* splitMesh = assets.findMesh(splitMeshId);
+                require(splitMesh && splitMesh->materialSlots.size() == 2 && splitMesh->sections.size() == 2,
+                    "OBJ UI fixture did not retain its two source material slots.");
+                splitMesh->name = "MaterialSlotsUi";
+                for (unsigned channel = 1; channel < assets::MaxMeshUvChannels; ++channel) {
+                    splitMesh->uvChannels[channel] = splitMesh->uvChannels[0];
+                    splitMesh->uvNames[channel] = "UV " + std::to_string(channel);
+                }
+                splitMesh->markGeometryModified();
+                const auto splitFile = project.contentRoot / "Meshes" / "MaterialSlotsUi.rasset";
+                std::filesystem::create_directories(splitFile.parent_path());
+                require(assets::writeAssetFile(splitFile, assets::makeMeshAssetFile(*splitMesh), error), error);
+                assets.rememberMeshPersisted(splitMeshId, splitFile);
+                auto* contentWindow = findWindow("Content & Editors");
+                click(itemRect(contentWindow, contentWindow->GetID("Refresh")).GetCenter());
+                const auto splitPath = splitFile.lexically_relative(project.contentRoot).generic_string();
+                editor.showAssetDetails(splitPath);
+                capture("material_slots_asset_details_preroll", true);
+                capture("material_slots_asset_details", true, true);
+                const auto metadataWindow = [&]() -> ImGuiWindow* {
+                    for (auto* window : context->Windows)
+                        if (window->Active && std::strstr(window->Name, "##asset-metadata") &&
+                            window->ParentWindow && window->ParentWindow->ID == ImHashStr("###AssetDetails")) return window;
+                    return nullptr;
+                };
+                auto* metadata = metadataWindow();
+                require(renderedUiText.find("Material slots: 2") != std::string::npos &&
+                    renderedUiText.find("UV3:") != std::string::npos && metadata &&
+                    metadata->ScrollMax.y <= 1.0f && metadata->InnerRect.GetHeight() >= metadata->ContentSize.y,
+                    "Mesh Asset Details did not visibly fit its two slots and four UV channels.");
+                const auto savedSlots = splitMesh->materialSlots;
+                for (std::size_t slot = 2; slot < 25; ++slot)
+                    splitMesh->materialSlots.push_back({"Extra slot " + std::to_string(slot), "test:" + std::to_string(slot), 0});
+                splitMesh->markGeometryModified();
+                capture("material_slots_many_preroll", true);
+                capture("material_slots_many_top", true, true);
+                metadata = metadataWindow();
+                require(metadata && metadata->ScrollMax.y > 100, "A long mesh slot list has no scrollable metadata region.");
+                ImGui::SetScrollY(metadata, metadata->ScrollMax.y);
+                capture("material_slots_many_scroll_preroll", true);
+                capture("material_slots_many_bottom", true, true);
+                require(metadata->Scroll.y > 100 && std::abs(metadata->Scroll.y - metadata->ScrollMax.y) < 1,
+                    "The end of a long mesh slot list could not be reached.");
+                splitMesh->materialSlots = savedSlots;
+                splitMesh->markGeometryModified();
+                editor.closeAssetDetails();
+                world.actors.clear();
+                settings.hardwareRayTracing = false; settings.rayTracing = false;
+                settings.shadowMethod = renderer::ShadowMethod::Disabled; settings.debugView = 1;
+                const auto splitActor = world.createActor("Two slot instance", splitMeshId, 1);
+                const auto splitPeer = world.createActor("Unchanged slot peer", splitMeshId, 2);
+                world.findActor(splitPeer)->visible = false;
+                capture("material_slots_fixture", true);
+                click(projectPoint(-.7f, 1, 0));
+                require(editor.selectedActor() == splitActor, "Could not select a multi-slot mesh through its visible face.");
+                const auto slotControl = [&](int slot, const char* label) {
+                    auto* details = findWindow("Details");
+                    const auto slotId = ImHashData(&slot, sizeof(slot), details->ID);
+                    return itemRect(details, ImHashStr(label, 0, slotId));
+                };
+                const auto chooseSlot = [&](int slot, assets::AssetId materialId) {
+                    click(slotControl(slot, "##SlotMaterial").GetCenter());
+                    require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+                        "A material slot combo did not open.");
+                    auto* popup = context->OpenPopupStack.back().Window;
+                    const auto* material = assets.findMaterial(materialId);
+                    const auto label = material->name + (material->origin == assets::AssetOrigin::Engine ? " (Engine)" : "") +
+                        "##" + std::to_string(materialId);
+                    click(itemRect(popup, ImHashStr(label.c_str(), 0, popup->ID)).GetCenter());
+                };
+                const auto slotMaterial = [&](std::size_t slot) {
+                    return world.findActor(splitActor)->mesh.materialForSlot(*assets.findMesh(splitMeshId), slot);
+                };
+                const auto slotHistory = editor.undoStack().cursor();
+                chooseSlot(0, 2);
+                require(slotMaterial(0) == 2 && slotMaterial(1) == 1 &&
+                    editor.undoStack().cursor() == slotHistory + 1, "Slot dropdown changed a peer slot or omitted undo.");
+                capture("material_slots_details_override", true, true);
+                (void)slotControl(1, "##SlotMaterial");
+                capture("material_slots_details_second", true, true);
+                click(slotControl(0, "Reset").GetCenter());
+                require(slotMaterial(0) == 1 && world.findActor(splitActor)->mesh.materialOverrides.empty(),
+                    "Slot Reset did not restore inheritance.");
+                require(editor.undo() && slotMaterial(0) == 2, "Slot Reset undo lost the explicit binding.");
+                require(editor.redo() && slotMaterial(0) == 1, "Slot Reset redo did not restore inheritance.");
+                chooseSlot(0, 2);
+                capture("material_slots_before_drop", true);
+                const auto slotBefore = scenePixels(output / "material_slots_before_drop.bmp", settings);
+                const auto beforeDropHistory = editor.undoStack().cursor();
+                beginAssetDrag(engineDragPath, true);
+                holdAssetAt(projectPoint(.7f, 1, 0), "material_slots_right_hover");
+                require(slotMaterial(0) == 2 && slotMaterial(1) == 1,
+                    "Slot drag hover changed material bindings before delivery.");
+                releaseAsset("material_slots_right_assigned");
+                require(slotMaterial(0) == 2 && slotMaterial(1) == assets::EngineDefaultMaterialId &&
+                    world.findActor(splitPeer)->mesh.materialOverrides.empty() &&
+                    editor.undoStack().cursor() == beforeDropHistory + 1,
+                    "Material drop did not assign only the hit slot of the hit instance.");
+                require(scenePixels(output / "material_slots_right_assigned.bmp", settings) != slotBefore,
+                    "Slot material assignment did not change rendered pixels.");
+                require(editor.undo() && slotMaterial(1) == 1 && slotMaterial(0) == 2,
+                    "Slot material drag undo changed the other slot.");
+                require(editor.redo() && slotMaterial(1) == assets::EngineDefaultMaterialId,
+                    "Slot material drag redo did not restore its binding.");
+                const auto slotScene = output / "material-slots-ui.rascene";
+                require(world.save(slotScene, assets, error), error);
+                auto reloadedAssets = assets;
+                scene::World reloaded;
+                require(reloaded.load(slotScene, reloadedAssets, error) &&
+                    reloaded.findActor(splitActor)->mesh.materialOverrides == world.findActor(splitActor)->mesh.materialOverrides,
+                    "Multiple instance material bindings did not survive scene save/reload.");
+                writeSlotSource(true);
+                require(editor.reimportContentAsset(splitPath, source, error), error);
+                editor.closeImportResults();
+                splitMesh = assets.findMesh(splitMeshId);
+                require(splitMesh->materialSlots[0].sourceKey == "obj:Right" &&
+                    splitMesh->materialSlots[1].sourceKey == "obj:Left" &&
+                    slotMaterial(0) == assets::EngineDefaultMaterialId && slotMaterial(1) == 2,
+                    "Reimport slot reordering attached an instance material to the wrong faces.");
+                require(editor.undoStack().size() == 0, "Reordered slots retained unsafe index-based undo history.");
+                auto savedAssets = assets;
+                scene::World savedBeforeReimport;
+                require(savedBeforeReimport.load(slotScene, savedAssets, error) &&
+                    savedBeforeReimport.findActor(splitActor)->mesh.materialForSlot(*savedAssets.findMesh(splitMeshId), 0) ==
+                        assets::EngineDefaultMaterialId &&
+                    savedBeforeReimport.findActor(splitActor)->mesh.materialForSlot(*savedAssets.findMesh(splitMeshId), 1) == 2,
+                    "A saved scene did not resolve its slot keys after source reordering.");
+                capture("material_slots_after_reimport", true, true);
+                std::cout << "PASS: Multi-slot Details assign/reset, actual face-targeted drag, GPU feedback, "
+                    "instance isolation, undo/redo, scene persistence and stable-key reimport.\n";
             }
             imgui::uiPreferences() = savedPreferences;
             world = savedWorld;
@@ -3387,11 +3539,38 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "Material copy kept the engine identity or read-only origin.");
         const auto copiedId = copyEntry->id;
         const auto copyPath = copyEntry->path;
+        require(assets.saveMaterials(project.contentRoot / "Materials", error) &&
+            assets.saveMeshes(project.contentRoot, error), "Publish earlier material UI fixtures: " + error);
+        const auto saveSceneCommand = [&] {
+            for (const auto& command : editor.commands().commands())
+                if (command.info.id == "scene.save") { command.action(); return; }
+            require(false, "Scene save command is missing.");
+        };
+        saveSceneCommand();
+        capture("material_scene_initially_saved", true, true);
+        require(renderedUiText.find("Scene *") == std::string::npos, "Material test scene was not saved.");
         click(materialRect("Grid").GetCenter());
         require(editor.materialPreview() && editor.materialPreview()->id == copiedId && editor.materialPreview()->grid,
             "Project copy could not use live material editing.");
         click(materialRect("Apply material").GetCenter());
-        click(materialRect("Save material assets").GetCenter());
+        capture("material_applied_without_scene_dirty", true, true);
+        require(renderedUiText.find("Scene *") == std::string::npos &&
+            renderedUiText.find("Material assets have unsaved changes.") != std::string::npos,
+            "Applying a material dirtied the scene or lost the asset's unsaved state.");
+        const auto copyBeforeSceneSave = contents(copyPath);
+        const auto copyTimeBeforeSceneSave = std::filesystem::last_write_time(copyPath);
+        saveSceneCommand();
+        capture("material_dirty_after_scene_save", true, true);
+        require(contents(copyPath) == copyBeforeSceneSave &&
+            std::filesystem::last_write_time(copyPath) == copyTimeBeforeSceneSave &&
+            renderedUiText.find("Material assets have unsaved changes.") != std::string::npos,
+            "Saving the scene wrote the applied material or cleared its unsaved warning.");
+        const auto sceneBeforeMaterialSave = contents(editor.scenePath());
+        const auto sceneTimeBeforeMaterialSave = std::filesystem::last_write_time(editor.scenePath());
+        click(materialRect("Save material asset").GetCenter());
+        require(contents(editor.scenePath()) == sceneBeforeMaterialSave &&
+            std::filesystem::last_write_time(editor.scenePath()) == sceneTimeBeforeMaterialSave,
+            "Saving one material also wrote the scene.");
         assets::AssetFile savedCopy;
         assets::MaterialAsset savedMaterial;
         require(assets::readAssetFile(copyPath, savedCopy, error) &&
@@ -3402,8 +3581,56 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "Editing/saving a project copy modified the shared engine default.");
         capture("engine_material_copy", true);
         saveMaterialCapture("engine_material_copy_native.bmp");
+        // Two independently applied materials must keep separate dirty states.
+        const auto materialPathFor = [&](assets::AssetId id) {
+            for (const auto& entry : editor.assetRegistry().entries())
+                if (entry.type == assets::AssetType::Material && entry.id == id) return entry.path;
+            throw std::runtime_error("New material was not published in Content.");
+        };
+        const auto sceneBeforeNewMaterials = contents(editor.scenePath());
+        click(materialRect("New material").GetCenter());
+        const auto firstNew = assets.materials.back().id;
+        const auto firstNewPath = materialPathFor(firstNew);
+        require(std::filesystem::is_regular_file(firstNewPath), "New material did not publish its asset immediately.");
+        click(materialRect("Grid").GetCenter());
+        click(materialRect("Apply material").GetCenter());
+        click(materialRect("New material").GetCenter());
+        const auto secondNew = assets.materials.back().id;
+        const auto secondNewPath = materialPathFor(secondNew);
+        const auto secondNewBytes = contents(secondNewPath);
+        click(materialRect("Grid").GetCenter());
+        click(materialRect("Apply material").GetCenter());
+        require(editor.saveMaterialAsset(firstNew, error), "Save the first of two dirty materials: " + error);
+        saveSceneCommand();
+        capture("material_second_still_dirty", true, true);
+        require(contents(secondNewPath) == secondNewBytes &&
+            renderedUiText.find("Material assets have unsaved changes.") != std::string::npos &&
+            renderedUiText.find("Scene *") == std::string::npos,
+            "Saving material A or the scene saved/cleared independently dirty material B.");
+        require(editor.saveMaterialAsset(secondNew, error) && contents(secondNewPath) != secondNewBytes,
+            "Explicitly saving the second material did not persist its applied values.");
+        require(contents(editor.scenePath()) == sceneBeforeNewMaterials,
+            "New material or material-only changes altered serialized scene contents.");
+
+        // Failed immediate publication retains the new in-memory asset as dirty
+        // so the user can fix the destination and explicitly retry.
+        const auto materialsFolder = project.contentRoot / "Materials";
+        const auto heldMaterials = project.contentRoot / "Materials-held-by-save-test";
+        std::filesystem::rename(materialsFolder, heldMaterials);
+        { std::ofstream blocker(materialsFolder); blocker << "isolated test destination blocker"; }
+        click(materialRect("New material").GetCenter());
+        const auto failedNew = assets.materials.back().id;
+        capture("material_new_publish_failed", true, true);
+        const bool retainedDirty = renderedUiText.find("Material assets have unsaved changes.") != std::string::npos &&
+            renderedUiText.find("New material is unsaved:") != std::string::npos;
+        std::filesystem::remove(materialsFolder);
+        std::filesystem::rename(heldMaterials, materialsFolder);
+        require(retainedDirty && editor.saveMaterialAsset(failedNew, error) &&
+            std::filesystem::is_regular_file(materialPathFor(failedNew)),
+            "Failed new-material publication lost dirty data or could not retry.");
         std::cout << "PASS: Engine Content navigation, read-only material UI, default Actor assignment, "
-            "Copy to Project, editable independent parameters, save and unchanged engine file.\n";
+            "Copy to Project, independent material/scene dirty states, immediate material publication/failure retry, "
+            "save and unchanged engine file.\n";
     }
     runDiagnosticsSmoke(renderer, output / "diagnostics",
         contents(project.engineRoot / "Shaders/Materials/Standard.hlsli"));
@@ -3562,6 +3789,172 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             });
     }
     {
+        // This suite receives the application's isolated project copy. Keep all
+        // persistence fixtures there and run last so a new bound scene cannot
+        // change the earlier UI/selection/undo assertions.
+        ImGuiContextScope active(context);
+        const auto invokeCommand = [&](std::string_view id) {
+            require(editor.commands().enabled(id), "Persistence command is disabled: " + std::string(id));
+            for (const auto& command : editor.commands().commands()) if (command.info.id == id) {
+                command.action();
+                return;
+            }
+            require(false, "Persistence command is missing: " + std::string(id));
+        };
+        const auto originalScenePath = editor.scenePath();
+        const auto originalSceneBytes = contents(originalScenePath);
+        // Publish any fixture assets created by earlier low-level tests. Normal
+        // UI import/new-material actions publish their files themselves.
+        require(assets.saveMaterials(project.contentRoot / "Materials", error) &&
+            assets.saveMeshes(project.contentRoot, error), "Publish earlier test fixtures: " + error);
+        const auto fixtureName = "SavePersistence-" + assets::assetIdText(assets::generateAssetId());
+        const auto sourcePath = output / (fixtureName + ".obj");
+        {
+            std::ofstream stream(sourcePath, std::ios::binary);
+            stream << "v -0.5 0 0\nv 0.5 0 0\nv 0 1 0\nf 1 2 3\n";
+            stream.close();
+            require(stream.good(), "Cannot write the isolated persistence OBJ fixture.");
+        }
+        assets::AssetId importedId = 0;
+        require(assets.importObj(sourcePath, importedId, error), "Persistence fixture import: " + error);
+        const auto materialId = assets.createMaterial(fixtureName);
+        invokeCommand("actor.addCube"); // Exercise normal dirty-state bookkeeping.
+        const auto fixtureActorId = editor.selectedActor();
+        auto* fixtureActor = world.findActor(fixtureActorId);
+        require(fixtureActor != nullptr, "Persistence fixture Actor was not created.");
+        fixtureActor->mesh.meshId = importedId;
+        fixtureActor->mesh.materialId = materialId;
+        fixtureActor->name = fixtureName;
+        const auto meshPath = project.contentRoot / assets::AssetLibrary::meshAssetFileName(*assets.findMesh(importedId));
+        const auto materialPath = project.contentRoot / "Materials" /
+            assets::AssetLibrary::materialAssetFileName(*assets.findMaterial(materialId));
+        require(!std::filesystem::exists(meshPath) && !std::filesystem::exists(materialPath),
+            "Persistence fixtures unexpectedly existed before Save As.");
+        capture("save_as_dirty", true, true);
+        require(renderedUiText.find("Scene *") != std::string::npos,
+            "Creating the persistence Actor did not mark the scene unsaved.");
+        const auto savedPath = project.contentRoot / "Scenes" / (fixtureName + ".rascene");
+        require(!editor.saveSceneAs(savedPath, error) && !error.empty() &&
+            editor.scenePath() == originalScenePath && !std::filesystem::exists(savedPath) &&
+            !std::filesystem::exists(meshPath) && !std::filesystem::exists(materialPath),
+            "Scene-only Save As published unsaved assets or created unresolved references.");
+        require(editor.saveMaterialAsset(materialId, error), "Save new material explicitly: " + error);
+        require(!editor.saveSceneAs(savedPath, error) && !std::filesystem::exists(savedPath),
+            "Unsaved imported mesh was accepted by scene-only Save As.");
+        require(assets.saveMeshes(project.contentRoot, error), "Publish the imported mesh fixture: " + error);
+        const auto materialBytesBeforeScene = contents(materialPath);
+        const auto materialTimeBeforeScene = std::filesystem::last_write_time(materialPath);
+        const auto meshBytesBeforeScene = contents(meshPath);
+        const auto meshTimeBeforeScene = std::filesystem::last_write_time(meshPath);
+        // Both assets now differ from disk. Saving references must retain the
+        // persisted versions and leave these independent edits in memory.
+        assets.findMaterial(materialId)->roughness = .123f;
+        assets.findMesh(importedId)->vertices[0].position[0] -= .25f;
+        assets.findMesh(importedId)->markGeometryModified();
+        require(editor.saveSceneAs(savedPath, error), "Save As failed: " + error);
+        require(editor.scenePath() == savedPath && std::filesystem::exists(meshPath) &&
+            std::filesystem::exists(materialPath) && contents(originalScenePath) == originalSceneBytes,
+            "Save As did not bind the new scene or preserve the old scene.");
+        require(contents(meshPath) == meshBytesBeforeScene && contents(materialPath) == materialBytesBeforeScene &&
+            std::filesystem::last_write_time(meshPath) == meshTimeBeforeScene &&
+            std::filesystem::last_write_time(materialPath) == materialTimeBeforeScene,
+            "Scene-only Save As wrote independently changed assets.");
+        capture("save_as_clean", true, true);
+        require(renderedUiText.find("Scene saved") != std::string::npos &&
+            renderedUiText.find("Scene *") == std::string::npos,
+            "Successful Save As left the scene unsaved.");
+        require(std::filesystem::remove(sourcePath), "Cannot remove only the isolated persistence OBJ source.");
+        const auto savedMeshBytes = contents(meshPath);
+        const auto savedMeshTime = std::filesystem::last_write_time(meshPath);
+        const auto reloadSaved = [&] {
+            assets::AssetLibrary loaded;
+            loaded.createDefaults();
+            require(loaded.loadEngineMaterials(project.engineRoot / "Content/Materials", error) &&
+                loaded.loadEngineMeshes(project.engineRoot / "Content/Meshes", error) &&
+                loaded.loadMaterials(project.contentRoot / "Materials", error) &&
+                loaded.loadMeshes(project.contentRoot, error), "Reload saved assets: " + error);
+            scene::World reloaded;
+            require(reloaded.load(savedPath, loaded, error), "Reload saved scene: " + error);
+            const auto* actor = reloaded.findActor(fixtureActorId);
+            require(actor && actor->mesh.meshId == importedId && actor->mesh.materialId == materialId &&
+                loaded.findMesh(importedId) && loaded.findMaterial(materialId),
+                "Saved scene does not resolve its new assets after deleting the source OBJ.");
+            require(reloaded.actors.size() == world.actors.size(), "Saved scene lost an Actor.");
+        };
+        reloadSaved();
+
+        invokeCommand("actor.addCube");
+        const auto previousSceneBytes = contents(savedPath);
+        const auto blockedPath = project.contentRoot / "Scenes" / (fixtureName + "-blocked.rascene");
+        require(std::filesystem::create_directory(blockedPath), "Cannot create isolated Save As failure fixture.");
+        require(!editor.saveSceneAs(blockedPath, error) && !error.empty() && editor.scenePath() == savedPath &&
+            contents(savedPath) == previousSceneBytes && std::filesystem::is_directory(blockedPath),
+            "Failed Save As switched the scene path or changed the previous scene.");
+        capture("save_as_failed_dirty", true, true);
+        require(renderedUiText.find("Scene *") != std::string::npos,
+            "Failed Save As cleared the unsaved indicator.");
+        invokeCommand("scene.save");
+        require(contents(savedPath) != previousSceneBytes, "Save Scene command did not persist the new Actor.");
+        capture("save_scene_clean", true, true);
+        require(renderedUiText.find("Scene saved") != std::string::npos &&
+            renderedUiText.find("Scene *") == std::string::npos,
+            "Save Scene command did not clear the unsaved indicator.");
+        reloadSaved();
+        require(contents(meshPath) == savedMeshBytes && std::filesystem::last_write_time(meshPath) == savedMeshTime,
+            "Save Scene wrote the independently changed imported mesh.");
+        require(contents(materialPath) == materialBytesBeforeScene &&
+            std::filesystem::last_write_time(materialPath) == materialTimeBeforeScene,
+            "Save Scene wrote the independently changed material.");
+
+        // A deleted dependency is rejected without recreating it or replacing
+        // the old scene. Restoring it permits the scene-only save again.
+        const auto missingBackup = meshPath.string() + ".test-hidden";
+        std::filesystem::rename(meshPath, missingBackup);
+        const auto sceneBeforeMissing = contents(savedPath);
+        require(!editor.saveSceneAs(savedPath, error) && contents(savedPath) == sceneBeforeMissing &&
+            !std::filesystem::exists(meshPath), "Scene save rewrote a deleted dependency or damaged the scene.");
+        std::filesystem::rename(missingBackup, meshPath);
+
+        invokeCommand("actor.addCube");
+        const auto sceneBeforeAsset = contents(savedPath);
+        require(editor.saveMaterialAsset(materialId, error), "Explicit material save failed: " + error);
+        require(contents(savedPath) == sceneBeforeAsset && contents(meshPath) == savedMeshBytes &&
+            contents(materialPath) != materialBytesBeforeScene,
+            "Saving a material wrote another asset/scene or lost the intended material change.");
+
+        invokeCommand("actor.addCube");
+        capture("save_all_ready", true, true);
+        auto* toolbar = findWindow("RestArtEngine Editor");
+        require(toolbar != nullptr, "Save All toolbar is missing.");
+        // EndMenuBar retains the submitted horizontal cursor after the final
+        // "Scene *" status. Derive the preceding button's center from that
+        // layout, avoiding navigation focus changes from floating tool windows.
+        const auto& toolbarStyle = context->Style;
+        const float saveAllWidth = ImGui::CalcTextSize("Save All").x + toolbarStyle.FramePadding.x * 2;
+        const float saveAllX = toolbar->Pos.x + toolbar->DC.MenuBarOffset.x -
+            ImGui::CalcTextSize("Scene *").x - toolbarStyle.ItemSpacing.x * 2 - saveAllWidth * .5f;
+        const ImVec2 saveAllCenter{saveAllX, toolbar->MenuBarRect().GetCenter().y};
+        require(toolbar->MenuBarRect().Contains(saveAllCenter), "Save All button is outside the menu bar.");
+        click(saveAllCenter);
+        capture("save_all_clean", true, true);
+        require(renderedUiText.find("Scene saved") != std::string::npos &&
+            renderedUiText.find("Scene *") == std::string::npos,
+            "The real Save All button did not save the dirty scene.");
+        reloadSaved();
+        require(contents(meshPath) != savedMeshBytes,
+            "Save All did not persist the independently edited mesh.");
+        assets::AssetFile savedMeshFile;
+        assets::MeshAsset savedMesh;
+        require(assets::readAssetFile(meshPath, savedMeshFile, error) &&
+            assets::readMeshAssetFile(savedMeshFile, savedMesh, error) &&
+            savedMesh.vertices[0].position[0] == assets.findMesh(importedId)->vertices[0].position[0],
+            "Save All persisted the wrong mesh geometry.");
+        require(contents(originalScenePath) == originalSceneBytes && contents(engineMaterialPath) == engineMaterialBytes,
+            "Persistence regression modified the original scene or Engine material.");
+        std::cout << "PASS: Scene-only Save/Save As leave edited assets untouched, reject unpublished/deleted references, "
+            "material-only save preserves scene/mesh, failed Save As keeps path/dirty, Save All persists geometry and reloads.\n";
+    }
+    {
         // Ordinary dock panels must keep their full image and interaction area
         // after becoming native windows, independently of the main swap chain.
         ImGuiContextScope active(context);
@@ -3667,6 +4060,15 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             require(context->ActiveId == sourceId, "Native Content press did not activate the intended asset widget.");
             input.mouse.x += 18;
             capture("floating_content_source_drag", true);
+            if (!context->DragDropActive) {
+                savePlatformCapture(findWindow("Content & Editors"), "floating_source_failure_native.bmp");
+                std::cerr << "Floating source failure: path=" << path << " grid=" << grid
+                    << " source=" << source.x << ',' << source.y << " mouse=" << context->IO.MousePos.x << ',' << context->IO.MousePos.y
+                    << " active=" << context->ActiveId << " hovered=" << context->HoveredId
+                    << " hoveredWindow=" << (context->HoveredWindow ? context->HoveredWindow->Name : "none")
+                    << " mouseDown=" << context->IO.MouseDown[0] << " doubleClick=" << context->IO.MouseDoubleClicked[0]
+                    << " blocked=" << ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) << '\n';
+            }
             require(context->DragDropActive && context->DragDropPayload.IsDataType("RAE_ASSET") &&
                 context->DragDropPayload.DataSize == static_cast<int>(path.size()) &&
                 std::memcmp(context->DragDropPayload.Data, path.data(), path.size()) == 0,
@@ -3713,6 +4115,15 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         moveNativePanel("Scene Viewport##Interaction", {desktop.Max.x + 740, desktop.Min.y + 30}, {980, 720});
         require(settings.viewportWidth > firstSize.x + 100 && settings.viewportHeight > firstSize.y + 40,
             "Resizing an external Scene did not resize its independent scene texture.");
+        // The platform can clamp a wide native Scene window back onto the
+        // monitor, covering the Content source even though the requested X
+        // positions did not overlap. Arrange the actual windows vertically
+        // before injecting cross-window drags, and verify the source is exposed.
+        const auto scenePlatformRect = findWindow("Scene Viewport##Interaction")->Viewport->GetMainRect();
+        moveNativePanel("Content & Editors", {desktop.Max.x + 40, scenePlatformRect.Max.y + 30}, {660, 440});
+        require(!findWindow("Content & Editors")->Viewport->GetMainRect().Overlaps(
+            findWindow("Scene Viewport##Interaction")->Viewport->GetMainRect()),
+            "Floating drag fixture has overlapping native Scene and Content windows after platform clamping.");
         savePlatformCapture(findWindow("Scene Viewport##Interaction"), "floating_scene_full_native.bmp");
         const auto raw = contents(output / "floating_native_resize.scene.rgba");
         bool variedScene = false;
@@ -3830,12 +4241,23 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(settings.viewportVisible && settings.viewportX == 0 && settings.viewportY == 0 &&
             renderer.geometryStatistics().frameId > sceneFrameBeforeMinimize,
             "Restoring the main editor did not resume the external scene render.");
+        savePlatformCapture(findWindow(diagnosticsName), "floating_restored_diagnostics_native.bmp");
+        savePlatformCapture(findWindow("Project Settings"), "floating_restored_settings_native.bmp");
+        // Retention is verified above. Remove the retained tools before aiming
+        // a camera gesture: the OS may clamp those tools over the scene too.
+        editor.closeDiagnostics(); editor.closeProjectSettings();
+        capture("floating_restored_tools_closed", true);
+        capture("floating_restored_tools_closed", true);
         const auto floatingOrbitStart = sceneProject(2.8f, .5f, 0);
         const auto yawBefore = settings.cameraYaw;
         input.mouse = floatingOrbitStart;
         capture("floating_restored_camera_hover", true);
+        require(context->HoveredWindow && context->HoveredWindow->Viewport == findWindow("Scene Viewport##Interaction")->Viewport,
+            "Restored camera gesture is obstructed by another native window.");
         input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, true); };
         capture("floating_restored_camera_press", true);
+        require(context->NavWindow && context->NavWindow->Viewport == findWindow("Scene Viewport##Interaction")->Viewport &&
+            editor.cameraNavigating(), "Right-button navigation did not acquire the external Scene focus.");
         input.mouse.x += 42;
         capture("floating_restored_camera_drag", true);
         input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, false); };
@@ -3843,7 +4265,6 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         require(settings.cameraYaw != yawBefore, "The retained external Scene camera stopped working after main-window restore.");
         savePlatformCapture(findWindow("Scene Viewport##Interaction"), "floating_restored_scene_native.bmp");
         savePlatformCapture(findWindow("Content & Editors"), "floating_restored_content_native.bmp");
-        savePlatformCapture(findWindow(diagnosticsName), "floating_restored_diagnostics_native.bmp");
         editor.closeDiagnostics(); editor.closeProjectSettings();
         capture("floating_tools_closed", true);
         const auto* settingsPanel = findWindow("Viewport settings");
@@ -3876,6 +4297,369 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         std::cout << "PASS: ordinary native Content/Scene dock detach and re-dock, external layout reload, "
             "independent scene targets, desktop picking/gizmo and cross-window Mesh/Material delivery, "
             "plus native-panel retention and hidden-scene GPU suppression while the main window is minimized.\n";
+    }
+    {
+        ImGuiContextScope active(context);
+        editor.closeDiagnostics(); editor.closeProjectSettings();
+        capture("status_bar_ready", true, true);
+        auto* footer = findWindow("Editor Status Bar");
+        require(footer != nullptr, "Editor bottom status bar is missing.");
+        const auto commandId = footer->GetID("##command");
+        const auto typeCommand = [&](const std::string& command) {
+            click(itemRect(footer, commandId).GetCenter());
+            input.events = [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_A, true); };
+            capture("console_select_text", true);
+            input.events = [&](ImGuiIO& io) {
+                io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false);
+                io.AddInputCharactersUTF8(command.c_str());
+            };
+            capture("console_type", true);
+        };
+        const auto inputText = [&] {
+            const auto* state = ImGui::GetInputTextState(commandId);
+            require(state && state->TextA.Data, "Console lost its input state.");
+            return std::string(state->TextA.Data);
+        };
+        const auto consoleActorCount = world.actors.size();
+        const auto undoCursor = editor.undoStack().cursor();
+        typeCommand("actor.addCube");
+        pressKey(ImGuiKey_Enter);
+        require(world.actors.size() == consoleActorCount + 1 && editor.undoStack().cursor() == undoCursor + 1,
+            "Console Enter did not run the normal undoable Actor command.");
+        typeCommand("edit.undo"); pressKey(ImGuiKey_Enter);
+        require(world.actors.size() == consoleActorCount, "Console Undo did not restore the Actor count.");
+        typeCommand("scene.in"); pressKey(ImGuiKey_Tab);
+        require(inputText() == "scene.info ", "Console Tab did not complete the command.");
+        pressKey(ImGuiKey_Enter);
+        require(!editor.console().entries().empty() && !editor.console().entries().back().error,
+            "Console scene.info did not produce a successful result.");
+        typeCommand("unfinished input"); pressKey(ImGuiKey_DownArrow);
+        require(inputText() == "unfinished input", "Down without history browsing erased the command draft.");
+        pressKey(ImGuiKey_UpArrow);
+        require(inputText().starts_with("scene.info"), "Console Up did not recall history.");
+        pressKey(ImGuiKey_DownArrow);
+        require(inputText() == "unfinished input", "Console Down did not restore the draft.");
+        const auto selected = editor.selectedActor();
+        const auto cameraDistance = settings.cameraDistance;
+        pressKey(ImGuiKey_Delete); pressKey(ImGuiKey_F); pressKey(ImGuiKey_W);
+        require(world.actors.size() == consoleActorCount && editor.selectedActor() == selected && settings.cameraDistance == cameraDistance,
+            "Console text input leaked Delete/F/W into the scene.");
+        typeCommand("no.such.command"); pressKey(ImGuiKey_Enter);
+        capture("console_error_output", true, true);
+        require(!editor.console().entries().empty() && editor.console().entries().back().error &&
+            findWindow("Output Log###RestArtEngine.OutputLog")->Active,
+            "Unknown console command did not open its error output.");
+        require(!editor.executeConsoleCommand("select invalid-id").success &&
+            editor.executeConsoleCommand("select " + std::to_string(world.actors.front().id)).success,
+            "Console argument validation/Actor selection is incorrect.");
+        require(editor.executeConsoleCommand("help scene").success, "Console help failed.");
+        capture("console_help_output", true);
+        // Selection activates the Details tab on a following frame. Settle
+        // that queued focus before locating another widget by navigation ID.
+        capture("console_selection_settled", true);
+        capture("console_selection_settled", true);
+        click(itemRect(footer, footer->GetID("Output Log")).GetCenter());
+        capture("console_output_closed", true);
+        require(!findWindow("Output Log###RestArtEngine.OutputLog")->Active, "Output Log toggle did not close the window.");
+
+        const auto originalTheme = imgui::currentTheme();
+        const auto originalStyle = context->Style;
+        const auto originalScale = context->IO.FontGlobalScale;
+        const ImVec2 originalSize = context->IO.DisplaySize;
+        for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+            for (const bool compact : {false, true}) {
+                context->Style = originalStyle;
+                imgui::setTheme(theme);
+                context->IO.FontGlobalScale = originalScale * (compact ? 1.5f : 1.0f);
+                if (compact) context->Style.ScaleAllSizes(1.5f);
+                const unsigned width = compact ? 680u : 1440u;
+                require(renderer.resize(width, 900, error), error);
+                input.displaySize = {static_cast<float>(width), 900};
+                editor.resetLayout();
+                capture("status_bar_layout_warmup", true);
+                capture("status_bar_layout_warmup", true);
+                const auto* workspace = findWindow("Editor workspace");
+                footer = findWindow("Editor Status Bar");
+                const auto* viewport = ImGui::GetMainViewport();
+                require(workspace && footer && workspace->Pos.y + workspace->Size.y <= footer->Pos.y + 1 &&
+                    std::abs(footer->Pos.y + footer->Size.y - viewport->WorkPos.y - viewport->WorkSize.y) <= 1,
+                    "Status bar overlaps the dock workspace or leaves the main work area.");
+                require(footer->DC.CursorMaxPos.x <= footer->Pos.x + footer->Size.x + 1,
+                    "Status bar controls overflow at the tested width/scale.");
+                const auto name = std::string("status_bar_") + (theme == imgui::EditorTheme::Black ? "black" : "blue") +
+                    (compact ? "_compact" : "_wide");
+                capture(name.c_str(), true, true);
+                require(renderedUiText.find("Cmd") != std::string::npos && renderedUiText.find("Tools") != std::string::npos,
+                    "Bottom console or tools disappeared at narrow width.");
+            }
+        }
+        imgui::setTheme(originalTheme); context->Style = originalStyle; context->IO.FontGlobalScale = originalScale;
+        input.displaySize = {}; input.mouse = {-100, -100};
+        require(renderer.resize(static_cast<unsigned>(originalSize.x), static_cast<unsigned>(originalSize.y), error), error);
+        editor.resetLayout(); capture("status_bar_restored", true);
+        std::cout << "PASS: bottom bar layout at wide/compact/150% scale in both themes, real console Enter/Tab/history, "
+            "undoable Actor actions, argument/error output, log toggle and scene keyboard isolation.\n";
+    }
+    {
+        // Light Actors use the same command, property, viewport and persistence
+        // paths as normal editing. All files stay in the smoke project's copy.
+        ImGuiContextScope active(context);
+        const auto savedWorld = world;
+        const auto savedSettings = settings;
+        const auto savedPrimary = editor.selectedActor();
+        const auto savedScenePath = editor.scenePath();
+        const auto savedSceneBytes = contents(savedScenePath);
+        const auto savedTheme = imgui::currentTheme();
+        const auto invokeLightCommand = [&](const std::string& command) {
+            const auto result = editor.executeConsoleCommand(command);
+            require(result.success, "Light editor command failed: " + command + ": " + result.message);
+        };
+        world = scene::World{};
+        settings = renderer::SceneSettings{};
+        settings.shadowMethod = renderer::ShadowMethod::Disabled;
+        settings.cameraDistance = 8;
+        world.blackBackground = true;
+        const std::array<scene::LightType, 5> types{scene::LightType::Directional, scene::LightType::Sky,
+            scene::LightType::Rect, scene::LightType::Spot, scene::LightType::Point};
+        const std::array<const char*, 5> commands{"actor.addDirectionalLight", "actor.addSkyLight",
+            "actor.addRectLight", "actor.addSpotLight", "actor.addPointLight"};
+        std::array<scene::ActorId, 5> ids{};
+        for (std::size_t index = 0; index < commands.size(); ++index) {
+            invokeLightCommand(commands[index]);
+            ids[index] = editor.selectedActor();
+            const auto* created = world.findActor(ids[index]);
+            require(created && created->light && created->light->type == types[index] &&
+                created->mesh.meshId == 0 && created->mesh.materialId == 0 && world.actors.size() == index + 1,
+                "Light creation did not create/select the requested component without mesh references.");
+            const auto copy = *created;
+            require(editor.undo() && !world.findActor(copy.id), "Undo did not remove the created light.");
+            require(editor.redo() && editor.selectedActor() == copy.id && world.findActor(copy.id) &&
+                world.findActor(copy.id)->light && world.findActor(copy.id)->light->type == types[index] &&
+                world.findActor(copy.id)->light->intensity == copy.light->intensity &&
+                world.findActor(copy.id)->light->castShadows == copy.light->castShadows,
+                "Redo did not restore the light identity, type or properties.");
+            auto& placed = *world.findActor(ids[index]);
+            placed.transform.position[0] = -3.0f + static_cast<float>(index) * 1.5f;
+            placed.light->intensity = 0;
+        }
+        const auto lightReceiver = world.createActor("Light receiver", assets::EngineSphereMeshId, assets::EngineDefaultMaterialId);
+        world.findActor(lightReceiver)->transform.position[1] = 1;
+        world.createActor("Light receiver floor", assets::EnginePlaneMeshId, assets::EngineDefaultMaterialId);
+        const auto pointId = ids.back();
+        world.findActor(pointId)->transform.position[0] = 0;
+        world.findActor(pointId)->transform.position[1] = 3;
+        world.findActor(pointId)->transform.position[2] = 1;
+        world.findActor(pointId)->light->intensity = 5;
+        capture("lighting_ui_ready", true);
+        capture("lighting_ui_details", true, true);
+        require(renderedUiText.find("Point Light") != std::string::npos &&
+            renderedUiText.find("Range (world units)") != std::string::npos,
+            "Light selection did not expose its real Details controls.");
+        auto* lightDetails = findWindow("Details");
+        const auto intensityRect = itemRect(lightDetails, lightDetails->GetID("##LightIntensity"));
+        capture("lighting_ui_before", true);
+        saveScenePixels(renderer, settings, output / "lighting_ui_before.bmp");
+        const auto beforePixels = scenePixels(output / "lighting_ui_before.bmp", settings);
+        const float beforeIntensity = world.findActor(pointId)->light->intensity;
+        const auto beforeCursor = editor.undoStack().cursor();
+        const auto shaderRevision = renderer.shaderRevision();
+        const auto intensityStart = intensityRect.GetCenter();
+        drag(intensityStart, {intensityStart.x + 100, intensityStart.y}, "lighting_ui_intensity");
+        const float afterIntensity = world.findActor(pointId)->light->intensity;
+        saveScenePixels(renderer, settings, output / "lighting_ui_intensity.bmp");
+        const auto afterPixels = scenePixels(output / "lighting_ui_intensity.bmp", settings);
+        require(afterIntensity > beforeIntensity && beforePixels != afterPixels &&
+            editor.undoStack().cursor() == beforeCursor + 1 && renderer.shaderRevision() == shaderRevision,
+            "Dragging light intensity did not change real scene pixels in one transaction without compiling shaders.");
+        require(editor.undo() && world.findActor(pointId)->light->intensity == beforeIntensity,
+            "Light intensity Undo did not restore the original value.");
+        capture("lighting_ui_undo", true);
+        saveScenePixels(renderer, settings, output / "lighting_ui_undo.bmp");
+        require(scenePixels(output / "lighting_ui_undo.bmp", settings) == beforePixels,
+            "Light intensity Undo did not restore the original GPU image.");
+        require(editor.redo() && world.findActor(pointId)->light->intensity == afterIntensity,
+            "Light intensity Redo did not restore the edited value.");
+
+        // Pick the editor-only light marker after selecting a mesh, then frame
+        // the light using ordinary keyboard input over the live scene image.
+        invokeLightCommand("select " + std::to_string(lightReceiver));
+        capture("lighting_ui_pick_preroll", true);
+        click(projectPoint(0, 3, 1));
+        require(editor.selectedActor() == pointId, "Clicking the point-light viewport marker did not select the light.");
+        input.mouse = projectPoint(0, 3, 1);
+        ImGui::FocusWindow(findWindow("Scene Viewport##Interaction"));
+        pressKey(ImGuiKey_F);
+        require(std::abs(settings.cameraTarget[0]) < .001f &&
+            std::abs(settings.cameraTarget[1] - 3) < .001f && std::abs(settings.cameraTarget[2] - 1) < .001f,
+            "Frame Selected did not focus the meshless light Actor.");
+        pressKey(ImGuiKey_W);
+        const auto beforeTransform = world.findActor(pointId)->transform;
+        drag(projectPoint(.55f, 3, 1), projectPoint(1.25f, 3, 1), "lighting_ui_gizmo");
+        require(std::abs(world.findActor(pointId)->transform.position[0] - beforeTransform.position[0]) > .1f,
+            "The light Actor did not move with the viewport translation Gizmo.");
+        require(editor.undo() && std::memcmp(&world.findActor(pointId)->transform, &beforeTransform, sizeof(scene::Transform)) == 0,
+            "Light Gizmo Undo did not restore its transform.");
+
+        // Save As only needs mesh dependencies for the two receivers. The first
+        // Actor is deliberately a light to cover initialization/material state.
+        const auto lightScenePath = project.contentRoot / "Scenes" /
+            ("LightingGui-" + assets::assetIdText(assets::generateAssetId()) + ".rascene");
+        require(editor.saveSceneAs(lightScenePath, error), "Saving the light scene failed: " + error);
+        require(editor.openScene(lightScenePath, error), "Reopening the light scene failed: " + error);
+        require(world.actors.size() == 7 && world.actors.front().light,
+            "Light scene reload lost Actors or changed the first light into a mesh.");
+        for (std::size_t index = 0; index < ids.size(); ++index)
+            require(world.findActor(ids[index]) && world.findActor(ids[index])->light &&
+                world.findActor(ids[index])->light->type == types[index],
+                "A light type or Actor ID did not survive editor Save As/reopen.");
+        require(world.findActor(pointId)->light->intensity == afterIntensity,
+            "Edited light intensity did not survive editor Save As/reopen.");
+        invokeLightCommand("select " + std::to_string(ids[2]));
+        settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
+        settings.cameraDistance = 8;
+        for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+            imgui::setTheme(theme);
+            capture("lighting_ui_theme_preroll", true);
+            capture(theme == imgui::EditorTheme::Black ? "lighting_ui_black" : "lighting_ui_blue", true, true);
+            require(renderedUiText.find("Rect Light") != std::string::npos &&
+                renderedUiText.find("Width / Height (world units)") != std::string::npos,
+                "Rectangle light Details disappeared when changing theme.");
+        }
+        require(contents(savedScenePath) == savedSceneBytes, "Light Save As rewrote the previously open scene.");
+        require(editor.openScene(savedScenePath, error), "Restoring the prior scene failed: " + error);
+        world = savedWorld;
+        settings = savedSettings;
+        imgui::setTheme(savedTheme);
+        if (world.findActor(savedPrimary)) invokeLightCommand("select " + std::to_string(savedPrimary));
+        input.mouse = {-100, -100};
+        capture("lighting_ui_restored", true);
+        std::cout << "PASS: five light creation commands and identity-preserving Undo/Redo, live intensity GPU pixels, "
+            "property Undo/Redo, marker picking, frame selected, translation Gizmo/Undo, Save As/reopen and both themes.\n";
+    }
+    {
+        ImGuiContextScope active(context);
+        const auto savedWorld = world;
+        const auto savedSettings = settings;
+        const auto savedScenePath = editor.scenePath();
+        const auto savedBytes = contents(savedScenePath);
+        const auto savedTheme = imgui::currentTheme();
+        world = scene::World{};
+        settings = renderer::SceneSettings{};
+        settings.shadowMethod = renderer::ShadowMethod::Disabled;
+        settings.cameraDistance = 8;
+        const auto subject = world.createActor("Camera subject", assets::EngineCubeMeshId, assets::EngineDefaultMaterialId);
+        world.findActor(subject)->transform.position[1] = 1;
+        world.createActor("Camera floor", assets::EnginePlaneMeshId, assets::EngineDefaultMaterialId);
+        const auto freeCamera = renderer::resolveCamera(settings);
+        const auto id = editor.createCameraActor(settings, true);
+        require(id && world.findActor(id)->camera && !world.findActor(id)->light &&
+            world.findActor(id)->mesh.meshId == 0 && editor.selectedActor() == id,
+            "Create camera from view did not create/select a meshless Camera Actor.");
+        require(std::memcmp(world.findActor(id)->transform.position, freeCamera.pose.position, sizeof(freeCamera.pose.position)) == 0,
+            "Created camera did not match the current view position.");
+        require(editor.undo() && !world.findActor(id), "Camera creation Undo failed.");
+        require(editor.redo() && world.findActor(id)->camera, "Camera creation Redo lost identity/component.");
+        capture("camera_ui_ready", true);
+        capture("camera_ui_details", true, true);
+        require(renderedUiText.find("Vertical FOV (degrees)") != std::string::npos,
+            "Camera Details did not expose the live lens controls.");
+        auto* cameraDetails = findWindow("Details");
+        const float oldFov = world.findActor(id)->camera->verticalFovDegrees;
+        const auto fovRect = itemRect(cameraDetails, cameraDetails->GetID("Vertical FOV (degrees)"));
+        drag(fovRect.GetCenter(), {fovRect.GetCenter().x + 50, fovRect.GetCenter().y}, "camera_ui_fov");
+        const float changedFov = world.findActor(id)->camera->verticalFovDegrees;
+        require(changedFov != oldFov, "Real camera FOV widget did not edit lens.");
+        require(editor.undo() && world.findActor(id)->camera->verticalFovDegrees == oldFov, "Camera lens Undo failed.");
+        require(editor.redo() && world.findActor(id)->camera->verticalFovDegrees == changedFov, "Camera lens Redo failed.");
+        const auto dofCheckbox = itemRect(cameraDetails, cameraDetails->GetID("Enable depth of field"));
+        click(dofCheckbox.GetCenter());
+        require(world.findActor(id)->camera->depthOfField.enabled, "Real DOF checkbox did not enable the lens effect.");
+        require(editor.undo() && !world.findActor(id)->camera->depthOfField.enabled, "DOF enable Undo failed.");
+        require(editor.redo() && world.findActor(id)->camera->depthOfField.enabled, "DOF enable Redo failed.");
+        const auto focusControl = itemRect(cameraDetails, cameraDetails->GetID("Focus distance (m)"));
+        const float oldFocus=world.findActor(id)->camera->depthOfField.focusDistance;
+        const auto focusHistory=editor.undoStack().cursor();
+        drag(focusControl.GetCenter(), {focusControl.GetCenter().x+55,focusControl.GetCenter().y}, "camera_dof_focus");
+        const float editedFocus=world.findActor(id)->camera->depthOfField.focusDistance;
+        require(editedFocus!=oldFocus && editor.undoStack().cursor()==focusHistory+1,
+            "DOF focus drag did not create one lens transaction.");
+        require(editor.undo() && world.findActor(id)->camera->depthOfField.focusDistance==oldFocus,"DOF focus Undo failed.");
+        require(editor.redo() && world.findActor(id)->camera->depthOfField.focusDistance==editedFocus,"DOF focus Redo failed.");
+        capture("camera_dof_details",true,true);
+        require(editor.setDefaultCamera(id) && world.defaultCameraActor == id, "Set default camera failed.");
+        require(editor.undo() && world.defaultCameraActor == 0, "Default camera Undo failed.");
+        require(editor.redo() && world.defaultCameraActor == id, "Default camera Redo failed.");
+        world.findActor(id)->camera->aspectRatio = 16.f / 9.f;
+        require(editor.setCameraView(settings, id, false), "Cannot view scene camera.");
+        capture("camera_ui_view", true, true);
+        require(std::abs(float(settings.viewportWidth) / settings.viewportHeight - 16.f / 9.f) < .01f,
+            "Fixed camera aspect did not produce its requested image rectangle.");
+        const auto beforeView = world.findActor(id)->transform;
+        const auto image = editor.cameraImageRect();
+        input.mouse = {(image[0]+image[2])*.5f, (image[1]+image[3])*.5f};
+        capture("camera_ui_view_hover", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, true); };
+        capture("camera_ui_view_down", true);
+        input.mouse.x += 45;
+        capture("camera_ui_view_drag", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, false); };
+        capture("camera_ui_view_up", true);
+        require(std::memcmp(&beforeView, &world.findActor(id)->transform, sizeof(beforeView)) == 0,
+            "Read-only camera view changed the Actor transform.");
+        require(editor.setCameraView(settings, id, true), "Cannot pilot scene camera.");
+        const auto history = editor.undoStack().cursor();
+        input.mouse = {(image[0]+image[2])*.5f, (image[1]+image[3])*.5f};
+        capture("camera_ui_pilot_hover", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, true); };
+        capture("camera_ui_pilot_down", true);
+        for (int step=0; step<5; ++step) { input.mouse.x += 12; capture("camera_ui_pilot_drag", true); }
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, false); };
+        capture("camera_ui_pilot_up", true);
+        require(std::memcmp(&beforeView, &world.findActor(id)->transform, sizeof(beforeView)) != 0 &&
+            editor.undoStack().cursor() == history + 1, "Piloting did not produce exactly one transform transaction.");
+        require(editor.undo() && std::memcmp(&beforeView, &world.findActor(id)->transform, sizeof(beforeView)) == 0,
+            "Piloting Undo did not restore the Camera Actor.");
+        editor.returnToFreeCamera(settings);
+        const auto restored = renderer::resolveCamera(settings);
+        require(std::memcmp(&restored.pose, &freeCamera.pose, sizeof(freeCamera.pose)) == 0,
+            "Returning from a scene camera did not restore the free viewport.");
+        settings.cameraLens.projection = camera::Projection::Orthographic;
+        settings.cameraLens.orthographicHeight = 6;
+        capture("camera_ui_ortho", true);
+        // The selected Camera's Gizmo projects onto the center in this axial
+        // setup. Pick the visible lower front face, away from editor handles.
+        click(projectPoint(0,.4f,1));
+        require(editor.selectedActor() == subject, "Orthographic image picking does not match rendered geometry.");
+        editor.executeConsoleCommand("select " + std::to_string(id));
+        editor.showCameraPreview(id);
+        for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+            imgui::setTheme(theme);
+            capture("camera_ui_preview_warmup", true);
+            capture(theme == imgui::EditorTheme::Black ? "camera_ui_black" : "camera_ui_blue", true, true);
+            require(renderedUiText.find("Raster preview") != std::string::npos &&
+                renderer.previewTexture(renderer::PreviewSlot::Camera), "Independent camera preview is missing.");
+        }
+        editor.closeCameraPreview();
+        #include "CameraQuadEditorSmoke.inl"
+        const auto cameraPath = project.contentRoot / "Scenes" / "CameraGui.rascene";
+        require(editor.saveSceneAs(cameraPath,error), "Camera Save As failed: " + error);
+        require(editor.openScene(cameraPath,error), "Camera reopen failed: " + error);
+        require(world.defaultCameraActor == id && world.findActor(id)->camera &&
+            world.findActor(id)->camera->verticalFovDegrees == changedFov &&
+            world.findActor(id)->camera->depthOfField.enabled &&
+            world.findActor(id)->camera->depthOfField.focusDistance==editedFocus,
+            "Camera lens/default reference did not survive editor save/reopen.");
+        editor.executeConsoleCommand("select " + std::to_string(id));
+        require(editor.executeConsoleCommand("actor.delete").success && !world.findActor(id) && world.defaultCameraActor == 0,
+            "Deleting the default Camera left a dangling reference.");
+        require(editor.undo() && world.findActor(id)->camera && world.defaultCameraActor == id,
+            "Delete Undo did not restore Camera/default reference together.");
+        require(contents(savedScenePath) == savedBytes, "Camera Save As overwrote the previous scene.");
+        require(editor.openScene(savedScenePath,error),error);
+        world = savedWorld; settings = savedSettings; imgui::setTheme(savedTheme);
+        input.mouse = {-100,-100}; capture("camera_ui_restored",true);
+        std::cout << "PASS: Camera creation, real lens edit/Undo, default reference, fixed aspect, read-only view, "
+            "pilot gesture/Undo, free-view restoration, orthographic picking, preview themes, save/reopen and deletion/Undo.\n";
     }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);
     input.detach();

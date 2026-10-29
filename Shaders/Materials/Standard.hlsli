@@ -1,6 +1,8 @@
 // Shared surface function. Apply compiles both Forward and Deferred pipelines.
 // Inputs are per-actor material values in linear color space.
 // Surface fields: float3 albedo, float roughness, float metallic, float grid.
+// Optional mesh attributes: float2 uv0..uv3 and uint uvMask (bits 0..3).
+// Missing channels are zero; UV coordinates retain the source file convention.
 // World-space XZ grid: one-unit cells, stronger lines every five units.
 float GridLines(float2 position, float spacing, float halfWidth, float footprint)
 {
@@ -15,9 +17,9 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     {
         // Analytic pixel footprint also works for secondary reflection hits,
         // where screen derivatives are undefined across divergent ray paths.
-        float3 view = cameraPosition.xyz - worldPosition;
-        float footprint = max(0.002, length(view) * 0.93 / max(viewportDebug.y, 1.0));
-        footprint /= max(abs(dot(normalize(view), normal)), 0.12);
+        float3 view = CameraViewDirection(worldPosition);
+        float footprint = CameraPixelFootprint(worldPosition, viewportDebug.y);
+        footprint /= max(abs(dot(view, normal)), 0.12);
         float minor = GridLines(worldPosition.xz, 1.0, 0.018, footprint);
         float major = GridLines(worldPosition.xz, 5.0, 0.045, footprint);
         material.albedo *= lerp(0.55, 0.10, minor);

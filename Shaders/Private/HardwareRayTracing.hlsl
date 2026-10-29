@@ -36,7 +36,7 @@ void ResolveRealtimeGi(uint2 pixel)
     // Keep near-mirror reflections sharp. For rough surfaces filter only
     // neighbours on the same plane/normal and with similar material values.
     int radius = material.w < 0.12 ? 0 : 2;
-    float footprint = max(geometry.w / float(outputInfo.y), RAY_EPSILON);
+    float footprint = CameraPixelFootprint(position, float(outputInfo.y));
     float3 sum = 0.0;
     float total = 0.0;
     [loop] for (int y = -radius; y <= radius; ++y)
@@ -117,22 +117,20 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
     float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     // Start at the raster camera's near plane and stop at its far plane, so
     // primary visibility agrees with the scene depth used by editor overlays.
-    float4 nearPoint = mul(float4(ndc, 0.0, 1.0), inverseViewProjection);
-    float4 farPoint = mul(float4(ndc, 1.0, 1.0), inverseViewProjection);
-    float3 origin = nearPoint.xyz / nearPoint.w;
-    float3 farPosition = farPoint.xyz / farPoint.w;
-    float3 direction = normalize(farPosition - origin);
+    float3 origin, direction;
+    float farDistance;
+    CameraPrimaryRay(ndc,origin,direction,farDistance);
     float distance;
     float3 normal;
     int object;
     if (!TraceScene(origin, direction, distance, normal, object, false)
-        || distance > length(farPosition - origin))
+        || distance > farDistance)
     {
         hardwareOutput[thread.xy] = Background(uv);
         return;
     }
     RayTriangle tri = rayTriangles[-object - 2];
     float3 position = origin + direction * distance;
-    Surface material = MaterialAt(position, normal, tri.color, tri.properties);
+    Surface material = TriangleMaterialAt(position, normal, (uint)(-object - 2));
     hardwareOutput[thread.xy] = OutputSurface(position, normal, material, uv, false);
 }

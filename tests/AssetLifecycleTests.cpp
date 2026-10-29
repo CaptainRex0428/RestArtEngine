@@ -151,8 +151,9 @@ void reimportIdentityAndPersistence(const fs::path& root) {
         loaded.findMesh(f.id)->sourcePath == sourcePath && loaded.findMesh(f.id)->localBounds().maximum[0] == 4,
         "Reimported geometry and identity survive a fresh library load.");
     const auto published = bytes(f.asset);
-    require(f.library.saveMeshes(f.content, error) && bytes(f.asset) == published,
-        "Saving a reimported mesh preserves the published geometry and identity.");
+    const auto modified = fs::last_write_time(f.asset);
+    require(f.library.saveMeshes(f.content, error) && bytes(f.asset) == published && fs::last_write_time(f.asset) == modified,
+        "Reimport records the persistence baseline; an unchanged save does not rewrite the asset.");
 
     const auto newSource = root / fs::path(u8"Sources/替换模型.fbx");
     writeText(newSource, fbxTriangle);
@@ -240,7 +241,7 @@ void deletionAndReload(const fs::path& root) {
         "Reload after deletion succeeds: " + error);
     require(!loaded.findMesh(f.id) && !loaded.findMaterial(materialId), "Deleted identities stay absent after restart.");
     AssetRegistry registry; registry.setContentRoot(f.content);
-    require(registry.scan(error) && !registry.find(f.relative) && !registry.find(materialRelative),
+    require(registry.scan(error, false) && !registry.find(f.relative) && !registry.find(materialRelative),
         "A fresh registry scan contains neither deleted asset.");
     require(!deleteContentAsset(f.library, f.content, f.relative, error) && !error.empty(),
         "Deleting a missing file is a reported failure.");
@@ -298,7 +299,71 @@ void deletionReferencesAndFailures(const fs::path& root) {
         f.library.findMaterial(materialId) && bytes(materialPath) == materialBytes,
         "Duplicate material identities also refuse deletion.");
     fs::remove(materialDuplicate);
+    // v4 light-only scenes have no mesh component and must not block unrelated
+    // asset deletion; mixed v4 scenes still protect their mesh references.
+    world.createLight("Saved point", rae::scene::LightType::Point);
+    require(world.save(scenePath, f.library, error), "Save mixed v4 scene: " + error);
+    require(!deleteContentAsset(f.library, f.content, f.relative, error),
+        "A v4 scene retains mesh dependency protection.");
+    world.actors.erase(world.actors.begin());
+    require(world.save(scenePath, f.library, error), "Save light-only v4 scene: " + error);
+    world.createCamera("Saved camera");
+    require(world.save(scenePath, f.library, error), "Save light/camera-only v6 scene: " + error);
+    auto invalidCameraScene = Json::parse(bytes(scenePath));
+    invalidCameraScene["actors"].back()["mesh"] = {{"meshId", f.id}, {"materialId", materialId}};
+    writeText(scenePath, invalidCameraScene.dump());
+    require(!deleteContentAsset(f.library, f.content, f.relative, error),
+        "An ambiguous camera/mesh Actor cannot bypass asset dependency protection.");
+    require(world.save(scenePath, f.library, error), "Restore valid v6 scene: " + error);
+    require(deleteContentAsset(f.library, f.content, f.relative, error),
+        "A light/camera-only v6 scene permits deleting unused mesh assets: " + error);
+}
 
+void depthOfFieldSceneReferences(const fs::path& root) {
+    Fixture f(root);
+    const auto materialId = f.addMaterial();
+    const auto materialPath = f.content / "Materials" / AssetLibrary::materialAssetFileName(*f.library.findMaterial(materialId));
+    const auto materialRelative = utf8(materialPath.lexically_relative(f.content));
+    const auto meshBytes = bytes(f.asset), materialBytes = bytes(materialPath);
+    const auto geometryKey = f.library.findMesh(f.id)->geometryKey();
+    const auto provenance = f.library.findMesh(f.id)->sourcePath;
+    rae::scene::World world;
+    const auto meshActor = world.createActor("Mesh referenced alongside DOF", f.id, materialId);
+    const auto camera = world.createCamera("DOF camera");
+    world.findActor(camera)->camera->depthOfField.enabled = true;
+    world.defaultCameraActor = camera;
+    const auto scenePath = f.content / "Scenes/DepthOfField.rascene";
+    std::string error;
+    require(world.save(scenePath, f.library, error), "Save v7 DOF reference fixture: " + error);
+    const auto scene = Json::parse(bytes(scenePath));
+    require(scene.at("version") == 7, "DOF scene dependency fixture uses v7.");
+    require(!deleteContentAsset(f.library, f.content, f.relative, error) && error.find("referenced by saved scene") != std::string::npos,
+        "V7 scene is understood and protects its referenced mesh, rather than failing as an unknown schema.");
+    requireUnchanged(f, meshBytes, geometryKey, provenance, 1);
+    require(!deleteContentAsset(f.library, f.content, materialRelative, error) &&
+        error.find("referenced by saved scene") != std::string::npos && bytes(materialPath) == materialBytes,
+        "V7 scene protects referenced materials without changing their files.");
+    auto incompleteInventory = scene;
+    incompleteInventory["materials"] = Json::array(); incompleteInventory["meshes"] = Json::array();
+    writeText(scenePath, incompleteInventory.dump());
+    require(!deleteContentAsset(f.library, f.content, f.relative, error) &&
+        error.find("referenced by saved scene") != std::string::npos,
+        "V7 mesh Actor references are checked even when inventory arrays are incomplete.");
+    require(world.removeActor(meshActor) && world.save(scenePath, f.library, error), "Save camera-only scene after removing dependencies.");
+    const auto cameraOnly = Json::parse(bytes(scenePath));
+    auto ambiguous = cameraOnly;
+    ambiguous["actors"][0]["mesh"] = scene["actors"][0]["mesh"];
+    writeText(scenePath, ambiguous.dump());
+    require(!deleteContentAsset(f.library, f.content, f.relative, error), "Camera plus mesh remains an ambiguous protected dependency schema.");
+    requireUnchanged(f, meshBytes, geometryKey, provenance, 1);
+    auto unsupported = cameraOnly; unsupported["version"] = 8;
+    writeText(scenePath, unsupported.dump());
+    require(!deleteContentAsset(f.library, f.content, f.relative, error), "An unknown future scene schema remains protected.");
+    writeText(scenePath, cameraOnly.dump());
+    require(deleteContentAsset(f.library, f.content, f.relative, error), "V7 camera-only scene does not invent mesh dependencies: " + error);
+    require(deleteContentAsset(f.library, f.content, materialRelative, error), "V7 camera-only scene does not invent material dependencies: " + error);
+    require(Json::parse(bytes(scenePath)) == cameraOnly && bytes(f.source) == triangle,
+        "Deleting unrelated assets preserves the authored DOF camera and external source.");
 }
 
 void boundaries(const fs::path& root) {
@@ -363,6 +428,7 @@ int main() {
         reimportFailures(temporary.root / "ReimportFailure");
         deletionAndReload(temporary.root / "Delete");
         deletionReferencesAndFailures(temporary.root / "References");
+        depthOfFieldSceneReferences(temporary.root / "DepthOfFieldReferences");
         boundaries(temporary.root / "Boundaries");
         std::cout << "Asset lifecycle tests passed: " << checks << " checks\n";
         return 0;

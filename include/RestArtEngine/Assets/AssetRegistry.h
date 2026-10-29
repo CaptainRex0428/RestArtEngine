@@ -69,7 +69,8 @@ public:
 
     // Full rescan of the content root. Missing roots are not an error: the
     // registry simply becomes empty.
-    bool scan(std::string& error);
+    // Reference checks can request metadata only, without decoding or rendering previews.
+    bool scan(std::string& error, bool loadPreviews = true);
 
     [[nodiscard]] const std::vector<AssetEntry>& entries() const noexcept { return entries_; }
     // Every folder under the root, root ("") first, then sorted depth-first.

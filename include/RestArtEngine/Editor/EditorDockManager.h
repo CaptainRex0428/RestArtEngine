@@ -12,7 +12,7 @@ enum class EditorPanel { Outliner, Scene, Details, Settings, Content, Viewport, 
 class EditorDockManager {
 public:
     static const char* panelName(EditorPanel panel);
-    void beginFrame(float toolbarHeight);
+    void beginFrame(float toolbarHeight, float bottomBarHeight = 0);
     // Preserve the dock tree while only an independent tool window is drawn.
     void keepAlive();
     void drawPanel(EditorPanel panel, const std::function<void()>& contents);

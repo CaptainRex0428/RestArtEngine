@@ -16,9 +16,11 @@
     void beginGeometryFrame(const scene::World& world, const assets::AssetLibrary& assets) {
         ++geometryStatistics.frameId;
         geometryStatistics.sceneTriangles = 0;
-        for (const auto& actor : world.actors)
+        for (const auto& actor : world.actors) {
+            if (actor.light) continue;
             if (const auto* mesh = assets.findMesh(actor.mesh.meshId))
                 geometryStatistics.sceneTriangles += static_cast<std::uint64_t>(mesh->indices.size() / 3);
+        }
     }
 
     void endGeometrySample() {

@@ -201,7 +201,8 @@ void MeshQueryCache::retain(const AssetLibrary& library) {
     });
 }
 bool MeshQueryCache::intersect(const MeshAsset& mesh, const MeshRay& ray, float maximumDistance,
-                              bool twoSided, float epsilon, MeshRayHit& hit, bool cullFront) {
+                              bool twoSided, float epsilon, MeshRayHit& hit, bool cullFront,
+                              std::span<const MeshFaceState> slotStates) {
     impl_->triangleTests = 0;
     if (!std::isfinite(maximumDistance) || maximumDistance < 0 || !std::isfinite(epsilon) || epsilon < 0) return false;
     for (int axis = 0; axis < 3; ++axis)
@@ -239,7 +240,14 @@ bool MeshQueryCache::intersect(const MeshAsset& mesh, const MeshRay& ray, float 
                 ++impl_->triangleTests;
                 float distance = 0;
                 const auto offset = bvh.triangles[i];
-                if (triangleHit(mesh, offset, ray, twoSided, cullFront, epsilon, distance) &&
+                bool triangleTwoSided = twoSided, triangleCullFront = cullFront;
+                if (!slotStates.empty()) {
+                    const auto slot = mesh.materialSlotForIndex(offset);
+                    if (slot >= slotStates.size() || !slotStates[slot].visible) continue;
+                    triangleTwoSided = slotStates[slot].cull == MaterialCullMode::Off;
+                    triangleCullFront = slotStates[slot].cull == MaterialCullMode::Front;
+                }
+                if (triangleHit(mesh, offset, ray, triangleTwoSided, triangleCullFront, epsilon, distance) &&
                     (distance < closest || (any && distance == closest && offset < triangleOffset))) {
                     any = true; closest = distance; triangleOffset = offset;
                 }

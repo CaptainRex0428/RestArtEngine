@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 namespace rae::assets {
 
@@ -12,6 +13,7 @@ namespace rae::assets {
 // keeps its original distance parameter, including under non-uniform scales.
 struct MeshRay { std::array<float, 3> origin{}, direction{}; };
 struct MeshRayHit { float distance = 0; std::uint32_t triangleOffset = 0; };
+struct MeshFaceState { MaterialCullMode cull = MaterialCullMode::Back; bool visible = true; };
 
 // CPU-only acceleration; stores no borrowed vertex buffers. Geometry edits must
 // follow MeshAsset's markGeometryModified() contract. Each editor owns a cache.
@@ -22,7 +24,8 @@ public:
     MeshQueryCache(const MeshQueryCache&) = delete;
     MeshQueryCache& operator=(const MeshQueryCache&) = delete;
     bool intersect(const MeshAsset&, const MeshRay&, float maximumDistance,
-                   bool twoSided, float determinantEpsilon, MeshRayHit&, bool cullFront = false);
+                   bool twoSided, float determinantEpsilon, MeshRayHit&, bool cullFront = false,
+                   std::span<const MeshFaceState> slotStates = {});
     // Discard caches for removed/replaced geometry, without scanning vertices.
     void retain(const AssetLibrary&);
     void clear();

@@ -6,6 +6,8 @@ cbuffer SceneConstants : register(b0)
     float4 lightDirectionIntensity;
     float4 parameters;
     float4 viewportDebug;
+    float4 cameraForward; // xyz forward, w orthographic
+    float4 cameraLensParams; // near, far, ortho height, tan(vertical FOV / 2)
 };
 
 cbuffer ObjectConstants : register(b1)
@@ -42,6 +44,9 @@ struct RayTriangle
     float4 properties;
 };
 StructuredBuffer<RayTriangle> rayTriangles : register(t4);
+// UV vertices are shared by mesh instances; only UV-bearing triangles have lookup records.
+StructuredBuffer<float4> rayUvVertices : register(t10);
+StructuredBuffer<uint4> rayUvTriangles : register(t11);
 cbuffer ShadowConstants : register(b3)
 {
     row_major float4x4 lightViewProjection;
@@ -71,10 +76,38 @@ static const float PI = 3.14159265359;
 
 static const float RAY_EPSILON = 0.003;
 
+float CameraDepth(float3 position) { return dot(position - cameraPosition.xyz, cameraForward.xyz); }
+float3 CameraViewDirection(float3 position) {
+    return cameraForward.w > 0.5 ? -cameraForward.xyz : normalize(cameraPosition.xyz - position);
+}
+float CameraPixelFootprint(float3 position, float imageHeight) {
+    float worldHeight = cameraForward.w > 0.5 ? cameraLensParams.z
+        : 2.0 * max(CameraDepth(position), cameraLensParams.x) * cameraLensParams.w;
+    return max(worldHeight / max(imageHeight, 1.0), RAY_EPSILON);
+}
+void CameraPrimaryRay(float2 ndc, out float3 origin, out float3 direction, out float farDistance) {
+    // Extract right/up divided by projection scale without subtracting large
+    // world-space positions. This also avoids far-plane inverse precision loss.
+    float3 horizontal = float3(viewProjection[0][0],viewProjection[1][0],viewProjection[2][0]);
+    float3 vertical = float3(viewProjection[0][1],viewProjection[1][1],viewProjection[2][1]);
+    horizontal /= max(dot(horizontal,horizontal),1e-30);
+    vertical /= max(dot(vertical,vertical),1e-30);
+    float3 offset = horizontal*ndc.x+vertical*ndc.y;
+    bool orthographic = cameraForward.w > 0.5;
+    direction = orthographic ? cameraForward.xyz : normalize(cameraForward.xyz+offset);
+    origin = cameraPosition.xyz + cameraForward.xyz*cameraLensParams.x
+        + offset*(orthographic ? 1.0 : cameraLensParams.x);
+    farDistance = (cameraLensParams.y-cameraLensParams.x)/max(dot(direction,cameraForward.xyz),1e-6);
+}
+
+#include "Lighting.hlsli"
+
 struct VertexInput
 {
     float3 position : POSITION;
     float3 normal : NORMAL;
+    float4 uv01 : TEXCOORD0;
+    float4 uv23 : TEXCOORD1;
 };
 
 struct GeometryOutput
@@ -82,6 +115,8 @@ struct GeometryOutput
     float4 position : SV_POSITION;
     float3 worldPosition : TEXCOORD0;
     float3 worldNormal : TEXCOORD1;
+    float4 uv01 : TEXCOORD2;
+    float4 uv23 : TEXCOORD3;
 };
 
 struct FullscreenOutput
@@ -96,6 +131,9 @@ struct Surface
     float roughness;
     float metallic;
     float grid;
+    // Imported coordinates in source convention; absent channels are zero.
+    float2 uv0, uv1, uv2, uv3;
+    uint uvMask;
 };
 
 #include "../Materials/Standard.hlsli"
@@ -106,6 +144,7 @@ GeometryOutput VSMain(VertexInput input)
     output.worldPosition = mul(float4(input.position, 1.0), worldMatrix).xyz;
     output.position = mul(float4(output.worldPosition, 1.0), viewProjection);
     output.worldNormal = normalize(mul(float4(input.normal, 0.0), normalMatrix).xyz);
+    output.uv01 = input.uv01; output.uv23 = input.uv23;
     return output;
 }
 
@@ -137,18 +176,50 @@ bool AcceptsMaterialFace(float facing, float4 properties, bool shadowRay)
     return acceptBack ? facing > 0.0 : facing < 0.0;
 }
 
-Surface MaterialAt(float3 position, float3 normal, float4 color, float4 properties)
+Surface MaterialAtUv(float3 position, float3 normal, float4 color, float4 properties,
+                     float4 uv01, float4 uv23, uint uvMask)
 {
-    Surface material;
+    Surface material = (Surface)0;
     material.albedo = max(color.rgb, 0.0);
     material.roughness = properties.x;
     material.metallic = properties.y;
     material.grid = (float)((uint)properties.w & 1u);
+    material.uv0 = uv01.xy; material.uv1 = uv01.zw;
+    material.uv2 = uv23.xy; material.uv3 = uv23.zw; material.uvMask = uvMask;
     material = EvaluateMaterial(position, normal, material);
     material.albedo = max(material.albedo, 0.0);
     material.roughness = clamp(material.roughness, 0.045, 1.0);
     material.metallic = saturate(material.metallic);
     return material;
+}
+
+Surface MaterialAt(float3 position, float3 normal, float4 color, float4 properties)
+{
+    return MaterialAtUv(position, normal, color, properties, 0, 0, 0);
+}
+
+Surface TriangleMaterialAt(float3 position, float3 normal, uint triangleIndex)
+{
+    RayTriangle tri = rayTriangles[triangleIndex];
+    float4 uv01 = 0, uv23 = 0;
+    uint mask = 0;
+    uint token = asuint(tri.color.w);
+    if (token != 0)
+    {
+        uint4 attributes = rayUvTriangles[token - 1];
+        float3 edge1 = tri.position1 - tri.position0, edge2 = tri.position2 - tri.position0;
+        float3 area = cross(edge1, edge2), local = position - tri.position0;
+        float inverseArea = rcp(max(dot(area, area), 1e-30));
+        float u = dot(cross(local, edge2), area) * inverseArea;
+        float v = dot(cross(edge1, local), area) * inverseArea;
+        float3 weights = float3(1.0 - u - v, u, v);
+        uv01 = rayUvVertices[attributes.x * 2] * weights.x + rayUvVertices[attributes.y * 2] * weights.y +
+            rayUvVertices[attributes.z * 2] * weights.z;
+        uv23 = rayUvVertices[attributes.x * 2 + 1] * weights.x + rayUvVertices[attributes.y * 2 + 1] * weights.y +
+            rayUvVertices[attributes.z * 2 + 1] * weights.z;
+        mask = attributes.w;
+    }
+    return MaterialAtUv(position, normal, tri.color, tri.properties, uv01, uv23, mask);
 }
 
 float3 Environment(float3 direction, float roughness)
@@ -162,7 +233,7 @@ float3 Environment(float3 direction, float roughness)
     // Broad cool studio strip, visible as a second highlight on polished metal.
     float strip = pow(saturate(dot(direction, normalize(float3(1.0, 0.45, 0.7)))), lerp(72.0, 2.0, roughness));
     sky += float3(0.32, 0.50, 0.80) * strip * (1.0 - roughness * 0.55);
-    return sky;
+    return sky * max(skyColor.rgb, 0.0);
 }
 
 #if defined(RAE_HARDWARE_RAYTRACING)
@@ -361,7 +432,7 @@ float ShadowMapPCSSVisibility(float2 uv, float depth, float2 texel, float cascad
 float ShadowMapVisibility(float3 position, float3 normal)
 {
     const bool useCascade = cascadeParameters.y > 0.5;
-    const bool secondCascade = useCascade && distance(position, cameraPosition.xyz) > cascadeParameters.x;
+    const bool secondCascade = useCascade && CameraDepth(position) > cascadeParameters.x;
     const float cascade = secondCascade ? 1.0 : 0.0;
     float4 shadowClip = secondCascade ?
         mul(float4(position + normal * shadowParameters.z, 1.0), lightViewProjectionCascade1) :
@@ -485,29 +556,62 @@ float3 Fresnel(float cosine, float3 reflectance)
     return reflectance + (1.0 - reflectance) * factor;
 }
 
+float SceneLightVisibility(uint index, SceneLight source, SceneLightSample lightSample,
+    float3 position, float3 normal, float2 uv, bool deferred)
+{
+    if (source.spotShadow.z < 0.5) return 1.0;
+#if defined(RAE_HARDWARE_RAYTRACING)
+    if (outputInfo.w == 0) return 1.0;
+#else
+    if (viewportDebug.w > 1.5) return 1.0;
+    if (source.positionType.w == 0.0 &&
+        (viewportDebug.w > 0.5 || (int)index == (int)lightInfo.z))
+        return ShadowVisibility(position, normal, lightSample.direction, uv, deferred);
+    // Only the selected sun owns the raster map. Other lights need actual
+    // scene rays, selected explicitly by the AnalyticRay shadow setting.
+    if (viewportDebug.w < 0.5) return 1.0;
+#endif
+    float hitDistance; float3 hitNormal; int hitObject;
+    return !TraceScene(position + normal * RAY_EPSILON, lightSample.direction,
+        hitDistance, hitNormal, hitObject, true) || hitDistance >= lightSample.distance - RAY_EPSILON ? 1.0 : 0.0;
+}
+
 float3 ShadeSurfaceContributions(float3 position, float3 normal, float3 view, Surface material, float2 uv,
     bool deferred, out float3 directDiffuse, out float3 directSpecular)
 {
-    float3 light = normalize(lightDirectionIntensity.xyz);
-    float3 halfway = normalize(light + view);
     float nv = max(dot(normal, view), 0.001);
-    float nl = saturate(dot(normal, light));
-    float nh = saturate(dot(normal, halfway));
-    float vh = saturate(dot(view, halfway));
     float alpha = material.roughness * material.roughness;
     float alphaSquared = alpha * alpha;
-    float denominator = nh * nh * (alphaSquared - 1.0) + 1.0;
-    float distribution = alphaSquared / max(PI * denominator * denominator, 0.000001);
     float k = (material.roughness + 1.0) * (material.roughness + 1.0) / 8.0;
-    float geometry = (nv / (nv * (1.0 - k) + k)) * (nl / max(nl * (1.0 - k) + k, 0.001));
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
-    float3 fresnel = Fresnel(vh, f0);
-    float3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.001);
-    float3 diffuse = (1.0 - fresnel) * (1.0 - material.metallic) * material.albedo / PI;
-    float visibility = ShadowVisibility(position, normal, light, uv, deferred);
-    float3 irradiance = nl * max(lightDirectionIntensity.w, 0.0) * float3(1.0, 0.87, 0.72) * visibility;
-    directDiffuse = diffuse * irradiance;
-    directSpecular = specular * irradiance;
+    directDiffuse = 0.0;
+    directSpecular = 0.0;
+    [loop] for (uint index = 0; index < min((uint)lightInfo.x, 32u); ++index)
+    {
+        SceneLight source = sceneLights[index];
+        [loop] for (uint sampleIndex = 0; sampleIndex < SceneLightSampleCount(source); ++sampleIndex)
+        {
+            SceneLightSample lightSample;
+            if (!SampleSceneLight(source, sampleIndex, position, lightSample)) continue;
+            float nl = saturate(dot(normal, lightSample.direction));
+            if (nl <= 0.0) continue;
+            float3 sum = lightSample.direction + view;
+            if (dot(sum, sum) < 1e-12) continue;
+            float3 halfway = normalize(sum);
+            float nh = saturate(dot(normal, halfway));
+            float vh = saturate(dot(view, halfway));
+            float denominator = nh * nh * (alphaSquared - 1.0) + 1.0;
+            float distribution = alphaSquared / max(PI * denominator * denominator, 0.000001);
+            float geometry = (nv / (nv * (1.0 - k) + k)) * (nl / max(nl * (1.0 - k) + k, 0.001));
+            float3 fresnel = Fresnel(vh, f0);
+            float3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.001);
+            float3 diffuse = (1.0 - fresnel) * (1.0 - material.metallic) * material.albedo / PI;
+            float visibility = SceneLightVisibility(index, source, lightSample, position, normal, uv, deferred);
+            float3 irradiance = nl * lightSample.irradiance * visibility;
+            directDiffuse += diffuse * irradiance;
+            directSpecular += specular * irradiance;
+        }
+    }
     float3 direct = directDiffuse + directSpecular;
 
 #if !defined(RAE_HARDWARE_RAYTRACING)
@@ -541,7 +645,7 @@ float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface materia
 
 float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool deferred)
 {
-    float3 view = normalize(cameraPosition.xyz - position);
+    float3 view = CameraViewDirection(position);
     float3 color = ShadeSurface(position, normal, view, material, uv, deferred);
 #if defined(RAE_HARDWARE_RAYTRACING)
     if (traceOptions.x > 0.5)
@@ -561,7 +665,11 @@ float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool d
             float4 hitColor = hitObject >= 0 ? rayObjects[hitObject].color : rayTriangles[-hitObject - 2].color;
             float4 hitProperties = hitObject >= 0 ? rayObjects[hitObject].properties : rayTriangles[-hitObject - 2].properties;
 #endif
-            Surface hitMaterial = MaterialAt(hitPosition, hitNormal, hitColor, hitProperties);
+            Surface hitMaterial;
+            if (hitObject <= -2)
+                hitMaterial = TriangleMaterialAt(hitPosition, hitNormal, (uint)(-hitObject - 2));
+            else
+                hitMaterial = MaterialAt(hitPosition, hitNormal, hitColor, hitProperties);
             float3 reflectedColor = ShadeSurface(hitPosition, hitNormal, -ray, hitMaterial, uv, deferred);
             float3 f0 = lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic);
             float3 weight = Fresnel(saturate(dot(normal, view)), f0) * (1.0 - material.roughness) * (1.0 - material.roughness);
@@ -594,15 +702,14 @@ float4 OutputSurface(float3 position, float3 normal, Surface material, float2 uv
         return float4(pow(saturate(lerp(float3(0.04, 0.04, 0.04), material.albedo, material.metallic)), 1.0 / 2.2), 1.0);
     if (viewportDebug.z > 7.5 && viewportDebug.z < 8.5)
     {
-        // clip.w equals positive view-space depth for the RH perspective camera.
-        // White is 100 world units (metres), black is the camera plane.
-        float linearDepth = saturate(mul(float4(position, 1.0), viewProjection).w / 100.0);
+        // A fixed 100m display scale works for both projection families.
+        float linearDepth = saturate(CameraDepth(position) / 100.0);
         return float4(linearDepth.xxx, 1.0);
     }
     if (viewportDebug.z > 8.5 && viewportDebug.z < 10.5)
     {
         float3 directDiffuse, directSpecular;
-        ShadeSurfaceContributions(position, normal, normalize(cameraPosition.xyz - position), material,
+        ShadeSurfaceContributions(position, normal, CameraViewDirection(position), material,
             uv, deferred, directDiffuse, directSpecular);
         return float4(DisplayColor(viewportDebug.z < 9.5 ? directDiffuse : directSpecular), 1.0);
     }
@@ -619,7 +726,7 @@ float4 Background(float2 uv)
     if (cameraPosition.w > 0.5) return float4(0.0, 0.0, 0.0, 1.0);
     float3 sky = lerp(float3(0.035, 0.055, 0.09), float3(0.15, 0.22, 0.32), saturate(uv.y));
     float vignette = 1.0 - 0.22 * dot(uv - 0.5, uv - 0.5);
-    return float4(DisplayColor(sky * vignette), 1.0);
+    return float4(DisplayColor(sky * vignette * max(skyColor.rgb, 0.0)), 1.0);
 }
 
 float4 PSBackground(FullscreenOutput input) : SV_TARGET
@@ -636,7 +743,8 @@ float3 SurfaceNormal(float3 normal, bool frontFace)
 float4 PSForward(GeometryOutput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
 {
     float3 normal = SurfaceNormal(input.worldNormal, frontFace);
-    Surface material = MaterialAt(input.worldPosition, normal, objectColor, objectParameters);
+    Surface material = MaterialAtUv(input.worldPosition, normal, objectColor, objectParameters,
+        input.uv01, input.uv23, (uint)objectColor.w);
     return OutputSurface(input.worldPosition, normal, material,
         input.position.xy / max(viewportDebug.xy, 1.0), false);
 }
@@ -652,7 +760,8 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 {
     GBufferOutput output;
     float3 normal = SurfaceNormal(input.worldNormal, frontFace);
-    Surface material = MaterialAt(input.worldPosition, normal, objectColor, objectParameters);
+    Surface material = MaterialAtUv(input.worldPosition, normal, objectColor, objectParameters,
+        input.uv01, input.uv23, (uint)objectColor.w);
     output.albedo = float4(material.albedo, material.roughness);
     output.normal = float4(normal, material.metallic);
     output.position = float4(input.worldPosition, 1.0);
@@ -666,7 +775,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     if (position.w < 0.5) return Background(input.uv);
     float4 albedo = albedoBuffer.Load(pixel);
     float4 normal = normalBuffer.Load(pixel);
-    Surface material;
+    Surface material = (Surface)0;
     material.albedo = albedo.rgb;
     material.roughness = albedo.a;
     material.metallic = normal.a;
@@ -742,3 +851,5 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
     else if (hiddenEdge > 0.5 && dashOn) alpha = outlineColor.a * 0.9;
     return alpha > 0.0 ? float4(outlineColor.rgb, alpha) : float4(0.0, 0.0, 0.0, 0.0);
 }
+
+#include "DepthOfField.hlsli"

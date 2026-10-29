@@ -90,6 +90,7 @@ RestArtEngine.panels.ini
 /docs/*
 !/docs/Architecture.md
 !/docs/AssetFormat.md
+!/docs/Camera.md
 !/docs/Importing.md
 !/docs/EditorGuide.md
 !/docs/EngineDistribution.md
@@ -97,6 +98,7 @@ RestArtEngine.panels.ini
 !/docs/GuiDevelopment.md
 !/docs/ProjectManagement.md
 !/docs/RenderingDevelopment.md
+!/docs/Lighting.md
 !/docs/HardwareRayTracing.md
 !/docs/GlobalIllumination.md
 !/docs/Diagnostics.md

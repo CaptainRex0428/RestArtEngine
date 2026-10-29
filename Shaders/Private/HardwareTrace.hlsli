@@ -4,9 +4,14 @@ cbuffer HardwareConstants : register(b5)
 {
     row_major float4x4 inverseViewProjection;
     uint4 outputInfo; // width, height, triangle count, hardware shadows enabled
-    float4 traceOptions; // reflections enabled, sample cap, indirect diffuse intensity, reserved
+    float4 traceOptions; // reflections enabled, realtime history cap, indirect diffuse intensity, reserved
     uint4 accumulationInfo; // sample offset, sample batch, max surface bounces, GI method
     uint4 giOptions; // update mode, first-surface lobe mask, realtime pass, independent sample sequence
+    float4 areaLightCenter; // xyz centre, w enabled
+    float4 areaLightU; // xyz half-axis U, w environment scale
+    float4 areaLightV; // xyz half-axis V, w reserved
+    float4 areaLightRadiance; // xyz emitted linear radiance, w reserved
+    float4 thinLens; // focus metres, aperture radius metres, enabled, reserved
 };
 RaytracingAccelerationStructure hardwareScene : register(t7);
 StructuredBuffer<float3> hardwareVertexNormals : register(t8);

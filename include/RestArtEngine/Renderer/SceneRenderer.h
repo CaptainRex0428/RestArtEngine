@@ -4,10 +4,12 @@
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Camera/Camera.h>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,7 +33,14 @@ struct RendererCacheStats {
 enum class RenderPath { Forward, Deferred };
 
 // Each tool owns its preview image; rendering another slot never replaces it.
-enum class PreviewSlot { MaterialEditor, AssetDetails, SceneThumbnail };
+enum class PreviewSlot { MaterialEditor, AssetDetails, SceneThumbnail, Camera, Viewport0, Viewport1, Viewport2, Viewport3 };
+
+inline bool depthOfFieldEligible(const camera::Lens& lens) {
+    if (!camera::valid(lens) || !lens.depthOfField.enabled || lens.projection != camera::Projection::Perspective) return false;
+    const float focalLength = lens.depthOfField.sensorHeightMm*.001f /
+        (2.0f*std::tan(lens.verticalFovDegrees*.008726646259971648f));
+    return lens.depthOfField.focusDistance > focalLength + .0001f;
+}
 
 // Direct-light shadowing strategy. Raster variants share the depth resource;
 // GTAO and ContactShadow additionally use the Deferred G-buffer and fall back
@@ -74,6 +83,10 @@ struct SceneSettings {
     // Orbit focus point. Yaw/pitch/distance are relative to this target, so
     // middle-mouse panning translates it and the camera follows.
     float cameraTarget[3] = {0.0f, 1.0f, 0.0f};
+    camera::Lens cameraLens;
+    std::optional<camera::Pose> cameraPose;
+    // Logical image stream identity, distinct from the authored camera identity.
+    std::uint64_t viewId = 1;
     // Orbit pitch limits. Negative pitch lets the camera look at the scene from
     // below; the pole margin keeps the look-at up vector from degenerating.
     static constexpr float minPitch = -1.55f;
@@ -106,6 +119,14 @@ struct SceneSettings {
     bool outlineFrontObjects = false;
 
 };
+
+inline camera::Camera resolveCamera(const SceneSettings& settings) {
+    if (settings.cameraPose) return {*settings.cameraPose, settings.cameraLens};
+    return camera::orbitCamera(settings.cameraYaw,
+        std::clamp(settings.cameraPitch, SceneSettings::minPitch, SceneSettings::maxPitch),
+        std::isfinite(settings.cameraDistance) && settings.cameraDistance > 0 ? settings.cameraDistance : 6.0f,
+        settings.cameraTarget, settings.cameraLens);
+}
 
 // Native D3D11 preview renderer. The broader RHI remains separate until its
 // resource/command interfaces are implemented by the other graphics APIs.
@@ -155,6 +176,16 @@ public:
     // Borrowed SRV until a successful resize of the same slot or shutdown.
     // Requested size is bounded to the available scene target dimensions.
     [[nodiscard]] void* previewTexture(PreviewSlot slot) const;
+    // Raster tool view; call before the main scene render, like other previews.
+    bool renderCameraPreview(const scene::World& world, const assets::AssetLibrary& assets,
+        const camera::Camera& camera, std::uint32_t width, std::uint32_t height,
+        std::string& error, float exposure = 1.0f, PreviewSlot slot = PreviewSlot::Camera);
+    // Independent raster image for an inactive viewport. Render before the main
+    // view; caller keeps a stable slot per viewport and sizes the shared scratch
+    // target to contain the largest requested image. Editor overlays are retained.
+    bool renderViewportPreview(const SceneSettings& settings, const scene::World& world,
+        const assets::AssetLibrary& assets, const assets::MaterialAsset* materialOverride,
+        std::uint32_t width, std::uint32_t height, std::string& error, PreviewSlot slot);
     bool readPreviewPixels(PreviewSlot slot, std::vector<std::uint8_t>& pixels,
                            std::uint32_t& width, std::uint32_t& height, std::string& error) const;
     // Compatibility helpers always address the MaterialEditor slot.
@@ -239,7 +270,7 @@ private:
 private:
     bool renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
                             const assets::AssetLibrary& assets, const assets::MaterialAsset* materialOverride,
-                            std::uint32_t size, std::string& error, PreviewSlot slot);
+                            std::uint32_t size, std::string& error, PreviewSlot slot, std::uint32_t height = 0);
 };
 
 } // namespace rae::renderer

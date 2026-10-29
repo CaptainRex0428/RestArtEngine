@@ -12,7 +12,9 @@
 
 #include "RestArtEngine/Renderer/SceneRenderer.h"
 #include "RestArtEngine/Renderer/SelectionOutline.h"
+#include "RestArtEngine/Renderer/Lighting.h"
 #include "D3D12/HardwareRayTracing.h"
+#include "MeshAttributes.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
 #include "RestArtEngine/Core/TraceProfiler.h"
@@ -57,8 +59,10 @@ struct alignas(16) SceneConstants {
     XMFLOAT4 lightDirectionIntensity;
     XMFLOAT4 parameters;
     XMFLOAT4 viewportDebug;
+    XMFLOAT4 cameraForward; // xyz forward, w orthographic
+    XMFLOAT4 cameraLensParams; // near, far, ortho height, tan(vertical FOV / 2)
 };
-static_assert(sizeof(SceneConstants) == 144);
+static_assert(sizeof(SceneConstants) == 176);
 struct alignas(16) ObjectConstants {
     XMFLOAT4X4 worldMatrix, normalMatrix;
     XMFLOAT4 color, parameters;
@@ -70,6 +74,8 @@ struct alignas(16) RayObject {
 struct alignas(16) RayConstants { XMFLOAT4 info; RayObject objects[32]; };
 struct alignas(16) GlobalIlluminationConstants { XMFLOAT4 viewport; };
 static_assert(sizeof(GlobalIlluminationConstants) == 16);
+struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
+static_assert(sizeof(DepthOfFieldConstants) == 32);
 struct alignas(16) RayTriangle {
     XMFLOAT3 position0;
     XMFLOAT3 position1;
@@ -168,12 +174,16 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ShadowConstants", D3D_SIT_CBUFFER, 3, sizeof(ShadowConstants)},
         {"OutlineConstants", D3D_SIT_CBUFFER, 4, sizeof(OutlineConstants)},
         {"GlobalIlluminationConstants", D3D_SIT_CBUFFER, 6, sizeof(GlobalIlluminationConstants)},
+        {"LightingConstants", D3D_SIT_CBUFFER, 7, sizeof(LightingConstants)},
+        {"DepthOfFieldConstants", D3D_SIT_CBUFFER, 8, sizeof(DepthOfFieldConstants)},
         {"albedoBuffer", D3D_SIT_TEXTURE, 0, 0}, {"normalBuffer", D3D_SIT_TEXTURE, 1, 0}, {"positionBuffer", D3D_SIT_TEXTURE, 2, 0},
         {"shadowMap", D3D_SIT_TEXTURE, 3, 0}, {"gbufferSampler", D3D_SIT_SAMPLER, 0, 0},
         {"shadowSampler", D3D_SIT_SAMPLER, 1, 0},
         {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0},
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
-        {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0}
+        {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
+        {"dofColor", D3D_SIT_TEXTURE, 12, 0},
+        {"rayUvVertices", D3D_SIT_STRUCTURED, 10, 0}, {"rayUvTriangles", D3D_SIT_STRUCTURED, 11, 0}
     };
     for (UINT i = 0; i < desc.BoundResources; ++i) {
         D3D11_SHADER_INPUT_BIND_DESC binding{}; reflection->GetResourceBindingDesc(i, &binding);
@@ -197,6 +207,16 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         if (expected->type == D3D_SIT_STRUCTURED && binding.Dimension != D3D_SRV_DIMENSION_BUFFEREX && binding.Dimension != D3D_SRV_DIMENSION_BUFFER) {
             error = std::string(entry) + ": rayTriangles requires a structured buffer SRV."; return false;
         }
+        if (expected->type == D3D_SIT_STRUCTURED && (binding.BindPoint == 10 || binding.BindPoint == 11)) {
+            auto* resource = reflection->GetConstantBufferByName(binding.Name);
+            auto* element = resource->GetVariableByIndex(0);
+            D3D11_SHADER_VARIABLE_DESC variable{}; D3D11_SHADER_TYPE_DESC type{};
+            if (FAILED(element->GetDesc(&variable)) || FAILED(element->GetType()->GetDesc(&type)) ||
+                variable.Size != 16 || type.Class != D3D_SVC_VECTOR || type.Rows != 1 || type.Columns != 4 ||
+                type.Type != (binding.BindPoint == 10 ? D3D_SVT_FLOAT : D3D_SVT_UINT)) {
+                error = std::string(entry) + ": UV buffers require float4 / uint4 elements."; return false;
+            }
+        }
         if (expected->size) {
             D3D11_SHADER_BUFFER_DESC cb{};
             reflection->GetConstantBufferByName(binding.Name)->GetDesc(&cb);
@@ -208,6 +228,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"SceneConstants","viewProjection",0,64}, {"SceneConstants","cameraPosition",64,16},
         {"SceneConstants","baseColor",80,16}, {"SceneConstants","lightDirectionIntensity",96,16},
         {"SceneConstants","parameters",112,16}, {"SceneConstants","viewportDebug",128,16},
+        {"SceneConstants","cameraForward",144,16}, {"SceneConstants","cameraLensParams",160,16},
         {"ObjectConstants","worldMatrix",0,64}, {"ObjectConstants","normalMatrix",64,64},
         {"ObjectConstants","objectColor",128,16}, {"ObjectConstants","objectParameters",144,16},
         {"RayConstants","rayInfo",0,16}, {"RayConstants","rayObjects",16,5120},
@@ -217,7 +238,12 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ShadowConstants","cascadeParameters",144,16},
         {"OutlineConstants","outlineColor",0,16},
         {"OutlineConstants","outlineParams",16,16},
-        {"GlobalIlluminationConstants","giViewport",0,16}
+        {"GlobalIlluminationConstants","giViewport",0,16},
+        {"DepthOfFieldConstants","dofViewport",0,16},
+        {"DepthOfFieldConstants","dofParameters",16,16},
+        {"LightingConstants","lightInfo",0,16},
+        {"LightingConstants","skyColor",16,16},
+        {"LightingConstants","sceneLights",32,sizeof(GpuLight) * maxSceneLights}
     };
     for (const auto& variable : variables) {
         auto* cb = reflection->GetConstantBufferByName(variable.buffer);
@@ -229,7 +255,20 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         }
         auto* variableType = cb->GetVariableByName(variable.name)->GetType();
         D3D11_SHADER_TYPE_DESC type{}; variableType->GetDesc(&type);
-        if (variable.size <= 64) {
+        if (std::strcmp(variable.name, "sceneLights") == 0) {
+            if (type.Class != D3D_SVC_STRUCT || type.Elements != maxSceneLights || type.Members != 6) {
+                error = std::string(entry) + ": sceneLights requires 32 six-vector light structures."; return false;
+            }
+            const char* members[] = {"positionType", "directionRange", "colorIntensity", "axisUWidth", "axisVHeight", "spotShadow"};
+            for (UINT i = 0; i < std::size(members); ++i) {
+                D3D11_SHADER_TYPE_DESC member{};
+                if (FAILED(variableType->GetMemberTypeByName(members[i])->GetDesc(&member)) ||
+                    member.Offset != i * 16 || member.Type != D3D_SVT_FLOAT || member.Class != D3D_SVC_VECTOR ||
+                    member.Rows != 1 || member.Columns != 4 || member.Elements != 0) {
+                    error = std::string(entry) + ": incompatible sceneLights member: " + members[i]; return false;
+                }
+            }
+        } else if (variable.size <= 64) {
             const bool matrix = variable.size == 64;
             if (type.Type != D3D_SVT_FLOAT || type.Elements != 0 || type.Columns != 4 ||
                 type.Rows != (matrix ? 4u : 1u) || type.Class != (matrix ? D3D_SVC_MATRIX_ROWS : D3D_SVC_VECTOR)) {
@@ -252,13 +291,18 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         }
     }
     if (std::strcmp(entry, "VSMain") == 0) {
-        if (desc.InputParameters != 2) { error = "VSMain requires POSITION and NORMAL float3 inputs."; return false; }
-        for (UINT i = 0; i < 2; ++i) {
+        if (desc.InputParameters != 4) { error = "VSMain requires POSITION/NORMAL and two packed UV inputs."; return false; }
+        unsigned seen = 0;
+        for (UINT i = 0; i < desc.InputParameters; ++i) {
             D3D11_SIGNATURE_PARAMETER_DESC input{}; reflection->GetInputParameterDesc(i, &input);
-            if ((std::strcmp(input.SemanticName, "POSITION") != 0 && std::strcmp(input.SemanticName, "NORMAL") != 0) ||
-                input.SemanticIndex != 0 || input.Mask != 7 || input.ComponentType != D3D_REGISTER_COMPONENT_FLOAT32) {
-                error = "VSMain input contract changed (POSITION/NORMAL float3 required)."; return false;
+            unsigned bit = 0;
+            if (std::strcmp(input.SemanticName, "POSITION") == 0 && input.SemanticIndex == 0 && input.Mask == 7) bit = 1;
+            if (std::strcmp(input.SemanticName, "NORMAL") == 0 && input.SemanticIndex == 0 && input.Mask == 7) bit = 2;
+            if (std::strcmp(input.SemanticName, "TEXCOORD") == 0 && input.SemanticIndex < 2 && input.Mask == 15) bit = 4u << input.SemanticIndex;
+            if (!bit || (seen & bit) || input.ComponentType != D3D_REGISTER_COMPONENT_FLOAT32) {
+                error = "VSMain input contract changed (POSITION/NORMAL float3 and TEXCOORD0/1 float4 required)."; return false;
             }
+            seen |= bit;
         }
     }
     if (entry[0] == 'P' && entry[1] == 'S') {
@@ -322,6 +366,7 @@ struct RaySceneInput {
     bool grid = false, twoSided = false, cullFront = false;
     assets::MaterialDepthTest depthTest = assets::MaterialDepthTest::Less;
     bool depthWrite = true;
+    std::uint32_t slot = 0;
     bool operator==(const RaySceneInput&) const = default;
 };
 std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
@@ -329,17 +374,20 @@ std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const a
     std::vector<RaySceneInput> result;
     result.reserve(world.actors.size());
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        const auto* material = resolveMaterial(assets, actor.mesh.materialId, preview);
-        if (!mesh || !material) continue;
+        if (!mesh) continue;
         const auto& t = actor.transform;
-        result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(), mesh->primitive,
-            {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
-             t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
-             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
-             material->effectiveCullMode() == assets::MaterialCullMode::Front,
-             material->depthTest, material->depthWrite});
+        for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot) {
+            const auto* material = resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), preview);
+            if (!material) continue;
+            result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(), mesh->primitive,
+                {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
+                 t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
+                 material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
+                 material->effectiveCullMode() == assets::MaterialCullMode::Front,
+                 material->depthTest, material->depthWrite, static_cast<std::uint32_t>(slot)});
+        }
     }
     return result;
 }
@@ -365,9 +413,10 @@ struct SceneRenderer::Impl {
     struct PreviewImage {
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> view;
-        std::uint32_t size = 0;
+        std::uint32_t width = 0, height = 0;
     };
-    std::array<PreviewImage, 3> previews;
+    std::array<PreviewImage, 8> previews;
+    std::vector<PreviewImage> retiredPreviews;
     bool previewSceneReady = false;
     scene::World previewWorld;
     assets::AssetLibrary previewAssets;
@@ -382,14 +431,17 @@ struct SceneRenderer::Impl {
     std::array<ComPtr<ID3D11ShaderResourceView>, 3> gbufferViews;
     ComPtr<ID3D11VertexShader> geometryVS, fullscreenVS;
     ComPtr<ID3D11PixelShader> forwardPS, gbufferPS, deferredPS, backgroundPS;
-    ComPtr<ID3D11PixelShader> outlineMaskPS, outlineCompositePS;
+    ComPtr<ID3D11PixelShader> outlineMaskPS, outlineCompositePS, dofPS;
     // Created on the first editor frame that has a selection; runtime frames
     // never allocate the mask.
     std::unique_ptr<SelectionOutlinePass> outline;
     ComPtr<ID3D11InputLayout> inputLayout;
-    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants, giConstants;
+    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants, giConstants, lightingConstants, dofConstants;
     ComPtr<ID3D11Buffer> rayTriangleBuffer;
     ComPtr<ID3D11ShaderResourceView> rayTriangleView;
+    ComPtr<ID3D11Buffer> rayUvBuffer, rayUvIndexBuffer, zeroUvBuffer;
+    ComPtr<ID3D11ShaderResourceView> rayUvView, rayUvIndexView;
+    std::uint64_t rayUvBytes = 0;
     std::uint64_t rayTriangleHash = 0;
     UINT rayTriangleCount = 0;
     UINT raySceneActorCount = 0;
@@ -399,7 +451,7 @@ struct SceneRenderer::Impl {
     bool raySceneActive = false;
     std::uint64_t usageEpoch = 0;
     struct GpuMesh {
-        ComPtr<ID3D11Buffer> vertices, indices;
+        ComPtr<ID3D11Buffer> vertices, indices, uv;
         UINT count = 0;
         assets::MeshGeometryKey geometry{};
         std::uint64_t bytes = 0, lastUsedEpoch = 0;
@@ -440,6 +492,7 @@ struct SceneRenderer::Impl {
 #include "RenderDiagnostics.inl"
 #include "GeometryStatistics.inl"
 #include "MaterialRenderStates.inl"
+#include "DepthOfField.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
         DXGI_SWAP_CHAIN_DESC1 description{};
@@ -587,8 +640,10 @@ struct SceneRenderer::Impl {
         const D3D11_INPUT_ELEMENT_DESC layout[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
-        if (failed(device->CreateInputLayout(layout, 2, shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
+        if (failed(device->CreateInputLayout(layout, static_cast<UINT>(std::size(layout)), shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
         shader.Reset();
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSFullscreen", "vs_5_0", shader, error)) return false;
         if (failed(device->CreateVertexShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &fullscreenVS), "Create fullscreen VS", error)) return false;
@@ -599,7 +654,8 @@ struct SceneRenderer::Impl {
         };
         if (!pixelShader("PSForward", forwardPS) || !pixelShader("PSGBuffer", gbufferPS) ||
             !pixelShader("PSDeferred", deferredPS) || !pixelShader("PSBackground", backgroundPS) ||
-            !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS))
+            !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS) ||
+            !pixelShader("PSDepthOfField", dofPS))
             return false;
         if (!outline) outline = std::make_unique<SelectionOutlinePass>();
         if (!outline->initialize(device.Get(), error)) return false;
@@ -618,6 +674,15 @@ struct SceneRenderer::Impl {
         if (failed(device->CreateBuffer(&buffer, nullptr, &shadowConstants), "Create shadow constants", error)) return false;
         buffer.ByteWidth = sizeof(GlobalIlluminationConstants);
         if (failed(device->CreateBuffer(&buffer, nullptr, &giConstants), "Create GI constants", error)) return false;
+        buffer.ByteWidth = sizeof(DepthOfFieldConstants);
+        if (failed(device->CreateBuffer(&buffer, nullptr, &dofConstants), "Create DOF constants", error)) return false;
+        buffer.ByteWidth = sizeof(LightingConstants);
+        if (failed(device->CreateBuffer(&buffer, nullptr, &lightingConstants), "Create lighting constants", error)) return false;
+        meshAttributes::PackedUv zeroUv{};
+        D3D11_BUFFER_DESC uvDescription{}; uvDescription.ByteWidth = sizeof(zeroUv);
+        uvDescription.Usage = D3D11_USAGE_IMMUTABLE; uvDescription.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA uvInitial{}; uvInitial.pSysMem = &zeroUv;
+        if (failed(device->CreateBuffer(&uvDescription, &uvInitial, &zeroUvBuffer), "Create absent UV stream", error)) return false;
         D3D11_RASTERIZER_DESC raster{};
         raster.FillMode = D3D11_FILL_SOLID;
         raster.CullMode = D3D11_CULL_NONE;
@@ -649,6 +714,7 @@ struct SceneRenderer::Impl {
     }
 
     bool prepareMesh(const assets::MeshAsset& mesh, std::string& error) {
+        try {
         if (mesh.vertices.empty() || mesh.indices.empty() || mesh.indices.size() % 3 != 0 ||
             mesh.vertices.size() > std::numeric_limits<UINT>::max() / sizeof(assets::MeshVertex) ||
             mesh.indices.size() > std::numeric_limits<UINT>::max() / sizeof(std::uint32_t)) {
@@ -661,6 +727,8 @@ struct SceneRenderer::Impl {
             return true;
         }
         rae::diagnostics::TraceScope uploadTrace("Mesh geometry upload", "Renderer CPU");
+        try { meshAttributes::validateSections(mesh); }
+        catch (const std::exception& failure) { error = failure.what(); return false; }
         for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) { error = "Mesh index out of bounds: " + mesh.name; return false; }
         GpuMesh gpu; gpu.geometry = geometry; gpu.count = static_cast<UINT>(mesh.indices.size());
         D3D11_BUFFER_DESC description{};
@@ -672,19 +740,37 @@ struct SceneRenderer::Impl {
         description.BindFlags = D3D11_BIND_INDEX_BUFFER; initial.pSysMem = mesh.indices.data();
         if (failed(device->CreateBuffer(&description, &initial, &gpu.indices), "Create mesh indices", error)) return false;
         gpu.bytes = mesh.vertices.size() * sizeof(assets::MeshVertex) + mesh.indices.size() * sizeof(std::uint32_t);
+        if (mesh.uvChannelMask()) {
+            if (mesh.vertices.size() > std::numeric_limits<UINT>::max() / sizeof(meshAttributes::PackedUv)) {
+                error = "Mesh UV buffer exceeds addressable size."; return false;
+            }
+            std::vector<meshAttributes::PackedUv> uv; uv.reserve(mesh.vertices.size());
+            try { for (std::size_t i = 0; i < mesh.vertices.size(); ++i) uv.push_back(meshAttributes::vertexUv(mesh, i)); }
+            catch (const std::exception& failure) { error = failure.what(); return false; }
+            description.ByteWidth = static_cast<UINT>(uv.size() * sizeof(meshAttributes::PackedUv));
+            description.BindFlags = D3D11_BIND_VERTEX_BUFFER; initial.pSysMem = uv.data();
+            if (failed(device->CreateBuffer(&description, &initial, &gpu.uv), "Create mesh UV vertices", error)) return false;
+            gpu.bytes += description.ByteWidth;
+        }
         gpu.lastUsed = Clock::now();
         gpu.lastUsedEpoch = usageEpoch;
         meshes[mesh.id] = std::move(gpu); return true;
+        } catch (const std::exception& failure) {
+            error = std::string("Unable to prepare mesh geometry/UV data: ") + failure.what();
+            return false;
+        }
     }
 
     bool prepareRayTriangles(const scene::World& world, const assets::AssetLibrary& assets,
                              std::string& error, const assets::MaterialAsset* materialPreview) {
+        try {
         std::vector<RaySceneInput> nextInputs;
         try { nextInputs = makeRaySceneInputs(world, assets, materialPreview); }
         catch (const std::bad_alloc&) { error = "Unable to allocate ray scene input keys."; return false; }
         if (raySceneInputsValid && nextInputs == raySceneInputs) return true;
         rae::diagnostics::TraceScope gatherTrace("Software ray scene rebuild", "Renderer CPU");
         std::vector<RayTriangle> triangles;
+        meshAttributes::RayUvData uvData;
         // Grow with the scene. The count check below only protects D3D11
         // structured-buffer addressability; no scene triangle budget drops
         // geometry.
@@ -697,25 +783,33 @@ struct SceneRenderer::Impl {
         raySceneActorCount = 0;
         unsigned analyticOrdinal = 0;
         for (const auto& actor : world.actors) {
-            if (!actor.visible || !validTransform(actor)) continue;
+            if (actor.light || !actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialPreview);
-            if (!mesh || !material) continue;
+            if (!mesh) continue;
+            std::vector<const assets::MaterialAsset*> materials;
+            for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot)
+                materials.push_back(resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), materialPreview));
+            if (std::none_of(materials.begin(), materials.end(), [](const auto* value) { return value != nullptr; })) continue;
             ++raySceneActorCount;
             // Built-in primitives retain their exact analytic intersections
             // for the first 32 actors. Additional built-in actors fall back
             // to the same triangle path as imported and future mesh types, so
             // every visible actor remains traceable.
-            const bool builtin = mesh->primitive == assets::MeshPrimitive::Sphere ||
-                mesh->primitive == assets::MeshPrimitive::Plane ||
-                mesh->primitive == assets::MeshPrimitive::Cube;
+            const bool builtin = meshAttributes::analytic(*mesh);
             if (builtin && analyticOrdinal++ < 32) continue;
             if (mesh->indices.size() % 3 != 0) {
                 error = "Ray scene mesh has a non-triangulated index buffer: " + mesh->name;
                 return false;
             }
             const XMMATRIX matrix = actorMatrix(actor);
+            std::uint32_t uvOffset = 0;
+            try { meshAttributes::validateSections(*mesh); uvOffset = uvData.appendMesh(*mesh); }
+            catch (const std::exception& failure) { error = failure.what(); return false; }
             for (std::size_t index = 0; index < mesh->indices.size(); index += 3) {
+                const auto slot = mesh->materialSlotForIndex(static_cast<std::uint32_t>(index));
+                if (slot >= materials.size()) { error = "Mesh material section index is invalid."; return false; }
+                const auto* material = materials[slot];
+                if (!material) continue;
                 const auto i0 = mesh->indices[index], i1 = mesh->indices[index + 1], i2 = mesh->indices[index + 2];
                 if (i0 >= mesh->vertices.size() || i1 >= mesh->vertices.size() || i2 >= mesh->vertices.size()) {
                     error = "Ray scene mesh index out of bounds: " + mesh->name;
@@ -748,7 +842,8 @@ struct SceneRenderer::Impl {
                 XMStoreFloat3(&triangle.position2, p2);
                 XMStoreFloat3(&triangle.normal, XMVectorScale(XMVector3Normalize(crossProduct),
                     mirroredTransform(actor) ? -1.0f : 1.0f));
-                triangle.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1.0f);
+                triangle.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2],
+                    uvData.appendTriangle(*mesh, index, uvOffset));
                 triangle.properties = XMFLOAT4(material->roughness, material->metallic, 3.0f, materialFlags(*material));
                 try {
                     triangles.push_back(triangle);
@@ -763,6 +858,11 @@ struct SceneRenderer::Impl {
             const auto* bytes = reinterpret_cast<const unsigned char*>(&triangle);
             for (std::size_t i = 0; i < sizeof(triangle); ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
         }
+        const auto hashArray = [&](const auto& values) {
+            const auto* bytes = reinterpret_cast<const unsigned char*>(values.data());
+            for (std::size_t i = 0; i < values.size() * sizeof(values[0]); ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
+        };
+        hashArray(uvData.vertices); hashArray(uvData.triangles);
         if (hash == rayTriangleHash && rayTriangleCount == triangles.size()) {
             raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
             return true;
@@ -771,6 +871,7 @@ struct SceneRenderer::Impl {
             rayTriangleHash = hash;
             rayTriangleCount = 0;
             rayTriangleBuffer.Reset(); rayTriangleView.Reset();
+            rayUvBuffer.Reset(); rayUvIndexBuffer.Reset(); rayUvView.Reset(); rayUvIndexView.Reset(); rayUvBytes = 0;
             raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
             return true;
         }
@@ -795,12 +896,38 @@ struct SceneRenderer::Impl {
         view.BufferEx.NumElements = static_cast<UINT>(triangles.size());
         ComPtr<ID3D11ShaderResourceView> newRayTriangleView;
         if (failed(device->CreateShaderResourceView(newRayTriangleBuffer.Get(), &view, &newRayTriangleView), "Create ray triangle view", error)) return false;
+        ComPtr<ID3D11Buffer> newUvBuffer, newUvIndexBuffer;
+        ComPtr<ID3D11ShaderResourceView> newUvView, newUvIndexView;
+        const auto createUv = [&](const void* data, std::size_t size, ComPtr<ID3D11Buffer>& buffer,
+                                  ComPtr<ID3D11ShaderResourceView>& srv) {
+            const std::array<std::uint32_t, 4> zero{};
+            if (size > std::numeric_limits<UINT>::max()) { error = "Ray UV buffer exceeds addressable size."; return false; }
+            D3D11_BUFFER_DESC desc{}; desc.ByteWidth = static_cast<UINT>(std::max<std::size_t>(16, size));
+            desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; desc.StructureByteStride = 16;
+            D3D11_SUBRESOURCE_DATA upload{}; upload.pSysMem = size ? data : zero.data();
+            if (failed(device->CreateBuffer(&desc, &upload, &buffer), "Create ray UV buffer", error)) return false;
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{}; view.Format = DXGI_FORMAT_UNKNOWN;
+            view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER; view.Buffer.NumElements = desc.ByteWidth / 16;
+            return !failed(device->CreateShaderResourceView(buffer.Get(), &view, &srv), "Create ray UV view", error);
+        };
+        const auto uvBytes = uvData.vertices.size() * sizeof(meshAttributes::PackedUv);
+        const auto indexBytes = uvData.triangles.size() * sizeof(meshAttributes::UvTriangle);
+        if (!createUv(uvData.vertices.data(), uvBytes, newUvBuffer, newUvView) ||
+            !createUv(uvData.triangles.data(), indexBytes, newUvIndexBuffer, newUvIndexView)) return false;
+        rayUvBuffer = std::move(newUvBuffer); rayUvView = std::move(newUvView);
+        rayUvIndexBuffer = std::move(newUvIndexBuffer); rayUvIndexView = std::move(newUvIndexView);
+        rayUvBytes = uvBytes + indexBytes;
         rayTriangleHash = hash;
         rayTriangleCount = static_cast<UINT>(triangles.size());
         rayTriangleBuffer = std::move(newRayTriangleBuffer);
         rayTriangleView = std::move(newRayTriangleView);
         raySceneInputs = std::move(nextInputs); raySceneInputsValid = true;
         return true;
+        } catch (const std::exception& failure) {
+            error = std::string("Unable to prepare ray geometry/UV data: ") + failure.what();
+            return false;
+        }
     }
 
     bool drawGeometry(ID3D11PixelShader* pixelShader, const scene::World& world,
@@ -817,27 +944,32 @@ struct SceneRenderer::Impl {
         std::unordered_set<assets::AssetId> preparedMeshes;
         preparedMeshes.reserve(std::min(world.actors.size(), assets.meshes.size()));
         for (const auto& actor : world.actors) {
-            if (!actor.visible || !validTransform(actor)) continue;
+            if (actor.light || !actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialPreview);
-            if (!mesh || !material) continue;
+            if (!mesh) continue;
             if (clipMatrix && !intersectsView(actor, *mesh, *clipMatrix)) continue;
             if (preparedMeshes.insert(mesh->id).second && !prepareMesh(*mesh, error)) return false;
             auto& gpu = meshes.at(mesh->id);
-            bindMaterialRenderState(*material, mirroredTransform(actor), pixelShader == nullptr);
             ObjectConstants data{};
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
-            data.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2], 1);
-            data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, materialFlags(*material));
-            context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
-            ID3D11Buffer* vertexBuffer = gpu.vertices.Get();
-            context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+            ID3D11Buffer* vertexBuffers[] = {gpu.vertices.Get(), gpu.uv ? gpu.uv.Get() : zeroUvBuffer.Get()};
+            const UINT strides[] = {stride, gpu.uv ? static_cast<UINT>(sizeof(meshAttributes::PackedUv)) : 0u};
+            const UINT offsets[] = {offset, 0};
+            context->IASetVertexBuffers(0, 2, vertexBuffers, strides, offsets);
             context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
-            context->DrawIndexed(gpu.count, 0, 0);
-            recordDraw(actor.id, mesh->id, material->id, gpu.count,
-                static_cast<std::uint32_t>(mesh->vertices.size()));
+            meshAttributes::sections(*mesh, [&](std::uint32_t first, std::uint32_t count, std::uint32_t slot) {
+                const auto* material = resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), materialPreview);
+                if (!material) return;
+                bindMaterialRenderState(*material, mirroredTransform(actor), pixelShader == nullptr);
+                data.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2],
+                    static_cast<float>(mesh->uvChannelMask()));
+                data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, materialFlags(*material));
+                context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
+                context->DrawIndexed(count, first, 0);
+                recordDraw(actor.id, mesh->id, material->id, count, static_cast<std::uint32_t>(mesh->vertices.size()));
+            });
         }
         return true;
     }
@@ -851,7 +983,7 @@ struct SceneRenderer::Impl {
         const UINT stride = sizeof(assets::MeshVertex), offset = 0;
         std::unordered_set<assets::AssetId> preparedMeshes;
         for (const auto& actor : world.actors) {
-            if (!actor.visible || !validTransform(actor)) continue;
+            if (actor.light || !actor.visible || !validTransform(actor)) continue;
             bool selected = false;
             for (std::uint32_t index = 0; index < count && !selected; ++index) selected = actors[index] == actor.id;
             if (!selected) continue;
@@ -864,8 +996,10 @@ struct SceneRenderer::Impl {
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
             context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
-            ID3D11Buffer* vertexBuffer = gpu.vertices.Get();
-            context->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+            ID3D11Buffer* vertexBuffers[] = {gpu.vertices.Get(), gpu.uv ? gpu.uv.Get() : zeroUvBuffer.Get()};
+            const UINT strides[] = {stride, gpu.uv ? static_cast<UINT>(sizeof(meshAttributes::PackedUv)) : 0u};
+            const UINT offsets[] = {offset, 0};
+            context->IASetVertexBuffers(0, 2, vertexBuffers, strides, offsets);
             context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
             context->DrawIndexed(gpu.count, 0, 0);
             recordDraw(actor.id, mesh->id, actor.mesh.materialId, gpu.count,
@@ -1039,6 +1173,7 @@ bool SceneRenderer::ensureSceneTargetSize(std::uint32_t width, std::uint32_t hei
 
 void SceneRenderer::releaseRetiredSceneTargets() {
     impl_->retiredSceneTargets.clear();
+    impl_->retiredPreviews.clear();
 }
 
 bool SceneRenderer::render(const SceneSettings& settings, std::string& error) {
@@ -1067,7 +1202,7 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
 bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scene::World& world,
                                        const assets::AssetLibrary& assets,
                                        const assets::MaterialAsset* materialOverride,
-                                       std::uint32_t size, std::string& error, PreviewSlot slot) {
+                                       std::uint32_t size, std::string& error, PreviewSlot slot, std::uint32_t height) {
     error.clear();
     auto& state = *impl_;
     if (!state.device || !state.context || !state.sceneTexture || !state.backbuffer) {
@@ -1078,16 +1213,20 @@ bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scen
     if (slotIndex >= state.previews.size()) { error = "Invalid preview slot."; return false; }
     D3D11_TEXTURE2D_DESC sceneDescription{};
     state.sceneTexture->GetDesc(&sceneDescription);
-    const auto maximumSize = std::min(sceneDescription.Width, sceneDescription.Height);
-    if (maximumSize < 16) { error = "Scene target is too small for a preview."; return false; }
-    size = std::clamp(size, 16u, maximumSize);
+    if (std::min(sceneDescription.Width, sceneDescription.Height) < 16) { error = "Scene target is too small for a preview."; return false; }
+    size = std::max(16u, size);
+    height = height ? std::max(16u, height) : size;
+    const double scale = std::min({1.0, static_cast<double>(sceneDescription.Width)/size,
+        static_cast<double>(sceneDescription.Height)/height});
+    size = std::max(1u, static_cast<std::uint32_t>(size*scale));
+    height = std::max(1u, static_cast<std::uint32_t>(height*scale));
     auto& image = state.previews[slotIndex];
     Impl::PreviewImage candidate;
-    const bool replaceImage = !image.texture || image.size != size;
+    const bool replaceImage = !image.texture || image.width != size || image.height != height;
     if (replaceImage) {
         D3D11_TEXTURE2D_DESC description{};
         description.Width = size;
-        description.Height = size;
+        description.Height = height;
         description.MipLevels = 1;
         description.ArraySize = 1;
         description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1098,17 +1237,49 @@ bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scen
                    "Create preview texture", error)) return false;
         if (failed(state.device->CreateShaderResourceView(candidate.texture.Get(), nullptr, &candidate.view),
                    "Create preview view", error)) return false;
-        candidate.size = size;
+        candidate.width = size; candidate.height = height;
     }
     auto previewSettings = settings;
     previewSettings.viewportWidth = static_cast<int>(size);
-    previewSettings.viewportHeight = static_cast<int>(size);
+    previewSettings.viewportHeight = static_cast<int>(height);
     if (!render(previewSettings, world, assets, error, materialOverride)) return false;
-    const D3D11_BOX region{0, 0, 0, size, size, 1};
+    const D3D11_BOX region{0, 0, 0, size, height, 1};
     state.context->CopySubresourceRegion(replaceImage ? candidate.texture.Get() : image.texture.Get(), 0, 0, 0, 0,
         state.sceneTexture.Get(), 0, &region);
-    if (replaceImage) image = std::move(candidate);
+    if (replaceImage) {
+        if (image.view) state.retiredPreviews.push_back(std::move(image));
+        image = std::move(candidate);
+    }
     return true;
+}
+
+bool SceneRenderer::renderCameraPreview(const scene::World& world, const assets::AssetLibrary& assets,
+    const camera::Camera& camera, std::uint32_t width, std::uint32_t height, std::string& error,
+    float exposure, PreviewSlot slot) {
+    if (!camera::valid(camera)) { error = "Invalid camera pose or lens."; return false; }
+    SceneSettings settings;
+    settings.offscreenTarget = true;
+    settings.cameraPose = camera.pose;
+    settings.cameraLens = camera.lens;
+    settings.exposure = exposure;
+    settings.viewId = 0x100u + static_cast<std::uint64_t>(slot);
+    return renderPreviewFrame(settings, world, assets, nullptr, width, error, slot, height);
+}
+
+bool SceneRenderer::renderViewportPreview(const SceneSettings& requested, const scene::World& world,
+    const assets::AssetLibrary& assets, const assets::MaterialAsset* materialOverride,
+    std::uint32_t width, std::uint32_t height, std::string& error, PreviewSlot slot) {
+    if (slot < PreviewSlot::Viewport0 || slot > PreviewSlot::Viewport3) {
+        error = "Viewport preview requires its own viewport slot."; return false;
+    }
+    auto settings = requested;
+    settings.offscreenTarget = true;
+    settings.editorViewport = true;
+    settings.viewportVisible = true;
+    settings.viewportX = settings.viewportY = 0;
+    settings.hardwareRayTracing = false;
+    settings.globalIllumination.method = GlobalIlluminationMethod::Disabled;
+    return renderPreviewFrame(settings, world, assets, materialOverride, width, error, slot, height);
 }
 
 bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material, std::uint32_t size,
@@ -1143,6 +1314,7 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
     settings.cameraYaw = yaw;
     settings.cameraPitch = pitch;
     settings.cameraDistance = distance;
+    settings.cameraLens.farClip = std::max(100.0f, distance*2.0f);
     settings.cameraTarget[0] = 0.0f;
     settings.cameraTarget[1] = 0.0f;
     settings.cameraTarget[2] = 0.0f;
@@ -1156,7 +1328,7 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
     float maximum[3] = {-1e30f, -1e30f, -1e30f};
     bool any = false;
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
         if (!mesh || mesh->vertices.empty()) continue;
         const auto& bounds = mesh->localBounds();
@@ -1198,6 +1370,7 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
     settings.cameraYaw = 0.65f;
     settings.cameraPitch = 0.32f;
     settings.cameraDistance = std::clamp(radius * 2.6f, 1.5f, 80.0f);
+    settings.cameraLens.farClip = std::max(100.0f, settings.cameraDistance*2.0f);
     return renderPreviewFrame(settings, world, assets, nullptr, size, error, slot);
 }
 
@@ -1314,25 +1487,34 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const bool sceneTarget = settings.editorViewport || settings.offscreenTarget;
     const auto targetWidth = sceneTarget ? state.sceneWidth : state.width;
     const auto targetHeight = sceneTarget ? state.sceneHeight : state.height;
-    const int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(targetWidth) - 1) : 0;
-    const int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(targetHeight) - 1) : 0;
-    const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(targetWidth) - viewportX) : static_cast<int>(targetWidth);
-    const int viewportHeight = settings.viewportHeight > 0 ? std::clamp(settings.viewportHeight, 1, static_cast<int>(targetHeight) - viewportY) : static_cast<int>(targetHeight);
-    const float pitch = std::clamp(settings.cameraPitch, SceneSettings::minPitch, SceneSettings::maxPitch);
-    const float requestedDistance = std::isfinite(settings.cameraDistance) ? settings.cameraDistance : 6.0f;
-    const float distance = settings.offscreenTarget ? std::clamp(requestedDistance, 1.5f, 80.0f)
-                                                  : std::clamp(requestedDistance, 2.0f, 30.0f);
-    const float yaw = settings.cameraYaw;
-    const XMVECTOR cameraTargetVec = XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 1.0f);
-    const XMVECTOR eye = XMVectorAdd(cameraTargetVec, XMVectorSet(
-        distance * std::cos(pitch) * std::sin(yaw),
-        distance * std::sin(pitch),
-        distance * std::cos(pitch) * std::cos(yaw), 0.0f));
-    const XMMATRIX view = XMMatrixLookAtRH(eye, cameraTargetVec, XMVectorSet(0, 1, 0, 0));
-    const XMMATRIX projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.0f),
-        static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight), 0.05f,
-        settings.offscreenTarget ? std::max(100.0f, distance * 2.0f) : 100.0f);
+    int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(targetWidth) - 1) : 0;
+    int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(targetHeight) - 1) : 0;
+    int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(targetWidth) - viewportX) : static_cast<int>(targetWidth);
+    int viewportHeight = settings.viewportHeight > 0 ? std::clamp(settings.viewportHeight, 1, static_cast<int>(targetHeight) - viewportY) : static_cast<int>(targetHeight);
+    // Runtime callers omit a rectangle. Honour authored framing there as well
+    // as in the editor, whose explicit image rectangle already includes bars.
+    const bool fitAuthoredAspect = settings.viewportWidth <= 0 && settings.viewportHeight <= 0
+        && camera::valid(settings.cameraLens) && settings.cameraLens.aspectRatio > 0;
+    if (fitAuthoredAspect) {
+        const double aspect = settings.cameraLens.aspectRatio;
+        if (static_cast<double>(viewportWidth)/viewportHeight > aspect) {
+            viewportWidth = std::clamp(static_cast<int>(std::lround(viewportHeight*aspect)),1,viewportWidth);
+            viewportX = (static_cast<int>(targetWidth)-viewportWidth)/2;
+        } else {
+            viewportHeight = std::clamp(static_cast<int>(std::lround(viewportWidth/aspect)),1,viewportHeight);
+            viewportY = (static_cast<int>(targetHeight)-viewportHeight)/2;
+        }
+    }
+    const auto cameraView = camera::evaluate(resolveCamera(settings),
+        static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight));
+    XMFLOAT4X4 viewValues, projectionValues;
+    std::memcpy(&viewValues, cameraView.view.data(), sizeof(viewValues));
+    std::memcpy(&projectionValues, cameraView.projection.data(), sizeof(projectionValues));
+    const XMMATRIX view = XMLoadFloat4x4(&viewValues);
+    const XMMATRIX projection = XMLoadFloat4x4(&projectionValues);
+    const XMVECTOR eye = XMVectorSet(cameraView.position[0], cameraView.position[1], cameraView.position[2], 1);
     const bool wantsRayScene = settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay;
+    const auto lighting = gatherLighting(world, settings.lightIntensity);
     state.raySceneActive = wantsRayScene;
     if (wantsRayScene) state.rayLastUsed = Impl::Clock::now();
     if (wantsRayScene && !state.prepareRayTriangles(world, assets, error, materialOverride)) return false;
@@ -1343,9 +1525,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // backdrop" flag so the scene format can switch the sky gradient off
     // without changing the locked SceneConstants layout.
     data.cameraPosition.w = world.blackBackground ? 1.0f : 0.0f;
+    data.cameraForward = XMFLOAT4(cameraView.forward[0], cameraView.forward[1], cameraView.forward[2],
+        cameraView.lens.projection == camera::Projection::Orthographic ? 1.0f : 0.0f);
+    data.cameraLensParams = XMFLOAT4(cameraView.lens.nearClip, cameraView.lens.farClip,
+        cameraView.lens.orthographicHeight, std::tan(XMConvertToRadians(cameraView.lens.verticalFovDegrees)*.5f));
     data.baseColor = XMFLOAT4(settings.baseColor[0], settings.baseColor[1], settings.baseColor[2], 1);
     XMStoreFloat4(&data.lightDirectionIntensity, XMVector3Normalize(XMVectorSet(-3, 6, -2, 0)));
-    data.lightDirectionIntensity.w = settings.lightIntensity;
+    data.lightDirectionIntensity.w = world.environment.overrideLighting
+        ? world.environment.directionalIntensity : settings.lightIntensity;
     data.parameters = XMFLOAT4(std::clamp(settings.roughness, 0.04f, 1.0f),
         std::clamp(settings.metallic, 0.0f, 1.0f), settings.exposure,
         (settings.rayTracing && rayTracingSupported(world, assets)) ? 1.0f : 0.0f);
@@ -1353,7 +1540,11 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         static_cast<float>(settings.debugView), static_cast<float>(settings.shadowMethod == ShadowMethod::Disabled ? 2 :
             settings.shadowMethod == ShadowMethod::AnalyticRay ? 1 : 0));
     state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
-    const XMVECTOR lightDirection = XMVector3Normalize(XMVectorSet(-3, 6, -2, 0));
+    XMVECTOR lightDirection = XMVector3Normalize(XMVectorSet(-3, 6, -2, 0));
+    if (lighting.info[1] > .5f && lighting.info[2] >= 0) {
+        const auto& sun = lighting.lights[static_cast<std::size_t>(lighting.info[2])];
+        lightDirection = XMVectorSet(-sun.directionRange[0], -sun.directionRange[1], -sun.directionRange[2], 0);
+    }
     const XMVECTOR lightTarget = XMVectorSet(0, 0, 0, 1);
     // The shader's light vector points from the surface toward the light, so
     // place the shadow camera along that same direction from the target.
@@ -1372,18 +1563,20 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     shadowData.parameters = XMFLOAT4(1.0f / static_cast<float>(Impl::shadowMapSize), 0.0015f, 0.008f, shadowFilter);
     const float shadowFeature = settings.shadowMethod == ShadowMethod::GTAO ? 1.0f :
         settings.shadowMethod == ShadowMethod::ContactShadow ? 2.0f : 0.0f;
-    shadowData.cascadeParameters = XMFLOAT4(10.0f, useCsm ? 1.0f : 0.0f, shadowFeature, 0);
+    const float cascadeSplit = cameraView.lens.nearClip + (cameraView.lens.farClip-cameraView.lens.nearClip)*.1f;
+    shadowData.cascadeParameters = XMFLOAT4(cascadeSplit, useCsm ? 1.0f : 0.0f, shadowFeature, 0);
     XMStoreFloat4x4(&shadowData.lightViewProjectionCascade1, lightView * lightProjection);
     if (useCsm) {
-        const XMVECTOR forward = XMVector3Normalize(XMVectorSubtract(cameraTargetVec, eye));
-        const XMVECTOR right = XMVector3Normalize(XMVector3Cross(XMVectorSet(0, 1, 0, 0), forward));
-        const XMVECTOR up = XMVector3Normalize(XMVector3Cross(forward, right));
-        const float aspect = static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight);
-        const float tanHalfFov = std::tan(XMConvertToRadians(50.0f) * 0.5f);
-        const float splitDistances[3] = {0.05f, 10.0f, 100.0f};
+        const XMVECTOR forward = XMVectorSet(cameraView.forward[0],cameraView.forward[1],cameraView.forward[2],0);
+        const XMVECTOR right = XMVectorSet(cameraView.right[0],cameraView.right[1],cameraView.right[2],0);
+        const XMVECTOR up = XMVectorSet(cameraView.up[0],cameraView.up[1],cameraView.up[2],0);
+        const float aspect = cameraView.aspectRatio;
+        const float tanHalfFov = data.cameraLensParams.w;
+        const float splitDistances[3] = {cameraView.lens.nearClip, cascadeSplit, cameraView.lens.farClip};
         const auto makeCorners = [&](float distance, std::array<XMVECTOR, 4>& corners) {
             const XMVECTOR center = XMVectorAdd(eye, XMVectorScale(forward, distance));
-            const float halfHeight = tanHalfFov * distance;
+            const float halfHeight = cameraView.lens.projection == camera::Projection::Orthographic
+                ? cameraView.lens.orthographicHeight*.5f : tanHalfFov * distance;
             const float halfWidth = halfHeight * aspect;
             corners[0] = XMVectorAdd(XMVectorAdd(center, XMVectorScale(right, -halfWidth)), XMVectorScale(up, halfHeight));
             corners[1] = XMVectorAdd(XMVectorAdd(center, XMVectorScale(right, halfWidth)), XMVectorScale(up, halfHeight));
@@ -1417,15 +1610,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     RayConstants rays{};
     if (data.parameters.w > 0.5f || settings.shadowMethod == ShadowMethod::AnalyticRay) {
         for (const auto& actor : world.actors) {
-            if (!actor.visible || !validTransform(actor)) continue;
+            if (actor.light || !actor.visible || !validTransform(actor)) continue;
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
-            const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialOverride);
+            const auto* material = mesh ? resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, 0), materialOverride) : nullptr;
             if (!mesh || !material) continue;
             // Analytic tracing has exact intersections for built-in spheres,
             // planes, and cubes. Other actors are represented by rayTriangles.
-            if (mesh->primitive != assets::MeshPrimitive::Sphere &&
-                mesh->primitive != assets::MeshPrimitive::Plane &&
-                mesh->primitive != assets::MeshPrimitive::Cube) continue;
+            if (!meshAttributes::analytic(*mesh)) continue;
             if (rays.info.x >= 32.0f) break;
             auto& object = rays.objects[static_cast<int>(rays.info.x++)];
             const auto inverse = XMMatrixInverse(nullptr, actorMatrix(actor));
@@ -1442,6 +1633,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     ID3D11Buffer* constants[] = { state.constants.Get(), state.objectConstants.Get(), state.rayConstants.Get(), state.shadowConstants.Get() };
     state.context->VSSetConstantBuffers(0, 4, constants);
     state.context->PSSetConstantBuffers(0, 4, constants);
+    state.context->UpdateSubresource(state.lightingConstants.Get(), 0, nullptr, &lighting, 0, 0);
+    ID3D11Buffer* lightBuffer = state.lightingConstants.Get();
+    state.context->PSSetConstantBuffers(7, 1, &lightBuffer);
     ID3D11SamplerState* sampler = state.sampler.Get();
     state.context->PSSetSamplers(0, 1, &sampler);
     ID3D11SamplerState* comparisonSampler = state.shadowSampler.Get();
@@ -1456,7 +1650,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     ID3D11ShaderResourceView* emptyViews[5]{};
     state.context->PSSetShaderResources(0, 5, emptyViews);
-    if (settings.shadowMethod != ShadowMethod::AnalyticRay && settings.shadowMethod != ShadowMethod::Disabled) {
+    if (settings.shadowMethod != ShadowMethod::AnalyticRay && settings.shadowMethod != ShadowMethod::Disabled &&
+        (lighting.info[1] < .5f || lighting.info[2] >= 0)) {
         // Render all visible geometry from the light into the depth-only map.
         // Clearing slot 3 first avoids a D3D11 SRV/DSV hazard when switching
         // between frames that use deferred, forward, and shadow-map passes.
@@ -1490,14 +1685,16 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     bool hardwareDepthCompatible = true;
     const assets::MaterialAsset* incompatibleDepthMaterial = nullptr;
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialOverride);
-        if (mesh && !mesh->indices.empty() && material && !material->hardwareDepthCompatible()) {
-            hardwareDepthCompatible = false;
-            incompatibleDepthMaterial = material;
-            break;
-        }
+        if (!mesh || mesh->indices.empty()) continue;
+        meshAttributes::sections(*mesh, [&](std::uint32_t, std::uint32_t count, std::uint32_t slot) {
+            const auto* material = resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), materialOverride);
+            if (count && material && !material->hardwareDepthCompatible()) {
+                hardwareDepthCompatible = false; incompatibleDepthMaterial = material;
+            }
+        });
+        if (!hardwareDepthCompatible) break;
     }
     if (diagnosticMainScene) {
         if (hardwareDepthCompatible != state.hardwareDepthWasCompatible) ++state.giHistoryEpoch;
@@ -1513,6 +1710,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
         state.beginDiagnosticPass(realtimeGiRequested ? "DXR realtime GI transport / resolve" : "DXR hardware scene");
         d3d12::Frame frame;
+        frame.lighting = lighting;
         std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
         frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
         // Material footprint calculations need the actual viewport extent.
@@ -1524,9 +1722,29 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         frame.width = static_cast<std::uint32_t>(viewportWidth);
         frame.height = static_cast<std::uint32_t>(viewportHeight);
         frame.reflections = settings.hardwareRayTracingReflections;
-        frame.shadows = settings.hardwareRayTracingShadows;
+        frame.shadows = settings.hardwareRayTracingShadows && settings.shadowMethod != ShadowMethod::Disabled;
         frame.globalIllumination = settings.globalIllumination;
+        if (depthOfFieldEligible(cameraView.lens) && settings.debugView == 0 &&
+            settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
+            settings.globalIllumination.mode == GlobalIlluminationMode::Progressive) {
+            const auto& dof = cameraView.lens.depthOfField;
+            const float focalLength = dof.sensorHeightMm*.001f/(2*data.cameraLensParams.w);
+            frame.thinLens = {dof.focusDistance,focalLength/(2*dof.fStop),1,0};
+        }
+        const auto& environment = world.environment;
+        // Authored light Actors own lighting when present, even while hidden.
+        // Do not also upload the legacy scene emitter in that mode.
+        const bool usesLightActors = std::any_of(world.actors.begin(), world.actors.end(),
+            [](const scene::Actor& actor) { return actor.light.has_value(); });
+        if (!usesLightActors && environment.overrideLighting) {
+            const auto& light = environment.areaLight;
+            frame.areaLight = {light.center[0], light.center[1], light.center[2], light.enabled ? 1.0f : 0.0f,
+                light.halfAxisU[0], light.halfAxisU[1], light.halfAxisU[2], environment.environmentIntensity,
+                light.halfAxisV[0], light.halfAxisV[1], light.halfAxisV[2], 0,
+                light.radiance[0], light.radiance[1], light.radiance[2], 0};
+        }
         frame.historyEpoch = state.giHistoryEpoch;
+        frame.viewId = settings.viewId;
         state.context->OMSetRenderTargets(0, nullptr, nullptr);
         state.context->PSSetShaderResources(0, 5, emptyViews);
         std::string hardwareError;
@@ -1554,10 +1772,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->RSSetViewports(1, &sceneViewport);
     ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
     state.context->PSSetShaderResources(0, 5, shadowResources);
+    ID3D11ShaderResourceView* uvResources[] = {state.rayUvView.Get(), state.rayUvIndexView.Get()};
+    state.context->PSSetShaderResources(10, 2, uvResources);
     state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
     ID3D11RenderTargetView* backbuffer = (settings.editorViewport || settings.offscreenTarget)
         ? state.sceneTarget.Get() : state.backbuffer.Get();
-    const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
+    const bool blackClear = world.blackBackground || fitAuthoredAspect;
+    const float backgroundClear[4] = {blackClear ? 0.0f : 0.025f, blackClear ? 0.0f : 0.035f, blackClear ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
     if (diagnosticMainScene) state.prepareGeometryStatistics(hardwareFrameReady && !realtimeGiRequested);
     const auto drawMainGeometry = [&](ID3D11PixelShader* shader) {
@@ -1596,6 +1817,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // Release the shared SRV before any next DX12 write, including tool previews.
     ID3D11ShaderResourceView* emptyIndirect = nullptr;
     state.context->PSSetShaderResources(9, 1, &emptyIndirect);
+    ID3D11ShaderResourceView* emptyUv[] = {nullptr, nullptr};
+    state.context->PSSetShaderResources(10, 2, emptyUv);
     if (hardwareFrameReady && !realtimeGiRequested) {
         state.beginDiagnosticPass("Hardware image resolve");
         state.context->OMSetRenderTargets(0, nullptr, nullptr);
@@ -1605,6 +1828,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
             state.hardwareRayTracing->output(), 0, nullptr);
         state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+    }
+    const bool thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
+        settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing && !realtimeGiRequested;
+    if (depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1 && !thinLensImage) {
+        state.beginDiagnosticPass("Screen-space depth of field");
+        if (!state.renderDepthOfField(backbuffer,sceneViewport,cameraView.lens,error)) return false;
     }
     // Editor-only selection outline. The mask re-draws the selected silhouettes
     // against the scene depth (occluded parts are skipped), then the composite
@@ -1689,7 +1918,7 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
             impl_->hardwareRuntimeFailed = false;
         }
     }
-    // No live GPU state or source is changed until all eight stages and contracts pass.
+    // No live GPU state or source is changed until all nine stages and contracts pass.
     impl_->geometryVS = std::move(candidate.geometryVS);
     impl_->fullscreenVS = std::move(candidate.fullscreenVS);
     impl_->forwardPS = std::move(candidate.forwardPS);
@@ -1698,11 +1927,12 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     impl_->backgroundPS = std::move(candidate.backgroundPS);
     impl_->outlineMaskPS = std::move(candidate.outlineMaskPS);
     impl_->outlineCompositePS = std::move(candidate.outlineCompositePS);
+    impl_->dofPS = std::move(candidate.dofPS);
     impl_->inputLayout = std::move(candidate.inputLayout);
     impl_->materialSource = source;
     impl_->sceneSource = std::move(candidate.sceneSource);
     ++impl_->revision;
-    diagnostics = "Applied all 8 raster shader stages";
+    diagnostics = "Applied all 9 raster shader stages";
     if (impl_->hardwarePipelineReady) diagnostics += " and the DXR hardware pipeline";
     diagnostics += ". Revision " + std::to_string(impl_->revision) + ".";
     if (!hardwareWarning.empty()) diagnostics += " Hardware mode unavailable: " + hardwareWarning;
@@ -1740,13 +1970,15 @@ std::string SceneRenderer::rayTracingStatus(const scene::World& world, const ass
     unsigned actors = 0;
     std::uint64_t triangles = 0;
     for (const auto& actor : world.actors) {
-        if (!actor.visible || !validTransform(actor)) continue;
+        if (actor.light || !actor.visible || !validTransform(actor)) continue;
         const auto* mesh = assets.findMesh(actor.mesh.meshId);
-        if (!mesh || !assets.findMaterial(actor.mesh.materialId)) continue;
+        if (!mesh) continue;
+        bool hasMaterial = false;
+        for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot)
+            hasMaterial |= assets.findMaterial(actor.mesh.materialForSlot(*mesh, slot)) != nullptr;
+        if (!hasMaterial) continue;
         ++actors;
-        const bool builtin = mesh->primitive == assets::MeshPrimitive::Sphere ||
-            mesh->primitive == assets::MeshPrimitive::Plane ||
-            mesh->primitive == assets::MeshPrimitive::Cube;
+        const bool builtin = meshAttributes::analytic(*mesh);
         if (builtin && analytic++ < 32) continue;
         if (mesh->indices.size() % 3 != 0 || mesh->indices.empty())
             return "Ray effects unavailable: mesh " + mesh->name + " is not triangulated.";
@@ -1798,7 +2030,7 @@ RendererCacheStats SceneRenderer::cacheStats() const {
     for (const auto& [id, mesh] : impl_->meshes) result.meshGpuBytesEstimate += mesh.bytes;
     if (impl_->rayTriangleBuffer) {
         result.rayTriangleCount = impl_->rayTriangleCount;
-        result.rayGpuBytesEstimate = static_cast<std::uint64_t>(impl_->rayTriangleCount) * sizeof(RayTriangle);
+        result.rayGpuBytesEstimate = static_cast<std::uint64_t>(impl_->rayTriangleCount) * sizeof(RayTriangle) + impl_->rayUvBytes;
     }
     return result;
 }
@@ -1822,9 +2054,9 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
         const auto& mesh = it->second;
         if (mesh.lastUsedEpoch == state.usageEpoch || !expired(mesh.lastUsed)) { ++it; continue; }
         if (boundVertex.Get() == mesh.vertices.Get()) {
-            ID3D11Buffer* empty = nullptr;
-            const UINT zero = 0;
-            state.context->IASetVertexBuffers(0, 1, &empty, &zero, &zero);
+            ID3D11Buffer* empty[] = {nullptr, nullptr};
+            const UINT zero[] = {0, 0};
+            state.context->IASetVertexBuffers(0, 2, empty, zero, zero);
             boundVertex.Reset();
         }
         if (boundIndex.Get() == mesh.indices.Get()) {
@@ -1832,7 +2064,7 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
             boundIndex.Reset();
         }
         result.gpuBytesReleasedEstimate += mesh.bytes;
-        result.objectsReleased += 2;
+        result.objectsReleased += mesh.uv ? 3 : 2;
         it = state.meshes.erase(it);
     }
     if (!state.raySceneActive && state.rayTriangleBuffer && expired(state.rayLastUsed)) {
@@ -1843,10 +2075,12 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
             state.context->PSSetShaderResources(4, 1, &empty);
         }
         boundRay.Reset();
-        result.gpuBytesReleasedEstimate += static_cast<std::uint64_t>(state.rayTriangleCount) * sizeof(RayTriangle);
-        result.objectsReleased += 2;
+        result.gpuBytesReleasedEstimate += static_cast<std::uint64_t>(state.rayTriangleCount) * sizeof(RayTriangle) + state.rayUvBytes;
+        result.objectsReleased += 6;
         state.rayTriangleView.Reset();
         state.rayTriangleBuffer.Reset();
+        state.rayUvView.Reset(); state.rayUvIndexView.Reset();
+        state.rayUvBuffer.Reset(); state.rayUvIndexBuffer.Reset(); state.rayUvBytes = 0;
         // Invalidate the hash fast path as well, so identical scene contents
         // rebuild the buffer/SRV when ray effects are enabled again.
         state.rayTriangleHash = 0;

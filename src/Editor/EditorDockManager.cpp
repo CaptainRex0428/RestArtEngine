@@ -105,10 +105,10 @@ void EditorDockManager::applyFocusRequest() {
     focusRequested_ = EditorPanel::Count;
 }
 
-void EditorDockManager::beginFrame(float toolbarHeight) {
+void EditorDockManager::beginFrame(float toolbarHeight, float bottomBarHeight) {
     const auto* viewport = ImGui::GetMainViewport();
     const ImVec2 position{viewport->WorkPos.x, viewport->WorkPos.y + toolbarHeight};
-    const ImVec2 size{std::max(1.0f, viewport->WorkSize.x), std::max(1.0f, viewport->WorkSize.y - toolbarHeight)};
+    const ImVec2 size{std::max(1.0f, viewport->WorkSize.x), std::max(1.0f, viewport->WorkSize.y - toolbarHeight - bottomBarHeight)};
     ImGui::SetNextWindowPos(position);
     ImGui::SetNextWindowSize(size);
     ImGui::SetNextWindowViewport(viewport->ID);

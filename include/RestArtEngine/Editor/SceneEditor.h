@@ -7,9 +7,11 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <RestArtEngine/Editor/EditorDockManager.h>
 #include <RestArtEngine/Editor/UndoStack.h>
 #include <RestArtEngine/Editor/EditorCommands.h>
+#include <RestArtEngine/Editor/EditorConsole.h>
 #include <RestArtEngine/Editor/DiagnosticsPanel.h>
 #include <RestArtEngine/Assets/AssetRegistry.h>
 #include <RestArtEngine/Assets/AssetImport.h>
@@ -20,6 +22,27 @@ namespace rae::editor {
 class SceneEditor {
 public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
+    // Apply the scene's authored opening view without modifying the bookmark.
+    void applyStartupCamera(renderer::SceneSettings& settings);
+    scene::ActorId createCameraActor(const renderer::SceneSettings&, bool fromView = true);
+    bool setCameraView(renderer::SceneSettings& settings, scene::ActorId id, bool pilot = false);
+    void returnToFreeCamera(renderer::SceneSettings& settings) { viewport_.stopCameraNavigation(world_); viewport_.returnToFreeCamera(settings); }
+    bool cameraNavigating() const { return viewport_.isCameraNavigating(); }
+    bool setDefaultCamera(scene::ActorId id);
+    ViewportInteraction::CameraMode cameraViewMode() const { return viewport_.cameraMode(); }
+    scene::ActorId viewedCamera() const { return viewport_.viewedCamera(); }
+    const std::array<float, 4>& cameraImageRect() const { return viewport_.imageRect(); }
+    void setQuadView(bool enabled) { pendingQuadView_ = enabled ? 1 : 0; }
+    bool quadView() const { return quadView_; }
+    void setActiveViewport(int index) { if (index >= 0 && index < 4) pendingActiveViewport_ = index; }
+    int activeViewportIndex() const { return activeViewport_; }
+    void setViewportMaximized(bool enabled) { pendingMaximized_ = enabled ? 1 : 0; }
+    bool viewportMaximized() const { return viewportMaximized_; }
+    const std::array<float, 4>& viewportImageRect(int index) const {
+        return index == activeViewport_ ? viewport_.imageRect() : otherViewports_[static_cast<std::size_t>(std::clamp(index, 0, 3))].imageRect();
+    }
+    void showCameraPreview(scene::ActorId id) { cameraPreviewActor_ = id; cameraPreviewOpen_ = true; }
+    void closeCameraPreview() { cameraPreviewOpen_ = false; cameraPreviewFocused_ = false; }
     // Borrowed service; the caller keeps it alive until detached or editor destruction.
     void setGarbageCollector(rae::GarbageCollector* gc, const std::filesystem::path& settingsPath);
     void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture,
@@ -83,6 +106,10 @@ public:
     void closeImportResults() { importResultsOpen_ = false; importResultsFocused_ = false; }
     bool openScene(const std::filesystem::path& path, std::string& error);
     bool createScene(const std::filesystem::path& path, std::string& error);
+    // Save scene references only; referenced assets must already be published.
+    bool saveSceneAs(const std::filesystem::path& path, std::string& error);
+    // Save one applied material without saving Actors or other assets/drafts.
+    bool saveMaterialAsset(assets::AssetId id, std::string& error);
     scene::ActorId selectedActor() const { return selectedActor_; }
     // Full selection; the primary Actor (gizmo pivot / Scene and Details target) is selectedActor().
     [[nodiscard]] const std::vector<scene::ActorId>& selection() const noexcept { return selection_; }
@@ -95,7 +122,40 @@ public:
     // Editor command registry (shortcuts + Edit menu). Exposed for tests so the
     // same ids the UI uses can be invoked and their enablement inspected.
     [[nodiscard]] const EditorCommandRegistry& commands() const noexcept { return commands_; }
+    // Engine/editor commands; the same callbacks are used by the bottom console.
+    ConsoleResult executeConsoleCommand(std::string_view command);
+    [[nodiscard]] const EditorConsole& console() const noexcept { return console_; }
 private:
+    bool drawViewports(renderer::SceneSettings&, renderer::SceneRenderer&, bool mainSurfaceVisible);
+    void resetViewportBindings();
+    void switchActiveViewport(renderer::SceneSettings&, int index);
+    std::array<ViewportInteraction, 4> otherViewports_;
+    std::array<renderer::SceneSettings, 4> viewportSettings_;
+    bool quadView_ = false, viewportMaximized_ = false, viewportsInitialized_ = false;
+    int activeViewport_ = 0, pendingActiveViewport_ = -1, pendingQuadView_ = -1, pendingMaximized_ = -1;
+    renderer::SceneSettings* cameraSettings_ = nullptr; // borrowed during draw
+    void drawCameraDetails(scene::Actor& actor);
+    void pushCameraEdit(scene::ActorId, const scene::Transform&, const camera::Lens&,
+                        const scene::Transform&, const camera::Lens&, const char* label);
+    camera::Lens cameraDetailsBefore_;
+    void drawCameraPreview(renderer::SceneRenderer&);
+    scene::ActorId cameraPreviewActor_ = 0;
+    bool cameraPreviewOpen_ = false, cameraPreviewFocused_ = false;
+    std::string cameraPreviewError_;
+    bool startupCameraPending_ = false;
+    void registerConsole(renderer::SceneRenderer& renderer);
+    void drawStatusBar(renderer::SceneRenderer& renderer, float height);
+    void drawOutputLog();
+    void drawConsoleInput(const char* id, float width, bool acceptFocusRequest);
+    void recordConsoleStatus();
+    EditorConsole console_;
+    std::array<char, 4097> consoleInput_{};
+    std::array<char, 128> consoleFilter_{};
+    std::string consoleLastStatus_;
+    bool consoleInputActive_ = false, outputLogFocused_ = false;
+    bool outputLogOpen_ = false, consoleFocusRequested_ = false;
+    bool outputLogFocusRequested_ = false, outputAutoScroll_ = true;
+    bool validateSceneReferences(const scene::World& world, std::string& error) const;
     void drawOutliner();
     void drawScene(const renderer::SceneRenderer& renderer);
     void drawSceneLighting(renderer::SceneSettings& settings);
@@ -108,7 +168,11 @@ private:
     void duplicateSelectedActor();
     void duplicateForDrag();
     bool createMeshActor(assets::AssetId mesh, const scene::Transform& transform, const std::string& label);
-    void assignActorMaterial(scene::ActorId actor, assets::AssetId material);
+    void createLightActor(scene::LightType type);
+    void drawLightDetails(scene::Actor& actor);
+    void pushLightEdit(scene::ActorId id, const scene::LightComponent& before,
+                       const scene::LightComponent& after, const char* field);
+    void assignActorMaterial(scene::ActorId actor, assets::AssetId material, std::size_t slot = 0);
     void registerCommands();
     void drawEditMenu();
     // Flips visibility for every selected Actor as one undoable edit (H).
@@ -131,6 +195,7 @@ private:
     // Tracks gizmo drags: remembers the last settled transform, then commits one
     // undo entry when the drag ends (UE-style scope around the interaction).
     void trackTransformEdit();
+    scene::LightComponent lightDetailsBefore_;
     void eraseActor(scene::ActorId id);
     void insertActor(std::size_t index, const scene::Actor& actor);
     void drawAssets();
@@ -149,7 +214,6 @@ private:
     void drawAssetDetails(renderer::SceneRenderer& renderer);
     void requestSceneOpen(const std::filesystem::path& path);
     void refreshContent();
-    bool saveSceneAs(const std::filesystem::path& path, std::string& error);
     void drawMaterial();
     void drawShader(renderer::SceneRenderer&);
     void selectMaterial(assets::AssetId);
@@ -216,6 +280,7 @@ private:
     assets::MeshGeometryKey assetDetailsMeshKey_;
     std::uint64_t assetDetailsShaderRevision_ = 0;
     std::array<float, 5> assetDetailsMaterialValues_{};
+    std::vector<std::pair<assets::AssetId, std::array<float, 9>>> assetDetailsSlotMaterials_;
     bool assetDetailsMaterialGrid_ = false, assetDetailsMaterialTwoSided_ = false;
     bool assetDetailsMaterialCullFront_ = false, assetDetailsMaterialDepthWrite_ = true;
     assets::MaterialDepthTest assetDetailsMaterialDepthTest_ = assets::MaterialDepthTest::Less;
@@ -231,7 +296,8 @@ private:
     assets::AssetId selectedMesh_ = 1, selectedMaterial_ = 1, pendingMaterial_ = 0;
     assets::MaterialAsset materialDraft_;
     std::string shaderDraft_, shaderSaved_, diagnostics_, status_;
-    bool sceneDirty_ = false, materialsDirty_ = false, materialDraftDirty_ = false;
+    bool sceneDirty_ = false, materialDraftDirty_ = false;
+    std::unordered_set<assets::AssetId> dirtyMaterials_;
     bool closeRequested_ = false, shaderReloadRequested_ = false, sceneReloadRequested_ = false;
     bool openMaterialTab_ = false, openShaderTab_ = false;
     bool materialWindowOpen_ = false, materialWindowFocusRequested_ = false;

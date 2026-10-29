@@ -7,8 +7,10 @@
 #include <RestArtEngine/Assets/AssetFile.h>
 #include <RestArtEngine/Assets/AssetOperations.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
+#include <RestArtEngine/Renderer/Lighting.h>
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <ImGuizmo.h>
 #include <iostream>
 #include <algorithm>
 #include <cfloat>
@@ -176,18 +178,23 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     world_.createDefaultScene(assets_);
     scenePath_ = project_.defaultScene;
     if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    startupCameraPending_ = true;
     refreshContent();
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
     selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
-    if (auto* actor = world_.findActor(selectedActor_)) selectedMaterial_ = actor->mesh.materialId;
+    if (auto* actor = world_.findActor(selectedActor_); actor && !actor->light && !actor->camera) {
+        const auto* mesh = assets_.findMesh(actor->mesh.meshId);
+        selectedMaterial_ = mesh ? actor->mesh.materialForSlot(*mesh, 0) : actor->mesh.materialId;
+    }
     if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
     shaderDraft_ = shaderSaved_ = renderer.shaderSource();
     shaderDraft_.reserve(std::max<std::size_t>(65536, shaderDraft_.size() * 2));
     status_ = "Project loaded. Actor edits and material parameters preview live; Shader edits require Apply.";
     registerCommands();
+    registerConsole(renderer);
     return true;
 }
 
@@ -227,6 +234,21 @@ void SceneEditor::registerCommands() {
         [this] { return assets_.findMesh(assets::EngineCubeMeshId) != nullptr && assets_.findMaterial(assets::EngineDefaultMaterialId) != nullptr; });
     commands_.add("scene.save", "scene", "Save Scene", "Ctrl+S", ImGuiMod_Ctrl | ImGuiKey_S,
         [this] { saveScene(); });
+    const auto addLightCommand = [this](const char* id, const char* label, scene::LightType type) {
+        commands_.add(id, "light", label, "", 0, [this, type] { createLightActor(type); },
+            [this] { return !viewport_.isUsing(); });
+    };
+    addLightCommand("actor.addDirectionalLight", "Directional Light", scene::LightType::Directional);
+    addLightCommand("actor.addSkyLight", "Sky Light", scene::LightType::Sky);
+    addLightCommand("actor.addRectLight", "Rect Light", scene::LightType::Rect);
+    addLightCommand("actor.addSpotLight", "Spot Light", scene::LightType::Spot);
+    addLightCommand("actor.addPointLight", "Point Light", scene::LightType::Point);
+    commands_.add("actor.addCamera", "actor", "Camera", "", 0,
+        [this] { renderer::SceneSettings defaults; createCameraActor(cameraSettings_ ? *cameraSettings_ : defaults, false); },
+        [this] { return !viewport_.isUsing(); });
+    commands_.add("camera.fromView", "camera", "Camera from current view", "", 0,
+        [this] { if (cameraSettings_) createCameraActor(*cameraSettings_); },
+        [this] { return cameraSettings_ && !viewport_.isUsing(); });
     commands_.add("actor.addFromMesh", "actor", "Add Actor from mesh", "", 0,
         [this] {
             scene::Transform transform;
@@ -329,19 +351,66 @@ bool SceneEditor::applyMaterial() {
     }
     *target = materialDraft_;
     materialDraftDirty_ = false;
-    materialsDirty_ = sceneDirty_ = true;
+    dirtyMaterials_.insert(target->id);
     status_ = "Material applied to every Actor referencing this asset. Save to persist.";
+    return true;
+}
+
+bool SceneEditor::validateSceneReferences(const scene::World& world, std::string& error) const {
+    // This is a reference-existence check, not an asset save or geometry scan.
+    // Use fresh disk headers so deleted files or external moves cannot pass via
+    // the browser's cached tree. Do not load or render unrelated thumbnails.
+    assets::AssetRegistry persisted;
+    persisted.setContentRoot(project_.contentRoot);
+    persisted.setEngineContentRoot(project_.engineRoot / "Content");
+    if (!persisted.scan(error, false)) return false;
+    std::unordered_set<assets::AssetId> meshes, materials;
+    for (const auto& entry : persisted.entries()) {
+        if (!entry.id || assets::isEngineAssetId(entry.id) != (entry.origin == assets::AssetOrigin::Engine)) continue;
+        const auto relative = entry.path.lexically_relative(entry.origin == assets::AssetOrigin::Engine ?
+            project_.engineRoot / "Content" : project_.contentRoot);
+        if (relative.empty() || relative.is_absolute()) continue;
+        if (entry.type == assets::AssetType::Material && *relative.begin() == "Materials") materials.insert(entry.id);
+        if (entry.type == assets::AssetType::Mesh && assets::isAssetContainerFile(entry.path) &&
+            (entry.origin == assets::AssetOrigin::Project || *relative.begin() == "Meshes")) meshes.insert(entry.id);
+    }
+    for (const auto& actor : world.actors) {
+        if (actor.light || actor.camera) continue;
+        const auto* mesh = assets_.findMesh(actor.mesh.meshId);
+        const bool legacy = mesh && mesh->origin == assets::AssetOrigin::Project &&
+            ((mesh->id == 1 && mesh->primitive == assets::MeshPrimitive::Sphere) ||
+             (mesh->id == 2 && mesh->primitive == assets::MeshPrimitive::Plane) ||
+             (mesh->id == 3 && mesh->primitive == assets::MeshPrimitive::Cube));
+        bool materialsSaved = materials.contains(actor.mesh.materialId);
+        for (const auto id : actor.mesh.materialOverrides) if (id) materialsSaved &= materials.contains(id);
+        if (mesh) for (const auto& slot : mesh->materialSlots)
+            if (slot.defaultMaterialId) materialsSaved &= materials.contains(slot.defaultMaterialId);
+        if ((!legacy && !meshes.contains(actor.mesh.meshId)) || !materialsSaved) {
+            error = "Actor '" + actor.name + "' references an asset that is not saved in Content. "
+                "Save the asset or use Save All before saving this scene.";
+            return false;
+        }
+    }
+    error.clear();
+    return true;
+}
+
+bool SceneEditor::saveMaterialAsset(assets::AssetId id, std::string& error) {
+    if (id == selectedMaterial_ && materialDraftDirty_) {
+        error = "Apply or discard the material draft before saving the asset.";
+        return false;
+    }
+    if (!assets_.saveMaterial(id, project_.contentRoot / "Materials", error)) return false;
+    dirtyMaterials_.erase(id);
+    refreshContent();
+    status_ = "Saved material asset. Scene and other assets were not saved.";
     return true;
 }
 
 bool SceneEditor::saveScene(renderer::SceneRenderer* renderer) {
     std::string error;
-    // Persist materials before the scene so its GUID references always resolve.
-    if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
-        status_ = "Material save failed: " + error; return false;
-    }
-    if (!assets_.saveMeshes(project_.contentRoot, error)) {
-        status_ = "Mesh save failed: " + error; return false;
+    if (!validateSceneReferences(world_, error)) {
+        status_ = "Scene save failed: " + error; return false;
     }
     if (!world_.save(scenePath_, assets_, error)) {
         status_ = "Scene save failed: " + error; return false;
@@ -364,7 +433,7 @@ bool SceneEditor::saveScene(renderer::SceneRenderer* renderer) {
             (void)assets::writeSceneThumbnail(sidecarPath, thumbnail, previewError);
         }
     }
-    status_ = "Saved " + pathText(scenePath_) + " (applied materials only).";
+    status_ = "Saved scene " + pathText(scenePath_) + ". Asset changes are saved separately.";
     return true;
 }
 
@@ -374,10 +443,13 @@ bool SceneEditor::saveAll(renderer::SceneRenderer& renderer) {
         status_ = "Shader compile failed. Nothing was closed; fix the error or discard your draft."; return false;
     }
     std::string error;
-    if (!renderer.saveShaderSource(error)) { status_ = error; return false; }
-    shaderSaved_ = renderer.shaderSource();
+    if (renderer.shaderSource() != shaderSaved_) {
+        if (!renderer.saveShaderSource(error)) { status_ = error; return false; }
+        shaderSaved_ = renderer.shaderSource();
+    }
     if (!assets_.saveMaterials(project_.contentRoot / "Materials", error)) { status_ = error; return false; }
-    materialsDirty_ = false;
+    dirtyMaterials_.clear();
+    if (!assets_.saveMeshes(project_.contentRoot, error)) { status_ = error; return false; }
     if (!saveScene(&renderer)) return false;
     if (projectSettingsDirty_ && !saveProjectSettings()) return false;
     status_ = "Saved scene, material assets, applied shader source and project settings.";
@@ -385,7 +457,7 @@ bool SceneEditor::saveAll(renderer::SceneRenderer& renderer) {
 }
 
 bool SceneEditor::dirty(const renderer::SceneRenderer& renderer) const {
-    return sceneDirty_ || materialsDirty_ || materialDraftDirty_ || projectSettingsDirty_ ||
+    return sceneDirty_ || !dirtyMaterials_.empty() || materialDraftDirty_ || projectSettingsDirty_ ||
         shaderDraft_ != renderer.shaderSource() || renderer.shaderSource() != shaderSaved_;
 }
 
@@ -418,6 +490,7 @@ void SceneEditor::selectActor(scene::ActorId id, bool additive) {
 }
 
 void SceneEditor::eraseActor(scene::ActorId id) {
+    if (world_.defaultCameraActor == id) world_.defaultCameraActor = 0;
     auto& actors = world_.actors;
     actors.erase(std::remove_if(actors.begin(), actors.end(),
         [id](const scene::Actor& actor) { return actor.id == id; }), actors.end());
@@ -444,23 +517,289 @@ bool SceneEditor::createMeshActor(assets::AssetId meshId, const scene::Transform
     return true;
 }
 
-void SceneEditor::assignActorMaterial(scene::ActorId actorId, assets::AssetId materialId) {
+void SceneEditor::createLightActor(scene::LightType type) {
+    const std::string name = std::string(scene::lightTypeName(type)) + " Light";
+    selectedActor_ = world_.createLight(name, type);
+    auto& actor = *world_.findActor(selectedActor_);
+    actor.transform.position[1] = 3;
+    if (type == scene::LightType::Directional || type == scene::LightType::Spot || type == scene::LightType::Rect)
+        actor.transform.rotation[0] = -60;
+    selection_.assign(1, selectedActor_);
+    pushActorCreated(actor, "Create " + name);
+    sceneDirty_ = true;
+    status_ = "Created " + name + ". Edit its properties in Details; Save Scene to persist.";
+}
+
+scene::ActorId SceneEditor::createCameraActor(const renderer::SceneSettings& settings, bool fromView) {
+    selectedActor_ = world_.createCamera("Camera");
+    auto& actor = *world_.findActor(selectedActor_);
+    if (fromView) {
+        const auto source = renderer::resolveCamera(settings);
+        std::copy_n(source.pose.position, 3, actor.transform.position);
+        std::copy_n(source.pose.rotation, 3, actor.transform.rotation);
+        actor.camera = source.lens;
+    }
+    selection_.assign(1, selectedActor_);
+    pushActorCreated(actor, fromView ? "Create Camera from view" : "Create Camera");
+    sceneDirty_ = true;
+    status_ = "Camera created. View or pilot it from Camera Details.";
+    return actor.id;
+}
+
+bool SceneEditor::setCameraView(renderer::SceneSettings& settings, scene::ActorId id, bool pilot) {
+    const bool result = viewport_.setCameraView(settings, world_, id, pilot);
+    if (result) status_ = pilot ? "Piloting camera: navigation edits the scene camera." :
+        "Viewing camera: navigation is locked. Return to Free view to navigate.";
+    return result;
+}
+
+bool SceneEditor::setDefaultCamera(scene::ActorId id) {
+    const auto* actor = world_.findActor(id);
+    if (id && (!actor || !actor->camera)) return false;
+    const auto before = world_.defaultCameraActor;
+    if (before == id) return true;
+    world_.defaultCameraActor = id;
+    undo_.push("Set default output camera", [this, before] { world_.defaultCameraActor = before; sceneDirty_ = true; },
+        [this, id] { world_.defaultCameraActor = id; sceneDirty_ = true; });
+    sceneDirty_ = true;
+    return true;
+}
+
+void SceneEditor::pushCameraEdit(scene::ActorId id, const scene::Transform& beforeTransform,
+    const camera::Lens& beforeLens, const scene::Transform& afterTransform, const camera::Lens& afterLens,
+    const char* label) {
+    const auto sameLens = [](const camera::Lens& a, const camera::Lens& b) {
+        return a.projection == b.projection && a.verticalFovDegrees == b.verticalFovDegrees &&
+            a.orthographicHeight == b.orthographicHeight && a.nearClip == b.nearClip &&
+            a.farClip == b.farClip && a.aspectRatio == b.aspectRatio &&
+            a.depthOfField.enabled == b.depthOfField.enabled && a.depthOfField.focusDistance == b.depthOfField.focusDistance &&
+            a.depthOfField.fStop == b.depthOfField.fStop && a.depthOfField.sensorHeightMm == b.depthOfField.sensorHeightMm;
+    };
+    if (std::memcmp(&beforeTransform, &afterTransform, sizeof(beforeTransform)) == 0 && sameLens(beforeLens, afterLens)) return;
+    undo_.push(label,
+        [this, id, beforeTransform, beforeLens] { if (auto* target = world_.findActor(id); target && target->camera) {
+            target->transform = beforeTransform; target->camera = beforeLens; sceneDirty_ = true;
+        } },
+        [this, id, afterTransform, afterLens] { if (auto* target = world_.findActor(id); target && target->camera) {
+            target->transform = afterTransform; target->camera = afterLens; sceneDirty_ = true;
+        } });
+    sceneDirty_ = true;
+}
+
+void SceneEditor::drawCameraDetails(scene::Actor& actor) {
+    ImGui::SeparatorText("Camera");
+    ImGui::TextWrapped("Camera looks along local -Z. Scale does not change its lens.");
+    auto& lens = *actor.camera;
+    int projection = static_cast<int>(lens.projection);
+    auto before = lens;
+    const ImGuiID projectionId = ImGui::GetID("Projection");
+    ImGui::TextUnformatted("Projection");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::PushOverrideID(projectionId);
+    const bool projectionChanged = ImGui::Combo("", &projection, "Perspective\0Orthographic\0");
+    ImGui::PopID();
+    if (projectionChanged) {
+        lens.projection = static_cast<camera::Projection>(projection);
+        pushCameraEdit(actor.id, actor.transform, before, actor.transform, lens, "Camera projection");
+    }
+    const auto edit = [&](const char* label, float& value, float step, float minimum, float maximum) {
+        const auto old = lens;
+        // Keep the original widget ID for commands/tests while stacking the
+        // visible label above its full-width field in narrow Details panels.
+        const ImGuiID id = ImGui::GetID(label);
+        ImGui::TextWrapped("%s", label);
+        ImGui::SetNextItemWidth(-1);
+        ImGui::PushOverrideID(id);
+        const bool valueChanged = ImGui::DragFloat("", &value, step, minimum, maximum, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::PopID();
+        if (valueChanged) {
+            if (camera::valid(lens)) sceneDirty_ = true;
+            else { lens = old; status_ = "Invalid camera lens; keep far / near below one million and aspect zero or at least 0.001."; }
+        }
+        if (ImGui::IsItemActivated()) cameraDetailsBefore_ = old;
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            pushCameraEdit(actor.id, actor.transform, cameraDetailsBefore_, actor.transform, lens, "Camera lens");
+    };
+    if (lens.projection == camera::Projection::Perspective) edit("Vertical FOV (degrees)", lens.verticalFovDegrees, .2f, 1, 175);
+    else edit("Orthographic height", lens.orthographicHeight, .05f, .001f, 1000000);
+    edit("Near clip", lens.nearClip, .01f, std::max(.001f, lens.farClip / 1000000), lens.farClip - .001f);
+    edit("Far clip", lens.farClip, 1, lens.nearClip + .001f, std::min(1000000.0f, lens.nearClip * 1000000));
+    edit("Aspect (0 = viewport)", lens.aspectRatio, .01f, 0, 10);
+    ImGui::SeparatorText("Depth of field");
+    before = lens;
+    if (ImGui::Checkbox("Enable depth of field", &lens.depthOfField.enabled))
+        pushCameraEdit(actor.id, actor.transform, before, actor.transform, lens, "Camera depth of field");
+    edit("Focus distance (m)", lens.depthOfField.focusDistance, .05f, .01f, 1000000);
+    edit("Aperture (f-stop)", lens.depthOfField.fStop, .05f, .7f, 128);
+    edit("Sensor height (mm)", lens.depthOfField.sensorHeightMm, .1f, 1, 100);
+    if (lens.depthOfField.enabled && !renderer::depthOfFieldEligible(lens))
+        ImGui::TextWrapped(lens.projection == camera::Projection::Orthographic ?
+            "Depth of field is inactive for orthographic cameras." : "Focus distance must exceed focal length.");
+    ImGui::TextWrapped("Progressive uses lens sampling. Other color views use screen-space depth of field; data views stay sharp.");
+    if (ImGui::Button(world_.defaultCameraActor == actor.id ? "Default output camera" : "Set default output camera"))
+        setDefaultCamera(actor.id);
+    if (ImGui::Button("Open camera preview")) showCameraPreview(actor.id);
+    if (cameraSettings_) {
+        if (ImGui::Button("View camera")) viewport_.requestCameraView(actor.id, false);
+        ImGui::SameLine();
+        if (ImGui::Button("Pilot camera")) viewport_.requestCameraView(actor.id, true);
+        if (ImGui::Button("Align camera to current view")) {
+            const auto current = renderer::resolveCamera(*cameraSettings_);
+            const auto oldTransform = actor.transform;
+            const auto oldLens = lens;
+            std::copy_n(current.pose.position, 3, actor.transform.position);
+            std::copy_n(current.pose.rotation, 3, actor.transform.rotation);
+            lens = current.lens;
+            pushCameraEdit(actor.id, oldTransform, oldLens, actor.transform, lens, "Align camera to view");
+        }
+    }
+}
+
+void SceneEditor::drawCameraPreview(renderer::SceneRenderer& renderer) {
+    cameraPreviewFocused_ = false;
+    if (!cameraPreviewOpen_) return;
+    ImGui::SetNextWindowSize({480, 340}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Camera Preview", &cameraPreviewOpen_)) {
+        cameraPreviewFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        const auto* actor = world_.findActor(cameraPreviewActor_);
+        if (!actor || !actor->camera) ImGui::TextWrapped("Camera is no longer available. Select a camera and open its preview.");
+        else {
+            ImGui::Text("%s | Raster preview", actor->name.c_str());
+            ImGui::TextDisabled("Independent view; scene camera is not moved by previewing.");
+            auto available = ImGui::GetContentRegionAvail();
+            if (available.x > 1 && available.y > 1) {
+                camera::Camera source;
+                source.lens = *actor->camera;
+                std::copy_n(actor->transform.position, 3, source.pose.position);
+                std::copy_n(actor->transform.rotation, 3, source.pose.rotation);
+                const float aspect = source.lens.aspectRatio > 0 ? source.lens.aspectRatio : available.x / available.y;
+                ImVec2 imageSize{available.x, available.x / aspect};
+                if (imageSize.y > available.y) imageSize = {available.y * aspect, available.y};
+                const auto width = static_cast<std::uint32_t>(std::clamp(imageSize.x, 16.0f, 1024.0f));
+                const auto height = static_cast<std::uint32_t>(std::clamp(imageSize.y, 16.0f, 1024.0f));
+                if (renderer.renderCameraPreview(world_, assets_, source, width, height, cameraPreviewError_,
+                    cameraSettings_ ? cameraSettings_->exposure : 1.0f)) {
+                    const auto position = ImGui::GetCursorScreenPos();
+                    ImGui::GetWindowDrawList()->AddRectFilled(position, {position.x + available.x, position.y + available.y}, IM_COL32(0,0,0,255));
+                    ImGui::SetCursorScreenPos({position.x + (available.x - imageSize.x) * .5f, position.y + (available.y - imageSize.y) * .5f});
+                    ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(renderer.previewTexture(renderer::PreviewSlot::Camera))), imageSize);
+                } else ImGui::TextWrapped("Preview unavailable: %s", cameraPreviewError_.c_str());
+            }
+        }
+    }
+    ImGui::End();
+}
+
+void SceneEditor::pushLightEdit(scene::ActorId id, const scene::LightComponent& before,
+                                const scene::LightComponent& after, const char* field) {
+    const bool same = before.type == after.type && before.intensity == after.intensity &&
+        before.range == after.range && before.innerConeAngle == after.innerConeAngle &&
+        before.outerConeAngle == after.outerConeAngle && before.width == after.width &&
+        before.height == after.height && before.castShadows == after.castShadows &&
+        std::equal(std::begin(before.color), std::end(before.color), std::begin(after.color));
+    if (same) return;
+    undo_.push(std::string("Edit Light ") + field,
+        [this, id, before] { if (auto* target = world_.findActor(id); target && target->light) {
+            target->light = before; sceneDirty_ = true;
+        } },
+        [this, id, after] { if (auto* target = world_.findActor(id); target && target->light) {
+            target->light = after; sceneDirty_ = true;
+        } }, UndoStack::Merge{"light." + std::to_string(id) + "." + field, 700});
+}
+
+void SceneEditor::drawLightDetails(scene::Actor& actor) {
+    auto& light = *actor.light;
+    ImGui::SeparatorText((std::string(scene::lightTypeName(light.type)) + " Light").c_str());
+    const auto finishEdit = [&](const scene::LightComponent& before, const char* field) {
+        if (ImGui::IsItemActivated()) lightDetailsBefore_ = before;
+        if (ImGui::IsItemDeactivatedAfterEdit()) pushLightEdit(actor.id, lightDetailsBefore_, light, field);
+    };
+    auto before = light;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::ColorEdit3("##LightColor", light.color, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)) {
+        for (auto& channel : light.color) channel = std::clamp(channel, 0.0f, 1000000.0f);
+        sceneDirty_ = true;
+    }
+    finishEdit(before, "Color");
+    ImGui::TextDisabled("Color (linear RGB)");
+    before = light;
+    ImGui::SetNextItemWidth(-1);
+    sceneDirty_ |= ImGui::DragFloat("##LightIntensity", &light.intensity, .05f, 0, 1000000, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+    finishEdit(before, "Intensity");
+    ImGui::TextDisabled("Intensity");
+    const bool local = light.type == scene::LightType::Point || light.type == scene::LightType::Spot || light.type == scene::LightType::Rect;
+    if (local) {
+        before = light;
+        ImGui::SetNextItemWidth(-1);
+        sceneDirty_ |= ImGui::DragFloat("##LightRange", &light.range, .1f, .01f, 1000000, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        finishEdit(before, "Range");
+        ImGui::TextDisabled("Range (world units)");
+    }
+    if (light.type == scene::LightType::Spot) {
+        before = light;
+        ImGui::SetNextItemWidth(-1);
+        sceneDirty_ |= ImGui::DragFloat("##LightInnerCone", &light.innerConeAngle, .25f, 0, light.outerConeAngle, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        light.innerConeAngle = std::clamp(light.innerConeAngle, 0.0f, light.outerConeAngle);
+        finishEdit(before, "Inner cone");
+        ImGui::TextDisabled("Inner half-angle (degrees)");
+        before = light;
+        ImGui::SetNextItemWidth(-1);
+        sceneDirty_ |= ImGui::DragFloat("##LightOuterCone", &light.outerConeAngle, .25f, .1f, 89, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        light.innerConeAngle = std::min(light.innerConeAngle, light.outerConeAngle);
+        finishEdit(before, "Outer cone");
+        ImGui::TextDisabled("Outer half-angle (degrees)");
+    }
+    if (light.type == scene::LightType::Rect) {
+        before = light;
+        float size[] = {light.width, light.height};
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::DragFloat2("##LightSize", size, .02f, .001f, 1000000, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+            light.width = size[0]; light.height = size[1]; sceneDirty_ = true;
+        }
+        finishEdit(before, "Size");
+        ImGui::TextDisabled("Width / Height (world units)");
+        ImGui::TextWrapped("One-sided rectangular emitter on local X/Y, emitting along -Z. Lighting uses four-point rectangle sampling.");
+    }
+    if (light.type == scene::LightType::Sky)
+        ImGui::TextWrapped("Procedural indirect environment lighting, without an HDRI. Position and rotation do not affect the sky light.");
+    else {
+        before = light;
+        if (ImGui::Checkbox("Cast shadows", &light.castShadows)) {
+            pushLightEdit(actor.id, before, light, "Cast shadows"); sceneDirty_ = true;
+        }
+        ImGui::TextWrapped("Local / additional shadows: choose Analytic rays for raster and Realtime GI. Hardware shadows apply in hardware preview (GI Disabled) and progressive Path Tracing. The first visible shadow-casting directional light with positive intensity also supports shadow maps. Scene Shadow Disabled overrides all light shadows.");
+    }
+}
+
+void SceneEditor::assignActorMaterial(scene::ActorId actorId, assets::AssetId materialId, std::size_t slot) {
     auto* actor = world_.findActor(actorId);
-    if (!actor || !actor->visible || !assets_.findMaterial(materialId)) return;
-    const auto before = actor->mesh.materialId;
-    if (before == materialId) return;
-    actor->mesh.materialId = materialId;
-    // Assign only this instance. Shared mesh/material assets and the current
-    // selection remain untouched throughout the drag and undo/redo.
+    const auto* mesh = actor ? assets_.findMesh(actor->mesh.meshId) : nullptr;
+    if (!actor || actor->light || !mesh || slot >= mesh->materialSlotCount() ||
+        (materialId && !assets_.findMaterial(materialId))) return;
+    const auto before = actor->mesh;
+    if (mesh->materialSlots.empty() && slot == 0 && materialId) {
+        actor->mesh.materialId = materialId;
+        actor->mesh.materialOverrides.clear();
+    } else {
+        // A repeated material drop is a no-op, but Reset must still remove an
+        // explicit binding even when its inherited material happens to match.
+        if (materialId && actor->mesh.materialForSlot(*mesh, slot) == materialId) return;
+        if (actor->mesh.materialOverrides.size() <= slot) actor->mesh.materialOverrides.resize(slot + 1);
+        actor->mesh.materialOverrides[slot] = materialId;
+        while (!actor->mesh.materialOverrides.empty() && !actor->mesh.materialOverrides.back())
+            actor->mesh.materialOverrides.pop_back();
+    }
+    const auto after = actor->mesh;
+    if (before.materialId == after.materialId && before.materialOverrides == after.materialOverrides) return;
     undo_.push("Assign Material",
         [this, actorId, before] {
-            if (auto* target = world_.findActor(actorId)) { target->mesh.materialId = before; sceneDirty_ = true; }
+            if (auto* target = world_.findActor(actorId)) { target->mesh = before; sceneDirty_ = true; }
         },
-        [this, actorId, materialId] {
-            if (auto* target = world_.findActor(actorId)) { target->mesh.materialId = materialId; sceneDirty_ = true; }
+        [this, actorId, after] {
+            if (auto* target = world_.findActor(actorId)) { target->mesh = after; sceneDirty_ = true; }
         });
     sceneDirty_ = true;
-    status_ = "Assigned material to '" + actor->name + "'. Save Scene to persist.";
+    status_ = "Assigned material to '" + actor->name + "', slot " + std::to_string(slot) + ". Save Scene to persist.";
 }
 
 void SceneEditor::pushActorCreated(scene::Actor actor, const std::string& label) {
@@ -569,6 +908,7 @@ void SceneEditor::trackTransformEdit() {
 }
 
 bool SceneEditor::undo() {
+    viewport_.stopCameraNavigation(world_);
     if (!undo_.undo()) return false;
     sceneDirty_ = true;
     status_ = "Undo: " + undo_.redoLabel();
@@ -576,6 +916,7 @@ bool SceneEditor::undo() {
 }
 
 bool SceneEditor::redo() {
+    viewport_.stopCameraNavigation(world_);
     if (!undo_.redo()) return false;
     sceneDirty_ = true;
     status_ = "Redo: " + undo_.undoLabel();
@@ -859,6 +1200,7 @@ void SceneEditor::toggleSelectedVisibility() {
 }
 
 void SceneEditor::deleteSelectedActor() {
+    viewport_.stopCameraNavigation(world_);
     if (selection_.empty() || viewport_.isUsing()) return;
     std::vector<std::pair<scene::Actor, std::size_t>> removed;
     for (const auto id : selection_) {
@@ -872,12 +1214,14 @@ void SceneEditor::deleteSelectedActor() {
     // Remove from the highest index down so the captured positions stay valid.
     std::sort(removed.begin(), removed.end(),
         [](const auto& a, const auto& b) { return a.second > b.second; });
+    const auto previousDefaultCamera = world_.defaultCameraActor;
     for (const auto& entry : removed) world_.removeActor(entry.first.id);
     undo_.push(removed.size() > 1 ? "Delete " + std::to_string(removed.size()) + " Actors"
                                   : "Delete " + removed.front().first.name,
-        [this, removed] {
+        [this, removed, previousDefaultCamera] {
             // Re-insert in ascending index order to restore the original order.
             for (auto it = removed.rbegin(); it != removed.rend(); ++it) insertActor(it->second, it->first);
+            world_.defaultCameraActor = previousDefaultCamera;
             selectedActor_ = removed.front().first.id;
             selection_.assign(1, selectedActor_);
             sceneDirty_ = true;
@@ -1007,20 +1351,52 @@ void drawThumbnail(ImDrawList* list, ImVec2 topLeft, float size, const assets::T
 } // namespace
 
 void SceneEditor::drawOutliner() {
-    ImGui::BeginDisabled(!assets_.findMesh(assets::EngineSphereMeshId) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
-    commandButton("actor.addSphere");
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!assets_.findMesh(assets::EngineCubeMeshId) || !assets_.findMaterial(assets::EngineDefaultMaterialId));
-    commandButton("actor.addCube");
-    ImGui::EndDisabled();
-    commandButton("actor.duplicate");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!selectedActor_ || viewport_.isUsing());
-    commandButton("actor.delete");
-    ImGui::EndDisabled();
+    const auto commandMenuItem = [&](const char* id) {
+        const auto* command = commands_.info(id);
+        if (command && ImGui::MenuItem(command->label.c_str(), nullptr, false, commands_.enabled(id)))
+            commands_.invoke(id);
+    };
+    const auto lightMenuItems = [&] {
+        for (const auto* id : {"actor.addDirectionalLight", "actor.addSkyLight", "actor.addRectLight",
+                               "actor.addSpotLight", "actor.addPointLight"}) commandMenuItem(id);
+    };
+    const auto& style = ImGui::GetStyle();
+    const float creationWidth = ImGui::CalcTextSize("+ Sphere").x + ImGui::CalcTextSize("+ Cube").x +
+        ImGui::CalcTextSize("+ Add").x + 6 * style.FramePadding.x + 2 * style.ItemSpacing.x;
+    const float minimumListHeight = ImGui::GetTextLineHeight() + 2 * style.WindowPadding.y;
+    const bool compact = creationWidth > ImGui::GetContentRegionAvail().x ||
+        ImGui::GetContentRegionAvail().y < 2 * ImGui::GetFrameHeightWithSpacing() + style.ItemSpacing.y + minimumListHeight;
+    // Creation occupies one row. On narrow/short panels, move the same commands
+    // into a menu so the Actor list retains a usable scrolling row.
+    if (compact) {
+        if (ImGui::Button("+ Add / Actions")) ImGui::OpenPopup("Add Actor");
+        if (ImGui::BeginPopup("Add Actor")) {
+            commandMenuItem("actor.addSphere");
+            commandMenuItem("actor.addCube");
+            commandMenuItem("actor.addCamera");
+            commandMenuItem("camera.fromView");
+            if (ImGui::BeginMenu("Light")) { lightMenuItems(); ImGui::EndMenu(); }
+            ImGui::Separator();
+            commandMenuItem("actor.duplicate");
+            commandMenuItem("actor.delete");
+            ImGui::EndPopup();
+        }
+    } else {
+        commandButton("actor.addSphere");
+        ImGui::SameLine();
+        commandButton("actor.addCube");
+        ImGui::SameLine();
+        if (ImGui::Button("+ Add")) ImGui::OpenPopup("Create light");
+        if (ImGui::BeginPopup("Create light")) {
+            lightMenuItems(); ImGui::Separator(); commandMenuItem("actor.addCamera");
+            commandMenuItem("camera.fromView"); ImGui::EndPopup();
+        }
+        commandButton("actor.duplicate");
+        continueButtonRow("Delete Actor");
+        commandButton("actor.delete");
+    }
     ImGui::Separator();
-    ImGui::BeginChild("Actor list", {0, 0});
+    ImGui::BeginChild("Actor list", {0, std::max(ImGui::GetContentRegionAvail().y, minimumListHeight)});
     bool deleteRequested = false;
     // One icon column per window: 20px rows keep the eye legible and give the
     // label a stable left edge.
@@ -1083,11 +1459,104 @@ void SceneEditor::setActorVisible(scene::ActorId id, bool visible) {
     status_ = visible ? "Actor visible." : "Actor hidden.";
 }
 
+void SceneEditor::applyStartupCamera(renderer::SceneSettings& settings) {
+    viewport_.stopCameraNavigation(world_);
+    viewport_.returnToFreeCamera(settings);
+    startupCameraPending_ = false;
+    if (!world_.startupCamera) return;
+    const auto& camera = *world_.startupCamera;
+    settings.cameraYaw = camera.yaw;
+    settings.cameraPitch = camera.pitch;
+    settings.cameraDistance = camera.distance;
+    settings.cameraLens = camera.lens;
+    settings.cameraPose = camera.pose;
+    std::copy(std::begin(camera.target), std::end(camera.target), settings.cameraTarget);
+    settings.exposure = camera.exposure;
+}
+
 void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
-    ImGui::SeparatorText("Lighting");
+    const auto* outputCamera = world_.findActor(world_.defaultCameraActor);
     ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12.0f, "Key light %.1f");
-    ImGui::TextDisabled("Temporary scene-level key light; it moves into a direct-light Actor component later.");
+    if (ImGui::BeginCombo("##DefaultCamera", outputCamera ? outputCamera->name.c_str() : "No default output camera")) {
+        if (ImGui::Selectable("None", world_.defaultCameraActor == 0)) setDefaultCamera(0);
+        for (const auto& actor : world_.actors) if (actor.camera) {
+            ImGui::PushID(static_cast<int>(actor.id));
+            if (ImGui::Selectable(actor.name.c_str(), actor.id == world_.defaultCameraActor)) setDefaultCamera(actor.id);
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("Default output camera (scene setting)");
+    ImGui::SeparatorText("Opening view");
+    if (ImGui::Button("Store current view")) {
+        scene::SceneCamera camera;
+        camera.yaw = settings.cameraYaw; camera.pitch = settings.cameraPitch;
+        camera.distance = settings.cameraDistance; camera.exposure = settings.exposure;
+        camera.lens = settings.cameraLens; camera.pose = settings.cameraPose;
+        std::copy(std::begin(settings.cameraTarget), std::end(settings.cameraTarget), camera.target);
+        world_.startupCamera = camera; sceneDirty_ = true;
+        status_ = "Opening view updated. Save Scene to persist it.";
+    }
+    if (world_.startupCamera) {
+        ImGui::SameLine();
+        if (ImGui::Button("Restore view")) {
+            auto restored = settings;
+            const auto& camera = *world_.startupCamera;
+            restored.cameraYaw = camera.yaw; restored.cameraPitch = camera.pitch; restored.cameraDistance = camera.distance;
+            std::copy_n(camera.target, 3, restored.cameraTarget);
+            restored.cameraLens = camera.lens; restored.cameraPose = camera.pose; restored.exposure = camera.exposure;
+            viewport_.requestFreeCamera(restored, true);
+        }
+        if (ImGui::Button("Clear opening view")) { world_.startupCamera.reset(); sceneDirty_ = true; }
+    }
+    ImGui::SeparatorText("Lighting");
+    const bool lightActors = std::any_of(world_.actors.begin(), world_.actors.end(),
+        [](const auto& actor) { return actor.light.has_value(); });
+    if (lightActors)
+        ImGui::TextWrapped("Light Actors control this scene. Select a light in the Outliner to edit it. Legacy lighting below is used only when no Light Actors exist, including hidden lights.");
+    const auto directLightCount = std::count_if(world_.actors.begin(), world_.actors.end(), [](const auto& actor) {
+        return actor.visible && actor.light && actor.light->type != scene::LightType::Sky;
+    });
+    if (static_cast<std::size_t>(directLightCount) > renderer::maxSceneLights)
+        ImGui::TextWrapped("Light limit exceeded: %zu visible direct lights. Only the first %u in scene order render; Sky lights are accumulated separately.",
+            static_cast<std::size_t>(directLightCount), renderer::maxSceneLights);
+    ImGui::BeginDisabled(lightActors);
+    auto& environment = world_.environment;
+    if (ImGui::Checkbox("Save lighting in scene", &environment.overrideLighting)) {
+        if (environment.overrideLighting) environment.directionalIntensity = settings.lightIntensity;
+        sceneDirty_ = true;
+    }
+    ImGui::SetNextItemWidth(-1);
+    if (environment.overrideLighting) {
+        sceneDirty_ |= ImGui::SliderFloat("##Light", &environment.directionalIntensity, 0, 12.0f, "Key light %.1f");
+        ImGui::SetNextItemWidth(-1);
+        sceneDirty_ |= ImGui::SliderFloat("Environment intensity", &environment.environmentIntensity, 0, 4);
+        auto& light = environment.areaLight;
+        sceneDirty_ |= ImGui::Checkbox("Rectangle area light", &light.enabled);
+        if (light.enabled) {
+            ImGui::TextWrapped("Legacy scene rectangle. Axis orientation is authored in the scene file. Direct lighting uses four-point sampling; progressive Path Tracing samples the emitter with MIS.");
+            sceneDirty_ |= ImGui::DragFloat3("Light center", light.center, .01f, -1000000, 1000000, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            float extentU = 0, extentV = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                extentU += light.halfAxisU[axis] * light.halfAxisU[axis];
+                extentV += light.halfAxisV[axis] * light.halfAxisV[axis];
+            }
+            extentU = std::sqrt(extentU); extentV = std::sqrt(extentV);
+            float dimensions[2] = {extentU * 2, extentV * 2};
+            if (ImGui::DragFloat2("Light size", dimensions, .01f, .001f, 1000, "%.3f", ImGuiSliderFlags_AlwaysClamp)) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    light.halfAxisU[axis] *= dimensions[0] / (2 * extentU);
+                    light.halfAxisV[axis] *= dimensions[1] / (2 * extentV);
+                }
+                sceneDirty_ = true;
+            }
+            sceneDirty_ |= ImGui::DragFloat3("Light radiance", light.radiance, .1f, 0, 1000000, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        }
+    } else {
+        ImGui::SliderFloat("##Light", &settings.lightIntensity, .1f, 12.0f, "Key light %.1f");
+        ImGui::TextDisabled("Temporary key light; enable scene lighting to persist it.");
+    }
+    ImGui::EndDisabled();
     ImGui::SeparatorText("Direct-light shadows");
     ImGui::TextDisabled("Ray tracing: all mesh actors");
     ImGui::Text("Shadow method");
@@ -1293,18 +1762,59 @@ bool SceneEditor::reimportContentAsset(std::string_view relativePath, const std:
     const std::string key(relativePath);
     assets::AssetImportOptions options;
     options.skipDegenerateTriangles = imgui::uiPreferences().importSkipDegenerateTriangles;
+    const auto* oldEntry = registry_.find(key);
+    const auto* oldMesh = oldEntry ? assets_.findMesh(oldEntry->id) : nullptr;
+    const auto meshId = oldMesh ? oldMesh->id : 0;
+    const auto oldSlots = oldMesh ? oldMesh->materialSlots : std::vector<assets::MeshMaterialSlot>{};
     auto result = assets::reimportAsset(assets_, project_.contentRoot, key, sourceOverride, options);
     const bool success = result.succeeded();
     error = result.error;
     importReportIsReimport_ = true;
     importReport_.items.clear();
     importReport_.items.push_back(std::move(result));
+    bool slotHistoryCleared = false;
     if (success) {
+        // Slot indices are an import detail. Preserve bindings by stable source
+        // identity when a DCC edit reorders the material table; never guess when
+        // a name/key is ambiguous or when a slot was removed.
+        const auto identity = [](const assets::MeshMaterialSlot& slot) -> const std::string& {
+            return slot.sourceKey.empty() ? slot.name : slot.sourceKey;
+        };
+        if (const auto* mesh = assets_.findMesh(meshId)) {
+            bool layoutChanged = oldSlots.size() != mesh->materialSlots.size();
+            if (!layoutChanged) for (std::size_t slot = 0; slot < oldSlots.size(); ++slot)
+                layoutChanged |= identity(oldSlots[slot]) != identity(mesh->materialSlots[slot]);
+            bool referenced = false;
+            bool indexedBindings = oldSlots.size() > 1 || mesh->materialSlotCount() > 1;
+            for (auto& actor : world_.actors) {
+                if (actor.light || actor.mesh.meshId != meshId) continue;
+                referenced = true;
+                indexedBindings |= !actor.mesh.materialOverrides.empty();
+                if (!layoutChanged || actor.mesh.materialOverrides.empty()) continue;
+                std::vector<assets::AssetId> remapped(mesh->materialSlotCount());
+                for (std::size_t oldSlot = 0; oldSlot < oldSlots.size() && oldSlot < actor.mesh.materialOverrides.size(); ++oldSlot) {
+                    const auto id = actor.mesh.materialOverrides[oldSlot];
+                    if (!id || identity(oldSlots[oldSlot]).empty()) continue;
+                    const auto& source = identity(oldSlots[oldSlot]);
+                    const auto same = [&](const assets::MeshMaterialSlot& slot) { return identity(slot) == source; };
+                    if (std::count_if(oldSlots.begin(), oldSlots.end(), same) != 1 ||
+                        std::count_if(mesh->materialSlots.begin(), mesh->materialSlots.end(), same) != 1) continue;
+                    const auto found = std::find_if(mesh->materialSlots.begin(), mesh->materialSlots.end(), same);
+                    remapped[static_cast<std::size_t>(found - mesh->materialSlots.begin())] = id;
+                }
+                while (!remapped.empty() && !remapped.back()) remapped.pop_back();
+                if (remapped != actor.mesh.materialOverrides) { actor.mesh.materialOverrides = std::move(remapped); sceneDirty_ = true; }
+            }
+            // Existing closures may contain index-based bindings from before
+            // reimport. A changed slot layout cannot safely replay that history.
+            if (layoutChanged && referenced && indexedBindings) { undo_.clear(); slotHistoryCleared = true; }
+        }
         refreshContent();
         selectedAsset_ = key;
         selectedMesh_ = importReport_.items.front().id;
         assetDetailsMeshValid_ = false;
         importStatus_ = "Reimported '" + key + "'. Existing scene references were retained.";
+        if (slotHistoryCleared) importStatus_ += " Slot bindings were matched by source identity; unmatched slots inherit. Undo history was cleared.";
         contentError_.clear();
     } else {
         importStatus_ = "Reimport failed: " + error;
@@ -1421,11 +1931,14 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
         }
     }
     if (!stagedWorld.load(path, stagedAssets, error)) return false;
+    resetViewportBindings();
+    cameraPreviewOpen_ = false;
     world_ = std::move(stagedWorld);
+    startupCameraPending_ = true;
     assets_ = std::move(stagedAssets);
     scenePath_ = path;
     sceneDirty_ = false;
-    materialsDirty_ = false;
+    dirtyMaterials_.clear();
     materialDraftDirty_ = false;
     pendingMaterial_ = 0;
     undo_.clear();
@@ -1434,9 +1947,10 @@ bool SceneEditor::openScene(const std::filesystem::path& path, std::string& erro
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
     selectedMaterial_ = assets_.materials.empty() ? 0 : assets_.materials.front().id;
-    if (auto* actor = world_.findActor(selectedActor_)) {
+    if (auto* actor = world_.findActor(selectedActor_); actor && !actor->light && !actor->camera) {
         selectedMesh_ = actor->mesh.meshId;
-        selectedMaterial_ = actor->mesh.materialId;
+        const auto* mesh = assets_.findMesh(actor->mesh.meshId);
+        selectedMaterial_ = mesh ? actor->mesh.materialForSlot(*mesh, 0) : actor->mesh.materialId;
     }
     if (const auto* material = assets_.findMaterial(selectedMaterial_)) materialDraft_ = *material;
     refreshContent();
@@ -1448,11 +1962,10 @@ bool SceneEditor::createScene(const std::filesystem::path& path, std::string& er
     error.clear();
     scene::World fresh;
     fresh.createDefaultScene(assets_);
-    assets::AssetLibrary library = assets_;
     std::error_code code;
     std::filesystem::create_directories(path.parent_path(), code);
     if (code) { error = "Cannot create the scene folder: " + code.message(); return false; }
-    if (!fresh.save(path, library, error)) return false;
+    if (!validateSceneReferences(fresh, error) || !fresh.save(path, assets_, error)) return false;
     return openScene(path, error);
 }
 
@@ -1461,7 +1974,7 @@ bool SceneEditor::saveSceneAs(const std::filesystem::path& path, std::string& er
     std::error_code code;
     std::filesystem::create_directories(path.parent_path(), code);
     if (code) { error = "Cannot create the scene folder: " + code.message(); return false; }
-    if (!world_.save(path, assets_, error)) return false;
+    if (!validateSceneReferences(world_, error) || !world_.save(path, assets_, error)) return false;
     scenePath_ = path;
     sceneDirty_ = false;
     refreshContent();
@@ -1661,11 +2174,18 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         assetDetailsOpen_ = false;
         return;
     }
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 330.0f), ImGuiCond_FirstUseEver);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const auto* inspectedMesh = entry->type == assets::AssetType::Mesh ? assets_.findMesh(entry->id) : nullptr;
+    const bool meshAttributes = inspectedMesh && (!inspectedMesh->materialSlots.empty() || inspectedMesh->uvChannelMask());
+    const ImVec2 preferredSize{std::min(meshAttributes ? 700.0f : 560.0f, std::max(320.0f, viewport->WorkSize.x - 32.0f)),
+        std::min(meshAttributes ? 600.0f : 330.0f, std::max(240.0f, viewport->WorkSize.y - 32.0f))};
+    ImGui::SetNextWindowSize(preferredSize, ImGuiCond_FirstUseEver);
     if (assetDetailsFocusRequested_) {
-        const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + (viewport->WorkSize.x - 560.0f) * 0.5f,
-            viewport->WorkPos.y + (viewport->WorkSize.y - 330.0f) * 0.5f), ImGuiCond_Always);
+        // This shared window may previously have inspected a small material.
+        // Fit an attributed mesh once on open, then respect manual resizing.
+        if (meshAttributes) ImGui::SetNextWindowSize(preferredSize, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + (viewport->WorkSize.x - preferredSize.x) * 0.5f,
+            viewport->WorkPos.y + (viewport->WorkSize.y - preferredSize.y) * 0.5f), ImGuiCond_Always);
         ImGui::SetNextWindowFocus();
         assetDetailsFocusRequested_ = false;
     }
@@ -1712,11 +2232,21 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
             const bool depthWrite = material && material->depthWrite;
             const auto depthTest = material ? material->depthTest : assets::MaterialDepthTest::Less;
             const auto key = mesh->geometryKey();
+            std::vector<std::pair<assets::AssetId, std::array<float, 9>>> slotMaterials;
+            slotMaterials.reserve(mesh->materialSlots.size());
+            for (const auto& slot : mesh->materialSlots) {
+                const auto id = slot.defaultMaterialId ? slot.defaultMaterialId : assets::EngineDefaultMaterialId;
+                const auto* bound = assets_.findMaterial(id);
+                slotMaterials.push_back({id, bound ? std::array<float, 9>{bound->baseColor[0], bound->baseColor[1],
+                    bound->baseColor[2], bound->roughness, bound->metallic, bound->grid ? 1.f : 0.f,
+                    static_cast<float>(bound->effectiveCullMode()), static_cast<float>(bound->depthTest),
+                    bound->depthWrite ? 1.f : 0.f} : std::array<float, 9>{}});
+            }
             if (!assetDetailsMeshValid_ || assetDetailsMeshId_ != mesh->id || assetDetailsMeshKey_ != key ||
                 assetDetailsShaderRevision_ != renderer.shaderRevision() || assetDetailsMaterialValues_ != values ||
                 assetDetailsMaterialGrid_ != grid || assetDetailsMaterialTwoSided_ != twoSided ||
                 assetDetailsMaterialCullFront_ != cullFront || assetDetailsMaterialDepthWrite_ != depthWrite ||
-                assetDetailsMaterialDepthTest_ != depthTest ||
+                assetDetailsMaterialDepthTest_ != depthTest || assetDetailsSlotMaterials_ != slotMaterials ||
                 !renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 scene::World previewWorld;
                 previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
@@ -1727,6 +2257,7 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
                 assetDetailsMaterialGrid_ = grid; assetDetailsMaterialTwoSided_ = twoSided;
                 assetDetailsMaterialCullFront_ = cullFront; assetDetailsMaterialDepthWrite_ = depthWrite;
                 assetDetailsMaterialDepthTest_ = depthTest;
+                assetDetailsSlotMaterials_ = std::move(slotMaterials);
             }
             if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
@@ -1747,6 +2278,11 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
 
     ImGui::SameLine();
     ImGui::BeginGroup();
+    // Keep actions reachable while arbitrarily many source slots/long paths
+    // scroll independently of the preview and the footer.
+    const float footerHeight = ImGui::GetFrameHeight() * 2 + ImGui::GetStyle().ItemSpacing.y * 3;
+    const float metadataHeight = std::max(80.0f, ImGui::GetContentRegionAvail().y - footerHeight);
+    ImGui::BeginChild("##asset-metadata", ImVec2(0, metadataHeight), ImGuiChildFlags_None);
     ImGui::Text("Name: %s", entry->name.c_str());
     ImGui::TextColored(imgui::assetTypeColor(entry->type), "Type: %s", assets::assetTypeName(entry->type));
     ImGui::Text("GUID: %s", entry->id ? assets::assetIdText(entry->id).c_str() : "-");
@@ -1759,6 +2295,14 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         if (const auto* mesh = assets_.findMesh(entry->id)) {
             ImGui::TextDisabled("Geometry");
             ImGui::Text("%zu vertices / %zu triangles", mesh->vertices.size(), mesh->indices.size() / 3);
+            ImGui::Text("Material slots: %zu", mesh->materialSlotCount());
+            for (std::size_t slot = 0; slot < mesh->materialSlots.size(); ++slot)
+                ImGui::TextWrapped("  %zu: %s", slot, mesh->materialSlots[slot].name.c_str());
+            if (!mesh->uvChannelMask()) ImGui::TextDisabled("UV channels: none");
+            for (std::size_t channel = 0; channel < assets::MaxMeshUvChannels; ++channel)
+                if (!mesh->uvChannels[channel].empty())
+                    ImGui::TextWrapped("UV%zu: %s (%zu vertices)", channel,
+                        mesh->uvNames[channel].empty() ? "Unnamed" : mesh->uvNames[channel].c_str(), mesh->uvChannels[channel].size());
             if (!mesh->sourcePath.empty()) ImGui::TextWrapped("Source file: %s", mesh->sourcePath.c_str());
         }
     } else if (entry->type == assets::AssetType::Material) {
@@ -1773,7 +2317,8 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         ImGui::TextDisabled("Scene");
         ImGui::TextWrapped("Open the scene to edit its Actors. The preview uses the saved thumbnail.");
     }
-    if (!assetDetailsError_.empty()) ImGui::TextDisabled("%s", assetDetailsError_.c_str());
+    if (!assetDetailsError_.empty()) ImGui::TextWrapped("%s", assetDetailsError_.c_str());
+    ImGui::EndChild();
     ImGui::Spacing();
     const auto copyId = entry->readOnly() && entry->type == assets::AssetType::Material ? entry->id : 0;
     if (ImGui::Button("Open", ImVec2(90.0f, 0.0f))) {
@@ -1787,14 +2332,14 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         if (ImGui::Button("Copy to Project")) pendingContentCopy_ = copyId;
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
+    continueButtonRow("Close");
     if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) assetDetailsOpen_ = false;
     ImGui::EndGroup();
     ImGui::End();
 }
 
 void SceneEditor::requestSceneOpen(const std::filesystem::path& path) {
-    if (sceneDirty_ || materialsDirty_ || materialDraftDirty_) {
+    if (sceneDirty_ || !dirtyMaterials_.empty() || materialDraftDirty_) {
         pendingScenePath_ = path;
         sceneSwitchPrompt_ = true;
         return;
@@ -2035,13 +2580,20 @@ std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) co
             return "Built-in meshes are required by the editor.";
     }
     for (const auto& actor : world_.actors) {
+        if (actor.light || actor.camera) continue;
         if ((entry.type == assets::AssetType::Mesh && actor.mesh.meshId == entry.id) ||
-            (entry.type == assets::AssetType::Material && actor.mesh.materialId == entry.id))
+            (entry.type == assets::AssetType::Material && (actor.mesh.materialId == entry.id ||
+                std::find(actor.mesh.materialOverrides.begin(), actor.mesh.materialOverrides.end(), entry.id) !=
+                    actor.mesh.materialOverrides.end())))
             return "This asset is used by an Actor in the open scene.";
     }
+    if (entry.type == assets::AssetType::Material)
+        for (const auto& mesh : assets_.meshes)
+            for (const auto& slot : mesh.materialSlots)
+                if (slot.defaultMaterialId == entry.id) return "This material is used by a mesh material slot.";
     if (entry.type == assets::AssetType::Material && entry.id == selectedMaterial_ && materialWindowOpen_)
         return "Close the material editor before deleting this asset.";
-    if (entry.type == assets::AssetType::Material && (materialsDirty_ ||
+    if (entry.type == assets::AssetType::Material && (dirtyMaterials_.contains(entry.id) ||
         (entry.id == selectedMaterial_ && materialDraftDirty_)))
         return "Save or discard this material's changes before deleting it.";
     return {};
@@ -2072,6 +2624,7 @@ bool SceneEditor::deleteContentAsset(std::string_view relativePath, std::string&
         materialPreviewParamsValid_ = false;
     }
     if (pendingMaterial_ == id) pendingMaterial_ = 0;
+    dirtyMaterials_.erase(id);
     if (selectedAsset_ == key) selectedAsset_.clear();
     if (assetDetailsPath_ == key) {
         closeAssetDetails();
@@ -2473,6 +3026,12 @@ void SceneEditor::drawInstanceDetails() {
     if (ImGui::IsItemActivated() && settledTransformActor_ == actor->id) detailsBefore_ = settledTransform_;
     if (ImGui::IsItemDeactivatedAfterEdit()) pushDetailsTransform(actor->id, detailsBefore_, actor->transform, "Rotation");
     ImGui::TextDisabled("Rotation X / Y / Z (degrees)");
+    if (actor->camera) { drawCameraDetails(*actor); return; }
+    if (actor->light) {
+        ImGui::TextWrapped("Light direction is local -Z. Scale does not change light range or size.");
+        drawLightDetails(*actor);
+        return;
+    }
     ImGui::SetNextItemWidth(-1);
     if (ImGui::DragFloat3("##scale", actor->transform.scale, .02f, .01f, 100, "%.2f")) {
         for (auto& value : actor->transform.scale) value = std::clamp(value, .01f, 100.0f);
@@ -2494,43 +3053,91 @@ void SceneEditor::drawInstanceDetails() {
                 })) continue;
             const std::string label = candidate.name +
                 (candidate.origin == assets::AssetOrigin::Engine ? " (Engine)" : "") + "##" + std::to_string(candidate.id);
-            if (ImGui::Selectable(label.c_str(), actor->mesh.meshId == candidate.id)) {
-                actor->mesh.meshId = candidate.id; sceneDirty_ = true;
+            if (ImGui::Selectable(label.c_str(), actor->mesh.meshId == candidate.id) && actor->mesh.meshId != candidate.id) {
+                const auto actorId = actor->id;
+                const auto before = actor->mesh;
+                actor->mesh.meshId = candidate.id;
+                actor->mesh.materialOverrides.clear();
+                const auto after = actor->mesh;
+                if (before.meshId != after.meshId || before.materialOverrides != after.materialOverrides) {
+                    undo_.push("Assign Mesh", [this, actorId, before] {
+                        if (auto* target = world_.findActor(actorId)) { target->mesh = before; sceneDirty_ = true; }
+                    }, [this, actorId, after] {
+                        if (auto* target = world_.findActor(actorId)) { target->mesh = after; sceneDirty_ = true; }
+                    });
+                    sceneDirty_ = true;
+                }
             }
         }
         ImGui::EndCombo();
     }
-    const auto* assigned = assets_.findMaterial(actor->mesh.materialId);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##Material", assigned ? assigned->name.c_str() : "<missing>")) {
-        for (const auto& candidate : assets_.materials) {
-            const std::string label = candidate.name + (readOnlyMaterial(candidate) ? " (Engine)" : "") + "##" + std::to_string(candidate.id);
-            if (ImGui::Selectable(label.c_str(), actor->mesh.materialId == candidate.id)) {
-                actor->mesh.materialId = candidate.id; sceneDirty_ = true;
+    mesh = assets_.findMesh(actor->mesh.meshId);
+    if (mesh && mesh->materialSlotCount() > 1) {
+        ImGui::SeparatorText("Material slots");
+        for (std::size_t slot = 0; slot < mesh->materialSlotCount(); ++slot) {
+            ImGui::PushID(static_cast<int>(slot));
+            const auto& definition = mesh->materialSlots[slot];
+            ImGui::TextWrapped("Slot %zu: %s", slot, definition.name.c_str());
+            const auto effective = actor->mesh.materialForSlot(*mesh, slot);
+            const auto* material = assets_.findMaterial(effective);
+            const bool overridden = slot < actor->mesh.materialOverrides.size() && actor->mesh.materialOverrides[slot];
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##SlotMaterial", material ? material->name.c_str() : "<missing>")) {
+                for (const auto& candidate : assets_.materials) {
+                    const auto label = candidate.name + (readOnlyMaterial(candidate) ? " (Engine)" : "") +
+                        "##" + std::to_string(candidate.id);
+                    if (ImGui::Selectable(label.c_str(), effective == candidate.id))
+                        assignActorMaterial(actor->id, candidate.id, slot);
+                }
+                ImGui::EndCombo();
             }
+            ImGui::BeginDisabled(!material);
+            if (ImGui::Button("Edit material")) selectMaterial(effective);
+            ImGui::EndDisabled();
+            continueButtonRow("Reset");
+            ImGui::BeginDisabled(!overridden);
+            if (ImGui::Button("Reset")) assignActorMaterial(actor->id, 0, slot);
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("%s", overridden ? "Instance override" : definition.defaultMaterialId ? "Mesh default" : "Inherited fallback");
+            ImGui::PopID();
         }
-        ImGui::EndCombo();
-    }
-    ImGui::BeginDisabled(!assigned);
-    if (ImGui::Button("Edit assigned material")) selectMaterial(actor->mesh.materialId);
-    ImGui::EndDisabled();
-    // The assigned-material button is the instance's own entry point into the
-    // material workspace; it must follow this Actor, not the shared mesh.
-    ImGui::SeparatorText("Assigned material");
-    if (const auto* material = assets_.findMaterial(actor->mesh.materialId)) {
-        ImGui::TextDisabled("%s", readOnlyMaterial(*material) ? "Engine (read-only)" : "Content");
-        const auto label = material->name + "###InstanceMaterial";
-        const float naturalWidth = ImGui::CalcTextSize(material->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
-        const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
-        if (ImGui::Button(label.c_str(), {buttonWidth, 0})) selectMaterial(actor->mesh.materialId);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", material->name.c_str());
     } else {
-        ImGui::TextWrapped("Missing material #%llu", static_cast<unsigned long long>(actor->mesh.materialId));
+        // Keep the established single-slot widget IDs and compact layout.
+        const auto effective = mesh ? actor->mesh.materialForSlot(*mesh, 0) : actor->mesh.materialId;
+        const auto* assigned = assets_.findMaterial(effective);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##Material", assigned ? assigned->name.c_str() : "<missing>")) {
+            for (const auto& candidate : assets_.materials) {
+                const std::string label = candidate.name + (readOnlyMaterial(candidate) ? " (Engine)" : "") + "##" + std::to_string(candidate.id);
+                if (ImGui::Selectable(label.c_str(), effective == candidate.id)) assignActorMaterial(actor->id, candidate.id);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::BeginDisabled(!assigned);
+        if (ImGui::Button("Edit assigned material")) selectMaterial(effective);
+        ImGui::EndDisabled();
+        if (!actor->mesh.materialOverrides.empty() && actor->mesh.materialOverrides[0]) {
+            continueButtonRow("Reset material");
+            if (ImGui::Button("Reset material")) assignActorMaterial(actor->id, 0);
+        }
+        ImGui::SeparatorText("Assigned material");
+        if (assigned) {
+            ImGui::TextDisabled("%s", readOnlyMaterial(*assigned) ? "Engine (read-only)" : "Content");
+            const auto label = assigned->name + "###InstanceMaterial";
+            const float naturalWidth = ImGui::CalcTextSize(assigned->name.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+            const float buttonWidth = std::min(naturalWidth, std::max(1.0f, ImGui::GetContentRegionAvail().x));
+            if (ImGui::Button(label.c_str(), {buttonWidth, 0})) selectMaterial(effective);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", assigned->name.c_str());
+        } else ImGui::TextWrapped("Missing material #%llu", static_cast<unsigned long long>(effective));
     }
     ImGui::SeparatorText("Mesh");
     if (mesh) {
         ImGui::TextWrapped("Type: %s", mesh->origin == assets::AssetOrigin::Engine ? "Built-in StaticMesh" : meshType(mesh->primitive));
         ImGui::TextWrapped("Vertices: %zu  Triangles: %zu", mesh->vertices.size(), mesh->indices.size() / 3);
+        ImGui::Text("Material slots: %zu", mesh->materialSlotCount());
+        for (std::size_t channel = 0; channel < assets::MaxMeshUvChannels; ++channel)
+            if (!mesh->uvChannels[channel].empty()) ImGui::TextWrapped("UV%zu: %s", channel,
+                mesh->uvNames[channel].empty() ? "Unnamed" : mesh->uvNames[channel].c_str());
         message(mesh->origin == assets::AssetOrigin::Engine ? "Engine (read-only)" :
             mesh->sourcePath.empty() ? "Procedural built-in mesh" : mesh->sourcePath);
     } else {
@@ -2551,7 +3158,10 @@ void SceneEditor::drawMaterial() {
     ImGui::BeginDisabled(materialDraftDirty_);
     if (ImGui::Button("New material")) {
         const auto id = assets_.createMaterial("New Material");
-        selectMaterial(id); materialsDirty_ = sceneDirty_ = true;
+        dirtyMaterials_.insert(id);
+        std::string error;
+        if (!saveMaterialAsset(id, error)) status_ = "New material is unsaved: " + error;
+        selectMaterial(id);
     }
     ImGui::EndDisabled();
     if (readOnlyMaterial(materialDraft_)) {
@@ -2569,14 +3179,11 @@ void SceneEditor::drawMaterial() {
     ImGui::BeginDisabled(!materialDraftDirty_);
     if (ImGui::Button("Discard draft")) discardMaterial();
     ImGui::EndDisabled();
-    continueButtonRow("Save material assets");
-    ImGui::BeginDisabled(materialDraftDirty_);
-    if (ImGui::Button("Save material assets")) {
+    continueButtonRow("Save material asset");
+    ImGui::BeginDisabled(materialDraftDirty_ || readOnlyMaterial(materialDraft_));
+    if (ImGui::Button("Save material asset")) {
         std::string error;
-        if (assets_.saveMaterials(project_.contentRoot / "Materials", error)) {
-            materialsDirty_ = false;
-            if (saveScene()) status_ = "Saved " + pathText(project_.contentRoot / "Materials") + " and current scene material references.";
-        } else status_ = error;
+        if (!saveMaterialAsset(selectedMaterial_, error)) status_ = error;
     }
     ImGui::EndDisabled();
     continueButtonRow("Reload material assets");
@@ -2586,13 +3193,20 @@ void SceneEditor::drawMaterial() {
         std::string error;
         if (proposed.loadMaterials(project_.contentRoot / "Materials", error)) {
             bool valid = true;
-            for (const auto& actor : world_.actors) valid &= proposed.findMaterial(actor.mesh.materialId) != nullptr;
+            for (const auto& actor : world_.actors) {
+                if (actor.light || actor.camera) continue;
+                valid &= proposed.findMaterial(actor.mesh.materialId) != nullptr;
+                for (const auto id : actor.mesh.materialOverrides) if (id) valid &= proposed.findMaterial(id) != nullptr;
+            }
+            for (const auto& mesh : proposed.meshes)
+                for (const auto& slot : mesh.materialSlots)
+                    if (slot.defaultMaterialId) valid &= proposed.findMaterial(slot.defaultMaterialId) != nullptr;
             if (valid) {
                 assets_ = std::move(proposed);
                 selectedMaterial_ = assets_.materials.front().id;
                 materialDraft_ = *assets_.findMaterial(selectedMaterial_);
-                materialsDirty_ = false; sceneDirty_ = true;
-                status_ = "Reloaded material assets. Save Scene to persist this selection.";
+                dirtyMaterials_.clear();
+                status_ = "Reloaded material assets.";
             } else status_ = "Reload rejected: a material referenced by an Actor would be missing.";
         } else status_ = error;
     }
@@ -2835,7 +3449,7 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
             ImGui::EndGroup();
         }
         ImGui::TextWrapped("Closing this window keeps your drafts and live preview. Reopen it to continue; use Save to persist changes.");
-        if (materialsDirty_) ImGui::TextDisabled("Material assets have unsaved changes.");
+        if (!dirtyMaterials_.empty()) ImGui::TextDisabled("Material assets have unsaved changes.");
         message(status_);
         if (ImGui::BeginTabBar("Editors", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
             if (ImGui::BeginTabItem("Material Editor", nullptr, openMaterialTab_ ? ImGuiTabItemFlags_SetSelected : 0)) {
@@ -2854,8 +3468,12 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
     ImGui::End();
 }
 
+#include "SceneEditorViewports.inl"
+
 void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture,
                        bool mainSurfaceVisible) {
+    cameraSettings_ = &settings;
+    if (startupCameraPending_) applyStartupCamera(settings);
     // Capture requested feature values even while Project Settings is closed.
     // Save All and the close prompt share the same configuration draft.
     syncProjectSettings(settings);
@@ -2896,8 +3514,21 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     const ImGuiStyle& style = ImGui::GetStyle();
     const float rowHeight = ImGui::GetFrameHeight();
     const float toolbarHeight = rowHeight * 2.0f + style.WindowPadding.y * 2.0f + style.WindowBorderSize * 2.0f;
+    // ImGui clamps regular windows to WindowMinSize, including this fixed
+    // footer. Reserve that minimum too when UI/font scaling increases it.
+    const float statusBarHeight = std::max(rowHeight + 8.0f, style.WindowMinSize.y);
+    consoleInputActive_ = false;
+    if (!ImGui::GetIO().WantTextInput && !viewport_.isUsing() && !viewport_.isCameraNavigating() &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_GraveAccent)) {
+            consoleFocusRequested_ = true;
+            if (!mainSurfaceVisible) { outputLogOpen_ = true; outputLogFocusRequested_ = true; }
+        }
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Space)) dockManager_.requestFocus(EditorPanel::Content);
+    }
     if (mainSurfaceVisible) {
-        dockManager_.beginFrame(toolbarHeight);
+        dockManager_.beginFrame(toolbarHeight, statusBarHeight);
+        drawStatusBar(renderer, statusBarHeight);
         ImGui::SetNextWindowViewport(mainViewport->ID);
         ImGui::SetNextWindowPos(mainViewport->WorkPos);
         ImGui::SetNextWindowSize({mainViewport->WorkSize.x, toolbarHeight});
@@ -2972,11 +3603,13 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
             renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
         ImGui::End();
+
     } else {
         // Keep the saved DockSpace alive while submitting its native floating
         // windows, without collapsing the dock tree onto a minimized surface.
         dockManager_.keepAlive();
     }
+    drawOutputLog();
     drawGarbageCollection();
     drawOutlineSettings();
     drawProjectSettings(settings, renderer);
@@ -2984,14 +3617,9 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     // Resolve diagnostic keyboard ownership in this frame before the viewport
     // handles hover shortcuts. Captured-image input never edits the live scene.
     diagnosticsPanel_.draw(renderer);
+    drawCameraPreview(renderer);
 
-    sceneDirty_ |= viewport_.draw(settings, world_, assets_, selection_, selectedActor_, renderer,
-        [this] { duplicateForDrag(); }, registry_,
-        [this](assets::AssetId mesh, const scene::Transform& transform) {
-            createMeshActor(mesh, transform, "Place Mesh");
-        }, [this](scene::ActorId actor, assets::AssetId material) {
-            assignActorMaterial(actor, material);
-    }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_ || importResultsFocused_, mainSurfaceVisible);
+    sceneDirty_ |= drawViewports(settings, renderer, mainSurfaceVisible);
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;
@@ -3033,9 +3661,15 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         ImGui::TextWrapped("%s", legends[mode]);
         ImGui::TextWrapped("Data views inspect renderer values; editor display settings do not change material assets.");
         ImGui::Checkbox("VSync", &vsync);
+        bool quadLayout = quadView_;
+        if (ImGui::Checkbox("Four views", &quadLayout)) setQuadView(quadLayout);
+        if (quadView_) {
+            if (ImGui::Button(viewportMaximized_ ? "Restore four views" : "Maximize active view"))
+                setViewportMaximized(!viewportMaximized_);
+            ImGui::TextWrapped("Active view uses the selected renderer. Other views render as Raster previews.");
+        }
         if (ImGui::Button("Reset camera")) {
-            settings.cameraYaw=.65f; settings.cameraPitch=.3f; settings.cameraDistance=6;
-            settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
+            viewport_.requestFreeCamera(renderer::SceneSettings{});
         }
     });
 
@@ -3045,12 +3679,13 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     drawMaterialWindow(renderer);
     drawAssetDetails(renderer);
     processExternalImports();
+    recordConsoleStatus();
     // Evaluate after the tool window has submitted this frame's focus state.
     // Its text edits and shortcuts must never mutate the selected scene Actor.
-    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() &&
+    if (!cameraPreviewFocused_ && !consoleInputActive_ && !outputLogFocused_ && !diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !viewport_.isUsing() && !viewport_.isCameraNavigating() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
         commands_.processShortcuts();
-    if (!diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() &&
+    if (!cameraPreviewFocused_ && !consoleInputActive_ && !outputLogFocused_ && !diagnosticsPanel_.isFocused() && !projectSettingsFocused_ && !contentFocused_ && !importResultsFocused_ && !garbageCollectionFocused_ && !outlineSettingsFocused_ && !materialWindowFocused_ && !assetDetailsFocused_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() && !viewport_.isUsing() && !viewport_.isCameraNavigating() &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
         (actorPanelFocused_ || viewport_.isHovered() || viewport_.isFocused()) && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
         deleteSelectedActor();
@@ -3060,13 +3695,15 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             ImGui::TextUnformatted("Replace current Actors and materials with the saved scene?\nUnapplied material edits will be discarded.");
             if (ImGui::Button("Load & replace")) {
                 std::string error;
+                resetViewportBindings();
                 if (world_.load(scenePath_, assets_, error)) {
+                    startupCameraPending_ = true;
                     // History entries reference Actors from the replaced scene.
                     undo_.clear();
                     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
                     sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
-                    materialDraftDirty_ = materialsDirty_ = sceneDirty_ = false;
+                    materialDraftDirty_ = sceneDirty_ = false;
                     pendingMaterial_ = 0;
                     materialDraft_ = {};
                     selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
@@ -3103,6 +3740,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         settings.outlineActorCount = showTarget ? 1u : 0u;
         settings.outlineFrontObjects = false;
     }
+    cameraSettings_ = nullptr;
 }
 
 bool SceneEditor::drawCloseDialog(renderer::SceneRenderer& renderer) {

@@ -199,6 +199,9 @@ AssetImportReport importAssets(AssetLibrary& library, const std::filesystem::pat
             if (diagnostics.repairedNormals)
                 result.warnings.push_back("Rebuilt " + std::to_string(diagnostics.repairedNormals) +
                     " unusable vertex normal(s) from valid triangles.");
+            if (diagnostics.droppedUvChannels)
+                result.warnings.push_back("Ignored " + std::to_string(diagnostics.droppedUvChannels) +
+                    " UV channel(s) beyond UV0-UV3. The first four channels were retained.");
             auto mesh = std::move(*parsed.findMesh(parsedId));
             do { mesh.id = generateAssetId(); } while (usedIds.contains(mesh.id));
             auto file = makeMeshAssetFile(mesh);
@@ -235,6 +238,7 @@ AssetImportReport importAssets(AssetLibrary& library, const std::filesystem::pat
             library.meshes.push_back(std::move(mesh));
             result.id = library.meshes.back().id;
             files.committed = true;
+            library.rememberMeshPersisted(result.id, result.assetPath);
         } catch (const std::exception& failure) {
             result.id = 0;
             result.assetPath.clear();
@@ -288,10 +292,34 @@ AssetImportResult reimportAsset(AssetLibrary& library, const std::filesystem::pa
         if (diagnostics.repairedNormals)
             result.warnings.push_back("Rebuilt " + std::to_string(diagnostics.repairedNormals) +
                 " unusable vertex normal(s) from valid triangles.");
+        if (diagnostics.droppedUvChannels)
+            result.warnings.push_back("Ignored " + std::to_string(diagnostics.droppedUvChannels) +
+                " UV channel(s) beyond UV0-UV3. The first four channels were retained.");
         auto mesh = std::move(*parsed.findMesh(parsedId));
         mesh.id = existing->id;
         mesh.name = existing->name;
         mesh.origin = AssetOrigin::Project;
+        // ufbx element indices are not stable across re-exports. Distinct FBX
+        // materials with equal names therefore cannot be matched safely: an
+        // ordinal match could silently exchange Actor overrides or defaults.
+        const auto ambiguousFbxSlots = [](const MeshAsset& value) {
+            std::unordered_set<std::string> names;
+            for (const auto& slot : value.materialSlots)
+                if (slot.sourceKey.starts_with("fbx:") && slot.sourceKey != "fbx:default" && !names.insert(slot.name).second)
+                    return true;
+            return false;
+        };
+        if (ambiguousFbxSlots(*existing) || ambiguousFbxSlots(mesh))
+            throw std::runtime_error("Cannot safely match duplicate FBX material names during reimport. "
+                "Give source materials unique names, import as a new asset, and reassign its material slots.");
+        // Reimport may reorder sections. Preserve defaults by source identity,
+        // never by the current numeric slot position.
+        for (auto& slot : mesh.materialSlots) {
+            if (slot.sourceKey.empty()) continue;
+            const auto oldSlot = std::find_if(existing->materialSlots.begin(), existing->materialSlots.end(),
+                [&](const auto& old) { return old.sourceKey == slot.sourceKey; });
+            if (oldSlot != existing->materialSlots.end()) slot.defaultMaterialId = oldSlot->defaultMaterialId;
+        }
         auto file = makeMeshAssetFile(mesh);
         attachThumbnail(file, renderMeshThumbnail(mesh));
         result.assetPath = target;
@@ -317,6 +345,7 @@ AssetImportResult reimportAsset(AssetLibrary& library, const std::filesystem::pa
 #endif
         *existing = std::move(mesh);
         result.id = existing->id;
+        library.rememberMeshPersisted(result.id, target);
     } catch (const std::exception& failure) {
         result.id = 0;
         result.assetPath.clear();

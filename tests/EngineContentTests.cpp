@@ -384,8 +384,8 @@ void sceneReferences(const fs::path& root, const fs::path& engine) {
     world.findActor(actorId)->mesh.materialId = 1;
     require(world.save(scenePath, library, error), "Save a project-only scene: " + error);
     saved = Json::parse(bytes(scenePath));
-    require(!references(saved, EngineDefaultMaterialId) && references(saved, 1) && references(saved, 2),
-        "Unused engine assets do not become scene dependencies; existing project reference policy is preserved.");
+    require(!references(saved, EngineDefaultMaterialId) && references(saved, 1) && !references(saved, 2),
+        "Only referenced materials become scene dependencies, for both Engine and Project assets.");
 
     // Version 1 embedded project material payloads. Loading them must preserve
     // the mounted engine while keeping the old project replacement behavior.

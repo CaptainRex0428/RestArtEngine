@@ -15,20 +15,58 @@ void rejectSavedReferences(const std::vector<std::filesystem::path>& files,
     const char* inventory = type == AssetFileType::StaticMesh ? "meshes" : "materials";
     const char* actorField = type == AssetFileType::StaticMesh ? "meshId" : "materialId";
     for (const auto& path : files) {
+        const auto extension = detail::operationExtension(path);
+        if (type == AssetFileType::Material && (extension == ".rasset" || extension == ".raasset")) {
+            AssetFile file;
+            std::string error;
+            if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+            if (file.type == AssetFileType::StaticMesh && file.manifest.at("payload").contains("materialSlots")) {
+                const auto& slots = file.manifest.at("payload").at("materialSlots");
+                if (!slots.is_array()) throw std::runtime_error("Cannot verify mesh slot references.");
+                for (const auto& slot : slots) {
+                    const auto& material = slot.at("defaultMaterialId");
+                    if (!material.is_number_integer()) throw std::runtime_error("Invalid mesh slot material identity.");
+                    if (material != 0 && detail::readId(material) == id)
+                        throw std::runtime_error("This material is referenced by mesh '" + detail::pathUtf8(path) + "'.");
+                }
+            }
+        }
         if (detail::operationExtension(path) != ".rascene") continue;
         bool referenced = false;
         try {
             const auto scene = detail::readJson(path);
             const auto version = scene.at("version").get<int>();
-            if (scene.at("format") != "RAEngine.Scene" || version < 1 || version > 3 ||
+            if (scene.at("format") != "RAEngine.Scene" || version < 1 || version > 7 ||
                 !scene.at("actors").is_array() || !scene.at("meshes").is_array() || !scene.at("materials").is_array())
                 throw std::runtime_error("Unsupported scene format or reference schema.");
             // Legacy scenes can contain embedded assets. Conservatively retain
             // a matching external identity until those scenes are resaved.
             for (const auto& item : scene.at(inventory))
                 referenced |= detail::readId(item.at("id")) == id;
-            for (const auto& actor : scene.at("actors"))
+            for (const auto& actor : scene.at("actors")) {
+                if (actor.contains("camera")) {
+                    if (version < 6 || !actor.at("camera").is_object() ||
+                        actor.contains("mesh") || actor.contains("light"))
+                        throw std::runtime_error("Unsupported or ambiguous Camera component.");
+                    continue;
+                }
+                if (version >= 4 && actor.contains("light") && !actor.contains("mesh")) {
+                    if (!actor.at("light").is_object())
+                        throw std::runtime_error("Invalid light component.");
+                    continue;
+                }
+                if (actor.contains("light"))
+                    throw std::runtime_error("Unsupported or ambiguous Actor component.");
                 referenced |= detail::readId(actor.at("mesh").at(actorField)) == id;
+                if (type == AssetFileType::Material && actor.at("mesh").contains("materialOverrides")) {
+                    const auto& overrides = actor.at("mesh").at("materialOverrides");
+                    if (version < 5 || !overrides.is_array()) throw std::runtime_error("Invalid material override schema.");
+                    for (const auto& material : overrides) {
+                        if (!material.is_number_integer()) throw std::runtime_error("Invalid material override GUID.");
+                        if (material != 0) referenced |= detail::readId(material) == id;
+                    }
+                }
+            }
         } catch (const std::exception& failure) {
             throw std::runtime_error("Cannot verify references in scene '" + detail::pathUtf8(path) + "': " + failure.what());
         }
@@ -73,6 +111,11 @@ bool deleteContentAsset(AssetLibrary& library, const std::filesystem::path& cont
             if (std::count_if(library.meshes.begin(), library.meshes.end(), [&](const auto& x) { return x.id == id; }) > 1 ||
                 std::count_if(library.materials.begin(), library.materials.end(), [&](const auto& x) { return x.id == id; }) > 1)
                 throw std::runtime_error("The asset GUID is ambiguous in the loaded library.");
+            if (type == AssetFileType::Material)
+                for (const auto& loadedMesh : library.meshes)
+                    for (const auto& slot : loadedMesh.materialSlots)
+                        if (slot.defaultMaterialId == id)
+                            throw std::runtime_error("This material is referenced by a loaded mesh slot. Clear and save the mesh binding first.");
             const auto files = detail::checkedContentFiles(contentRoot);
             detail::requireUniqueContentIdentity(files, id);
             rejectSavedReferences(files, id, type);
