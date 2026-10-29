@@ -231,6 +231,46 @@ void drawDropHint(const ImVec2& clipMin, const ImVec2& clipMax, const char* text
     drawList->PopClipRect();
 }
 
+void drawGeometryStatistics(const renderer::SceneGeometryStatistics& statistics,
+                            const ImVec2& clipMin, const ImVec2& clipMax, bool assetDragging) {
+    const float wrapWidth = clipMax.x - clipMin.x - 16.0f;
+    if (wrapWidth < 32.0f || clipMax.y - clipMin.y < ImGui::GetTextLineHeight() + 16.0f) return;
+    std::string text = "Scene tris: " + (statistics.frameId ? std::to_string(statistics.sceneTriangles) : "pending");
+    text += "\nAfter clipping: ";
+    switch (statistics.status) {
+    case renderer::GeometrySampleStatus::Ready: text += std::to_string(statistics.postClipTriangles); break;
+    case renderer::GeometrySampleStatus::Pending: text += "pending"; break;
+    case renderer::GeometrySampleStatus::NotApplicable: text += "N/A"; break;
+    case renderer::GeometrySampleStatus::NoViewport: text += "no viewport"; break;
+    default: text += "unavailable"; break;
+    }
+    const auto textSize = ImGui::CalcTextSize(text.c_str(), nullptr, false, wrapWidth);
+    // Drag feedback occupies the lower edge. Move the read-only statistics
+    // below the toolbar during that gesture without adding an input item.
+    const ImVec2 position{std::max(clipMin.x + 8, clipMax.x - textSize.x - 8),
+        assetDragging ? clipMin.y + 8 : std::max(clipMin.y + 8, clipMax.y - textSize.y - 8)};
+    auto* drawList = ImGui::GetWindowDrawList();
+    drawList->PushClipRect(clipMin, clipMax, true);
+    drawList->AddRectFilled({position.x - 4, position.y - 4},
+        {position.x + textSize.x + 4, position.y + textSize.y + 4},
+        ImGui::GetColorU32(ImGuiCol_WindowBg, .88f), ImGui::GetStyle().FrameRounding);
+    drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+        ImGui::GetColorU32(ImGuiCol_Text), text.c_str(), nullptr, wrapWidth);
+    drawList->PopClipRect();
+    if (!assetDragging && ImGui::IsWindowHovered() &&
+        ImGui::IsMouseHoveringRect(position, {position.x + textSize.x, position.y + textSize.y})) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+        ImGui::TextUnformatted("Scene triangles count every Actor instance, including hidden instances. Unused mesh assets are excluded.");
+        ImGui::TextUnformatted("After clipping is main raster geometry output, before depth and occlusion tests. Clipping can split triangles, so output can exceed input.");
+        ImGui::Text("Scene frame %llu | GPU sample %llu (asynchronous)",
+            static_cast<unsigned long long>(statistics.frameId), static_cast<unsigned long long>(statistics.gpuFrameId));
+        if (!statistics.statusMessage.empty()) ImGui::TextUnformatted(statistics.statusMessage.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
 void drawDropPreview(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection,
                      const scene::Transform& transform, FXMVECTOR contact, const XMFLOAT3& minimum,
                      const XMFLOAT3& maximum, const ImVec2& clipMin, const ImVec2& clipMax) {
@@ -520,6 +560,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         }
         ImGui::EndDragDropTarget();
     }
+    drawGeometryStatistics(renderer.geometryStatistics(), dropArea.Min, dropArea.Max, assetDragging);
     ImGui::End();
     return changed;
 }

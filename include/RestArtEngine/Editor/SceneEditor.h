@@ -83,7 +83,7 @@ public:
     [[nodiscard]] const EditorCommandRegistry& commands() const noexcept { return commands_; }
 private:
     void drawOutliner();
-    void drawScene();
+    void drawScene(const renderer::SceneRenderer& renderer);
     void drawSceneLighting(renderer::SceneSettings& settings);
     void setSceneBackground(bool black);
     // Toggles one Actor's visibility as a single undoable edit.

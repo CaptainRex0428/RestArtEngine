@@ -35,9 +35,17 @@ std::string contents(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
 }
-// Compare only the actual scene image: a slider value, activity text, or hover
-// highlight changing elsewhere in the editor is not evidence of GPU feedback.
+// Material checks compare a readback of the scene target, before ImGui overlays.
+// The asynchronous statistics HUD must not affect material equivalence tests.
 std::string scenePixels(const std::filesystem::path& path, const rae::renderer::SceneSettings& settings) {
+    if (!path.stem().string().starts_with("gizmo_")) {
+        auto rawPath = path;
+        rawPath.replace_extension(".scene.rgba");
+        require(std::filesystem::exists(rawPath), "Missing raw scene readback: " + rawPath.string());
+        return contents(rawPath);
+    }
+    // This fixture frames the selected Actor at the centre. Compare its Gizmo
+    // in the central 60% of the composed view, excluding the statistics HUD.
     const auto bmp = contents(path);
     require(bmp.size() >= 54 && bmp[0] == 'B' && bmp[1] == 'M', "Invalid material-preview screenshot.");
     std::uint32_t offset = 0;
@@ -48,10 +56,10 @@ std::string scenePixels(const std::filesystem::path& path, const rae::renderer::
     const auto height = std::abs(signedHeight);
     require(width > 0 && height > 0 && offset + static_cast<std::size_t>(width) * height * 4 <= bmp.size(),
         "Invalid material-preview screenshot dimensions.");
-    const int left = std::clamp(settings.viewportX, 0, width);
-    const int right = std::clamp(settings.viewportX + settings.viewportWidth, left, width);
-    const int top = std::clamp(settings.viewportY, 0, height);
-    const int bottom = std::clamp(settings.viewportY + settings.viewportHeight, top, height);
+    const int left = std::clamp(settings.viewportX + settings.viewportWidth / 5, 0, width);
+    const int right = std::clamp(settings.viewportX + settings.viewportWidth * 4 / 5, left, width);
+    const int top = std::clamp(settings.viewportY + settings.viewportHeight / 5, 0, height);
+    const int bottom = std::clamp(settings.viewportY + settings.viewportHeight * 4 / 5, top, height);
     require(right > left && bottom > top, "Material preview has no visible scene pixels.");
     std::string pixels;
     for (int y = top; y < bottom; ++y) {
@@ -60,6 +68,46 @@ std::string scenePixels(const std::filesystem::path& path, const rae::renderer::
             static_cast<std::size_t>(right - left) * 4);
     }
     return pixels;
+}
+
+void saveScenePixels(rae::renderer::SceneRenderer& renderer, const rae::renderer::SceneSettings& settings,
+                     const std::filesystem::path& path) {
+    using Microsoft::WRL::ComPtr;
+    auto* handle = renderer.sceneTexture();
+    require(handle && settings.viewportWidth > 0 && settings.viewportHeight > 0, "No scene target for raw readback.");
+    auto* view = static_cast<ID3D11ShaderResourceView*>(handle);
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    ComPtr<ID3D11Texture2D> source, staging;
+    require(SUCCEEDED(resource.As(&source)), "Raw scene target is not a texture.");
+    D3D11_TEXTURE2D_DESC description{};
+    source->GetDesc(&description);
+    require(description.Format == DXGI_FORMAT_R8G8B8A8_UNORM && settings.viewportX >= 0 && settings.viewportY >= 0 &&
+        settings.viewportX + settings.viewportWidth <= static_cast<int>(description.Width) &&
+        settings.viewportY + settings.viewportHeight <= static_cast<int>(description.Height), "Invalid raw scene rectangle/format.");
+    description.Width = static_cast<UINT>(settings.viewportWidth);
+    description.Height = static_cast<UINT>(settings.viewportHeight);
+    description.Usage = D3D11_USAGE_STAGING;
+    description.BindFlags = description.MiscFlags = 0;
+    description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    require(SUCCEEDED(renderer.device()->CreateTexture2D(&description, nullptr, &staging)), "Cannot create raw scene staging target.");
+    const D3D11_BOX rectangle{static_cast<UINT>(settings.viewportX), static_cast<UINT>(settings.viewportY), 0,
+        static_cast<UINT>(settings.viewportX + settings.viewportWidth), static_cast<UINT>(settings.viewportY + settings.viewportHeight), 1};
+    renderer.context()->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, source.Get(), 0, &rectangle);
+    std::string pixels(static_cast<std::size_t>(description.Width) * description.Height * 4, '\0');
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    require(SUCCEEDED(renderer.context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "Cannot read raw scene target.");
+    for (UINT row = 0; row < description.Height; ++row)
+        std::memcpy(pixels.data() + static_cast<std::size_t>(row) * description.Width * 4,
+            static_cast<const char*>(mapped.pData) + static_cast<std::size_t>(row) * mapped.RowPitch,
+            static_cast<std::size_t>(description.Width) * 4);
+    renderer.context()->Unmap(staging.Get(), 0);
+    auto rawPath = path;
+    rawPath.replace_extension(".scene.rgba");
+    std::ofstream stream(rawPath, std::ios::binary | std::ios::trunc);
+    stream.write(pixels.data(), static_cast<std::streamsize>(pixels.size()));
+    stream.close();
+    require(stream.good(), "Could not write raw scene pixels.");
 }
 std::array<int, 3> centerPixel(const std::filesystem::path& path) {
     const auto bmp = contents(path);
@@ -467,8 +515,11 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         }
         require(renderer.render(settings, world, assets, error,
             useMaterialPreview ? editor.materialPreview() : nullptr), error);
-        ui.endFrame();
         const auto screenshotPath = output / (std::string(name) + ".bmp");
+        const std::string_view captureName(name);
+        if (drawEditor && (captureName.starts_with("material_") || captureName.starts_with("two_sided_ui_")))
+            saveScenePixels(renderer, settings, screenshotPath);
+        ui.endFrame();
         if (!renderer.saveScreenshot(screenshotPath.c_str(), error)) {
             int screenshotErrno = 0;
             unsigned long screenshotDosErrno = 0;
@@ -3151,6 +3202,9 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 "Profiler has no renderer pass statistics. Recorded UI bytes=" +
                     std::to_string(renderedUiText.size()) + "; actual passes=" +
                     std::to_string(renderer.diagnosticsFrame().passes.size()));
+            require(renderedUiText.find("Scene triangles:") != std::string::npos &&
+                renderedUiText.find("After clipping (GPU):") != std::string::npos,
+                "Profiler is missing the scene total or GPU clipping statistic.");
             editor.showDiagnostics(editor::DiagnosticsTab::FrameInspector);
             capture(("diagnostics_frame_" + suffix + "_preroll").c_str(), true);
             capture(("diagnostics_frame_" + suffix).c_str(), true, true);

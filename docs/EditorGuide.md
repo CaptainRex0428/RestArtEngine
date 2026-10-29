@@ -100,6 +100,8 @@ Premake 的 `vs2022` 操作还会生成 `.idea/.idea.RestArtEngine/.idea/runConf
 
 ## 视口变换工具
 
+Scene 的 Overview 和视口角落显示 `Scene triangles`（视口中缩写为 `Scene tris`）与 `After clipping (GPU)`。前者按场景实例累计并包含隐藏物体，后者为主视角几何通道的异步 GPU 裁剪输出，不包含阴影、描边等重复绘制。悬停查看计数口径和样本来源；硬件光追直出时裁剪项为 `N/A`，查询尚未就绪时显示 `Pending`。详细含义与适用路径见[诊断工具](Diagnostics.md#场景与视口面数)。统计只读，不影响场景选择、相机或变换操作。
+
 选中 Actor 后，视口显示变换手柄。用鼠标拖动轴或平面手柄即可编辑 Actor 的 Transform；Details 的数值会同步更新。工具借鉴 UE 的移动、旋转、缩放操作，使用 ImGuizmo 绘制和交互，并非给 Actor 添加新的运行时组件。
 
 | 操作 | 效果 |

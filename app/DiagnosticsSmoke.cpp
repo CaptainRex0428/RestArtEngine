@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -334,6 +335,223 @@ void runDiagnosticsSmoke(rae::renderer::SceneRenderer& renderer, const std::file
         report["gpuTiming"]["supported"] = gpuReady;
         pass(gpuReady ? "asynchronous GPU result with explicit origin frame and finite nonnegative pass durations" :
             "GPU timestamp queries explicitly unavailable on this device (no zero-ms fabricated sample)");
+        {
+            // A separate tiny scene makes the hardware pipeline counters exact:
+            // no sphere tessellation, tool draws, shadows or selection passes
+            // can accidentally stand in for the main view's clipped geometry.
+            struct GeometryRestore {
+                scene::World& targetWorld;
+                renderer::SceneSettings& targetSettings;
+                assets::AssetLibrary& targetAssets;
+                assets::MaterialAsset& targetMaterial;
+                renderer::SceneRenderer& targetRenderer;
+                scene::World savedWorld;
+                renderer::SceneSettings savedSettings;
+                assets::MaterialAsset savedMaterial;
+                std::vector<assets::MeshAsset> savedMeshes;
+                bool enabled;
+                ~GeometryRestore() {
+                    targetWorld = std::move(savedWorld);
+                    targetSettings = savedSettings;
+                    targetMaterial = savedMaterial;
+                    targetAssets.meshes = std::move(savedMeshes);
+                    targetRenderer.setDiagnosticsEnabled(enabled);
+                }
+            } geometryRestore{world, settings, assets, material, renderer, world, settings, material,
+                assets.meshes, renderer.diagnosticsEnabled()};
+            using GeometryStatus = renderer::GeometrySampleStatus;
+            const auto statusName = [](GeometryStatus value) {
+                switch (value) {
+                case GeometryStatus::Pending: return "Pending";
+                case GeometryStatus::Ready: return "Ready";
+                case GeometryStatus::Unavailable: return "Unavailable";
+                case GeometryStatus::NotApplicable: return "NotApplicable";
+                case GeometryStatus::NoViewport: return "NoViewport";
+                }
+                return "Unknown";
+            };
+            const auto geometryJson = [&](const renderer::SceneGeometryStatistics& sample) {
+                return nlohmann::json{{"frameId", sample.frameId}, {"sceneTriangles", sample.sceneTriangles},
+                    {"gpuFrameId", sample.gpuFrameId}, {"inputTriangles", sample.inputTriangles},
+                    {"postClipTriangles", sample.postClipTriangles}, {"status", statusName(sample.status)},
+                    {"statusMessage", sample.statusMessage}};
+            };
+            auto& geometryReport = report["geometryStatistics"];
+            geometryReport = {{"source", "D3D11 pipeline statistics for the main raster view"},
+                {"cases", nlohmann::json::array()}, {"gpuReady", false}, {"unavailableCases", 0}};
+            bool geometryGpuReady = false;
+            const auto checkGeometry = [&](const std::string& name, std::uint64_t expectedScene,
+                                           std::uint64_t expectedInput, std::uint64_t expectedClipped) {
+                std::uint64_t firstMainFrame = 0;
+                auto previousMainFrame = renderer.geometryStatistics().frameId;
+                for (unsigned attempt = 0; attempt < 64; ++attempt) {
+                    frame(); // Submit and Present real work; never spin/flush GetData.
+                    const auto sample = renderer.geometryStatistics();
+                    if (!firstMainFrame) firstMainFrame = sample.frameId;
+                    require(sample.frameId == previousMainFrame + 1,
+                        "Geometry main-frame sequence did not advance exactly once: " + name);
+                    previousMainFrame = sample.frameId;
+                    require(sample.sceneTriangles == expectedScene, "Wrong per-instance scene triangle count: " + name);
+                    if (sample.status == GeometryStatus::Unavailable) {
+                        require(!sample.statusMessage.empty(), "Unavailable geometry queries have no explanation.");
+                        geometryReport["cases"].push_back({{"name", name}, {"result", "SKIP"},
+                            {"reason", sample.statusMessage}, {"firstMainFrame", firstMainFrame},
+                            {"frames", attempt + 1}, {"expectedScene", expectedScene},
+                            {"expectedInput", expectedInput}, {"expectedPostClip", expectedClipped},
+                            {"sample", geometryJson(sample)}});
+                        geometryReport["unavailableCases"] = geometryReport["unavailableCases"].get<unsigned>() + 1;
+                        std::cout << "SKIP: Geometry " << name << ": " << sample.statusMessage << '\n';
+                        return;
+                    }
+                    require(sample.status == GeometryStatus::Pending || sample.status == GeometryStatus::Ready,
+                        "Raster geometry sample has an unexpected status: " + name);
+                    if (sample.status != GeometryStatus::Ready || sample.gpuFrameId < firstMainFrame) continue;
+                    geometryReport["cases"].push_back({{"name", name}, {"result", "observed"},
+                        {"firstMainFrame", firstMainFrame}, {"frames", attempt + 1},
+                        {"expectedScene", expectedScene}, {"expectedInput", expectedInput},
+                        {"expectedPostClip", expectedClipped}, {"sample", geometryJson(sample)}});
+                    require(sample.gpuFrameId > 0 && sample.gpuFrameId <= sample.frameId &&
+                        sample.inputTriangles == expectedInput && sample.postClipTriangles == expectedClipped,
+                        "Wrong real GPU input/post-clipping count or sample identity: " + name);
+                    geometryReport["cases"].back()["result"] = "PASS";
+                    geometryGpuReady = true;
+                    std::cout << "PASS: Geometry " << name << " (GPU frame " << sample.gpuFrameId << ")\n";
+                    return;
+                }
+                geometryReport["cases"].push_back({{"name", name}, {"result", "FAIL"},
+                    {"firstMainFrame", firstMainFrame}, {"frames", 64},
+                    {"sample", geometryJson(renderer.geometryStatistics())}});
+                require(false, "Geometry GPU query stayed pending/stale after 64 presented frames: " + name);
+            };
+            assets::AssetId quadMeshId = 0xfffe000000000001ull;
+            while (assets.findMesh(quadMeshId) || assets.findMesh(quadMeshId + 1) || assets.findMesh(quadMeshId + 2)) ++quadMeshId;
+            assets::MeshAsset quad;
+            quad.id = quadMeshId; quad.name = "Geometry statistics quad";
+            quad.primitive = assets::MeshPrimitive::Imported;
+            quad.vertices = {{{-.5f, -.5f, 0}, {0, 0, 1}}, {{.5f, -.5f, 0}, {0, 0, 1}},
+                {{.5f, .5f, 0}, {0, 0, 1}}, {{-.5f, .5f, 0}, {0, 0, 1}}};
+            quad.indices = {0, 1, 2, 0, 2, 3};
+            assets.meshes.push_back(quad);
+            auto unused = quad;
+            unused.id = quadMeshId + 1; unused.name = "Unused statistics quad";
+            assets.meshes.push_back(std::move(unused));
+            auto clipped = quad;
+            clipped.id = quadMeshId + 2; clipped.name = "Near-plane split triangle";
+            clipped.vertices = {{{-.02f, -.02f, 5.90f}, {0, 0, 1}},
+                {{.02f, -.02f, 5.90f}, {0, 0, 1}}, {{0, .02f, 6.02f}, {0, 0, 1}}};
+            clipped.indices = {0, 1, 2};
+            assets.meshes.push_back(std::move(clipped));
+            material.twoSided = true;
+            settings = {};
+            settings.editorViewport = true;
+            settings.viewportWidth = settings.viewportHeight = 256;
+            settings.cameraYaw = settings.cameraPitch = 0;
+            settings.cameraDistance = 6;
+            std::fill(std::begin(settings.cameraTarget), std::end(settings.cameraTarget), 0.f);
+            settings.shadowMethod = renderer::ShadowMethod::Disabled;
+            for (const auto renderPath : {renderer::RenderPath::Forward, renderer::RenderPath::Deferred}) {
+                const std::string prefix = renderPath == renderer::RenderPath::Forward ? "forward/" : "deferred/";
+                settings.path = renderPath;
+                settings.shadowMethod = renderer::ShadowMethod::Disabled;
+                settings.outlineActors = nullptr; settings.outlineActorCount = 0;
+                world = {};
+                const auto fixtureActor = world.createActor("Statistics quad", quadMeshId, material.id);
+                checkGeometry(prefix + "in-view-and-unused-assets", 2, 2, 2);
+                world.findActor(fixtureActor)->transform.position[0] = 1000;
+                checkGeometry(prefix + "outside-frustum", 2, 2, 0);
+                world.findActor(fixtureActor)->transform.position[0] = 0;
+                const auto duplicate = world.duplicateActor(fixtureActor);
+                // A depth-hidden identical instance still reaches primitive
+                // clipping; these counts do not claim occlusion visibility.
+                checkGeometry(prefix + "shared-mesh-duplicate", 4, 4, 4);
+                world.findActor(duplicate)->visible = false;
+                checkGeometry(prefix + "hidden-instance-stays-in-total", 4, 2, 2);
+                world = {};
+                checkGeometry(prefix + "empty-scene", 0, 0, 0);
+                world.createActor("Missing material", quadMeshId, 0);
+                checkGeometry(prefix + "missing-material-stays-in-total", 2, 0, 0);
+                world = {};
+                const auto outlinedActor = world.createActor("Main-pass isolation", quadMeshId, material.id);
+                settings.shadowMethod = renderer::ShadowMethod::ShadowMap;
+                checkGeometry(prefix + "shadow-pass-excluded", 2, 2, 2);
+                settings.shadowMethod = renderer::ShadowMethod::Disabled;
+                settings.outlineActors = &outlinedActor; settings.outlineActorCount = 1;
+                checkGeometry(prefix + "outline-pass-excluded", 2, 2, 2);
+                settings.outlineActors = nullptr; settings.outlineActorCount = 0;
+                renderer.setDiagnosticsEnabled(false);
+                checkGeometry(prefix + "profiler-disabled", 2, 2, 2);
+                renderer.setDiagnosticsEnabled(true);
+                const auto beforePreviews = geometryJson(renderer.geometryStatistics());
+                require(renderer.renderMaterialPreview(material, 64, error), error);
+                require(geometryJson(renderer.geometryStatistics()) == beforePreviews,
+                    "Material tool preview changed main geometry identity/counts/status.");
+                require(renderer.renderScenePreview(world, assets, 64, error), error);
+                require(geometryJson(renderer.geometryStatistics()) == beforePreviews,
+                    "Scene thumbnail preview changed main geometry identity/counts/status.");
+                geometryReport["cases"].push_back({{"name", prefix + "tool-previews-excluded"},
+                    {"result", "PASS"}, {"sample", beforePreviews}});
+                settings.viewportVisible = false;
+                world.duplicateActor(outlinedActor);
+                const auto beforeHidden = renderer.geometryStatistics().frameId;
+                frame();
+                const auto hiddenSample = renderer.geometryStatistics();
+                require(hiddenSample.status == GeometryStatus::NoViewport && hiddenSample.sceneTriangles == 4 &&
+                    hiddenSample.frameId == beforeHidden + 1,
+                    "Hidden viewport retained an active GPU sample or stopped updating scene topology.");
+                geometryReport["cases"].push_back({{"name", prefix + "hidden-viewport"},
+                    {"result", "PASS"}, {"sample", geometryJson(hiddenSample)}});
+                settings.viewportVisible = true;
+                world = {};
+                world.createActor("Near clipping", quadMeshId + 2, material.id);
+                checkGeometry(prefix + "near-clip-splits-one-into-two", 1, 1, 2);
+            }
+            world = {};
+            world.createActor("Resize and hardware fixture", quadMeshId, material.id);
+            checkGeometry("before-resize", 2, 2, 2);
+            require(renderer.resize(272, 240, error), error);
+            require(renderer.geometryStatistics().status != GeometryStatus::Ready,
+                "Resize exposed a Ready GPU sample from the retired target/query ring.");
+            geometryReport["cases"].push_back({{"name", "resize-invalidates-old-sample"},
+                {"result", "PASS"}, {"sample", geometryJson(renderer.geometryStatistics())}});
+            settings.viewportWidth = 272; settings.viewportHeight = 240;
+            checkGeometry("after-resize", 2, 2, 2);
+            require(renderer.resize(256, 256, error), error);
+            settings.viewportWidth = settings.viewportHeight = 256;
+            settings.hardwareRayTracing = true;
+            settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
+            frame();
+            if (renderer.hardwareRayTracingSupported()) {
+                require(renderer.hardwareRayTracingActive(),
+                    "Supported hardware ray tracing failed to activate: " + renderer.hardwareRayTracingStatus());
+                const auto hardwareSample = renderer.geometryStatistics();
+                require(hardwareSample.status == GeometryStatus::NotApplicable && hardwareSample.sceneTriangles == 2,
+                    "Pure hardware image resolve reported raster clipping counts.");
+                geometryReport["cases"].push_back({{"name", "hardware-image-resolve"}, {"result", "PASS"},
+                    {"sample", geometryJson(hardwareSample)}});
+                settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+                settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+                settings.globalIllumination.indirectDiffuse = true;
+                settings.globalIllumination.samplesPerFrame = 1;
+                settings.globalIllumination.targetSamples = 16;
+                settings.globalIllumination.maxBounces = 2;
+                checkGeometry("realtime-GI-keeps-main-raster", 2, 2, 2);
+                const auto giStatus = renderer.globalIlluminationStatus();
+                require(renderer.hardwareRayTracingActive() &&
+                    giStatus.effective == renderer::GlobalIlluminationMethod::PathTracing &&
+                    giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime,
+                    "Realtime GI statistics case silently used a different rendering mode.");
+            } else {
+                require(!renderer.hardwareRayTracingActive(), "Unsupported hardware ray tracing reported an active dispatch.");
+                const auto reason = renderer.hardwareRayTracingStatus();
+                require(!reason.empty(), "Hardware geometry-statistics skip has no explanation.");
+                for (const auto* name : {"hardware-image-resolve", "realtime-GI-keeps-main-raster"})
+                    geometryReport["cases"].push_back({{"name", name}, {"result", "SKIP"}, {"reason", reason}});
+                std::cout << "SKIP: Geometry hardware resolve/Realtime GI: " << reason << '\n';
+            }
+            geometryReport["gpuReady"] = geometryGpuReady;
+            pass(geometryGpuReady ? "real GPU geometry counts, clipping splits, instance topology and main-view sample isolation" :
+                "scene instance topology verified; unavailable geometry GPU queries explicitly skipped");
+        }
         frame(nullptr, true); // Keep a valid Deferred snapshot for following GUI QA.
         restore.restore();
         require(renderer.validationErrorCount() == 0, "D3D11 validation reported a diagnostic error.");

@@ -1078,7 +1078,7 @@ void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
     else
         ImGui::TextWrapped("Direct-light shadows are disabled; ambient and reflection lighting remain active.");
 }
-void SceneEditor::drawScene() {
+void SceneEditor::drawScene(const renderer::SceneRenderer& renderer) {
     // Scene-level parameters only. Actor instance properties live in Details.
     ImGui::TextDisabled("Project");
     ImGui::TextWrapped("%s", project_.name.c_str());
@@ -1087,6 +1087,29 @@ void SceneEditor::drawScene() {
     ImGui::SeparatorText("Overview");
     ImGui::Text("Actors: %zu", world_.actors.size());
     ImGui::Text("Meshes: %zu / Materials: %zu", assets_.meshes.size(), assets_.materials.size());
+    const auto& geometry = renderer.geometryStatistics();
+    if (geometry.frameId)
+        ImGui::TextWrapped("Scene triangles: %llu", static_cast<unsigned long long>(geometry.sceneTriangles));
+    else ImGui::TextWrapped("Scene triangles: Pending");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Counts mesh triangles per Actor instance, including hidden Actors.\nUnused mesh assets and missing meshes are not counted.");
+    if (geometry.status == renderer::GeometrySampleStatus::Ready)
+        ImGui::TextWrapped("After clipping (GPU): %llu", static_cast<unsigned long long>(geometry.postClipTriangles));
+    else {
+        const char* state = geometry.status == renderer::GeometrySampleStatus::Pending ? "Pending"
+            : geometry.status == renderer::GeometrySampleStatus::NotApplicable ? "N/A"
+            : geometry.status == renderer::GeometrySampleStatus::NoViewport ? "No viewport" : "Unavailable";
+        ImGui::TextWrapped("After clipping (GPU): %s", state);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::TextWrapped("Main geometry pass only; excludes shadows, outlines and fullscreen draws.\nClipping can split triangles. This is not a depth-occlusion visibility count.");
+        if (geometry.status == renderer::GeometrySampleStatus::Ready)
+            ImGui::Text("Asynchronous GPU frame %llu (input %llu triangles)",
+                static_cast<unsigned long long>(geometry.gpuFrameId), static_cast<unsigned long long>(geometry.inputTriangles));
+        if (!geometry.statusMessage.empty()) ImGui::TextWrapped("%s", geometry.statusMessage.c_str());
+        ImGui::EndTooltip();
+    }
     if (sceneDirty_) ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.25f, 1.0f), "Unsaved changes");
     else ImGui::TextDisabled("Saved");
     ImGui::SeparatorText("Environment");
@@ -2614,7 +2637,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
 
     dockManager_.drawPanel(EditorPanel::Outliner, [&] { drawOutliner(); });
     dockManager_.drawPanel(EditorPanel::Scene, [&] {
-        drawScene();
+        drawScene(renderer);
         drawSceneLighting(settings);
         actorPanelFocused_ |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     });

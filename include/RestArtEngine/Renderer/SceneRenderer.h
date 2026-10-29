@@ -2,6 +2,7 @@
 
 #include <RestArtEngine/Core/GarbageCollector.h>
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
+#include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
 #include <cstdio>
 #include <cstdint>
@@ -201,6 +202,9 @@ public:
     void setDiagnosticsEnabled(bool enabled);
     [[nodiscard]] bool diagnosticsEnabled() const;
     [[nodiscard]] const RenderDiagnosticsFrame& diagnosticsFrame() const;
+    // Always collected for the main scene, independently of Profiler/capture.
+    // GPU counts are asynchronous and never include offscreen tool previews.
+    [[nodiscard]] const SceneGeometryStatistics& geometryStatistics() const;
     // Captures the next main scene render, never a tool preview. One immutable
     // resource set, bounded to 256 MiB, retained until clear/replacement/shutdown.
     void requestFrameCapture();

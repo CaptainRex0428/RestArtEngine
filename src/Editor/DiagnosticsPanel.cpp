@@ -196,9 +196,29 @@ void DiagnosticsPanel::drawProfiler(renderer::SceneRenderer& renderer) {
 
     const auto& frame = renderer.diagnosticsFrame();
     ImGui::SeparatorText("Live renderer");
-    ImGui::TextWrapped("CPU frame %llu | submit %.3f ms | %llu draws | %llu triangles",
+    ImGui::TextWrapped("CPU frame %llu | submit %.3f ms | %llu draws | %llu submitted triangles (all passes)",
         static_cast<unsigned long long>(frame.frameId), frame.cpuSubmitMs,
         static_cast<unsigned long long>(frame.drawCalls), static_cast<unsigned long long>(frame.triangles));
+    const auto& geometry = renderer.geometryStatistics();
+    ImGui::TextWrapped("Scene triangles: %llu | scene frame %llu",
+        static_cast<unsigned long long>(geometry.sceneTriangles), static_cast<unsigned long long>(geometry.frameId));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Counts every Actor instance, including hidden instances.\nShared meshes count once per instance; unused assets are excluded.");
+    if (geometry.status == renderer::GeometrySampleStatus::Ready) {
+        ImGui::TextWrapped("After clipping (GPU): %llu | input: %llu | GPU frame %llu (asynchronous sample)",
+            static_cast<unsigned long long>(geometry.postClipTriangles), static_cast<unsigned long long>(geometry.inputTriangles),
+            static_cast<unsigned long long>(geometry.gpuFrameId));
+    } else {
+        const char* status = "Unavailable";
+        switch (geometry.status) {
+        case renderer::GeometrySampleStatus::Pending: status = "Pending"; break;
+        case renderer::GeometrySampleStatus::NotApplicable: status = "N/A"; break;
+        case renderer::GeometrySampleStatus::NoViewport: status = "No viewport"; break;
+        default: break;
+        }
+        ImGui::TextWrapped("After clipping (GPU): %s", status);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Main raster geometry output before depth/occlusion tests.\nClipping can split triangles, so output may exceed input.\nGPU samples arrive after the scene frame.");
+    if (!geometry.statusMessage.empty()) ImGui::TextWrapped("%s", geometry.statusMessage.c_str());
     timingTable(frame.passes, false);
     switch (frame.gpuStatus) {
     case renderer::GpuTimingStatus::Ready:

@@ -30,6 +30,19 @@ DX11 GPU 计时使用每帧 disjoint query 和 Pass 边界 timestamp；仅可靠
 
 ## 视口数据契约
 
+### 场景与视口面数
+
+Scene 的 Overview 与 Scene Viewport 的只读统计显示两种三角面数；Profiler 的 Live renderer 也展示相同数据：
+
+- **Scene triangles / Scene tris**：按场景 Actor 实例累加所引用 Mesh 的 `indices.size() / 3`，包含隐藏实例，共享一个 Mesh 的多个实例分别计数。未被实例引用的资产、缺失的 Mesh 不计入；材质缺失不改变这项拓扑总数。
+- **After clipping (GPU)**：仅测量主视角 Forward geometry 或 GBuffer 通道的 GPU 裁剪输出，不累计阴影、描边、全屏三角形或工具预览。当前 DX11 使用独立四槽 `D3D11_QUERY_PIPELINE_STATISTICS` 查询的 `CPrimitives`，同时保留 `IAPrimitives` 输入量与原始主场景样本序列。按 [Microsoft 的字段定义](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_query_data_pipeline_statistics)，裁剪可拆分三角形，因此输出可能多于输入；这不是深度测试或遮挡之后的可见三角面数。
+
+场景总数读取最近主场景提交的快照，GPU 结果额外异步延迟；提示与 Profiler 标明样本序列，使用 `GetData(...DONOTFLUSH)`，查询未就绪时不等待 GPU，环满时跳过当前采样。统计不依赖打开 Profiler，未就绪／不可用／视口未绘制均显示相应状态，不用 0 冒充有效结果；空场景的有效查询可以为 0。场景视口隐藏仍更新拓扑总数，resize、窗口切换和显示路径切换废弃旧查询；材质球、资源详情和场景缩略图不改变主场景统计。
+
+完整硬件光追图像覆盖光栅输出时，裁剪统计显示 **N/A**；光追回退至光栅、以及使用光栅主可见性的 Realtime GI 路径仍能统计。Profiler 原有的 **submitted triangles (all passes)** 是全部已记录绘制通道的提交量，可能重复计算同一实例，不能替代上述两项。统计直接测量 GPU 裁剪结果，不以各 Pass 的提交量估算。
+
+### GBuffer 与实时显示模式
+
 当前 Deferred 的三张 GBuffer 均为 RGBA16F：
 
 | 资源 | RGB | Alpha |

@@ -37,6 +37,8 @@ Content 的 List／Tiles Mesh 共用路径拖拽 payload；场景图像按本帧
 
 工作区增加为六面板，保留 `Details`、`Content & Editors` 和 `RestArtEngine.DockSpace.v1` 身份；新 `Scene` 加入旧 Details 所在组，不全局重置用户布局。恢复默认才重建六面板树。验证应覆盖实际 Mesh／Actor 点击联动、手动切页、旧 dock／浮窗迁移及新 context 读回、双主题截图和既有材质／视口／事务回归。
 
+Scene Overview 与 Scene Viewport 角落同步显示场景三角面数和 GPU 裁剪输出；Profiler 同时标明 GPU 样本序列。视口统计为 draw-list 只读叠加，不创建输入控件、不改变本帧图像矩形，窄视口裁剪／换行，拖拽资源时避开底部投递提示。未就绪、不可用、无视口和硬件光追直出的 N/A 分别显示，不能伪造 0。统计口径见 [Diagnostics](Diagnostics.md#场景与视口面数)，不能把各 Pass 的提交总量标成裁剪后或遮挡后可见面数。
+
 ## 资产浏览与详情窗口
 
 `Content & Editors` 采用 Sources／导航／筛选／Asset View 分区，交互组织参考 [UE Content Browser 官方说明](https://dev.epicgames.com/documentation/unreal-engine/content-browser-interface-in-unreal-engine)，配色和控件仍使用本引擎主题。宽面板采用两行工具栏，窄窗换行；Sources 可调整宽度或隐藏，内容宽度小于 500 时自动隐藏，路径导航仍可用。进入目录会展开 Sources 对应祖先，不每帧强制重开用户收起的节点。

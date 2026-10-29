@@ -421,6 +421,7 @@ struct SceneRenderer::Impl {
 
     // Private DX11 diagnostic resources; public snapshots contain no native handles.
 #include "RenderDiagnostics.inl"
+#include "GeometryStatistics.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
         DXGI_SWAP_CHAIN_DESC1 description{};
@@ -905,6 +906,7 @@ void SceneRenderer::detachWindow() {
     // swap chain after its window has been destroyed can block inside DXGI.
     auto& state = *impl_;
     if (!state.device) return;
+    state.resetGeometryViewport();
     if (state.context) { state.context->ClearState(); state.context->Flush(); }
     state.backbuffer.Reset();
     state.sceneTarget.Reset();
@@ -969,6 +971,7 @@ bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::strin
     auto& state = *impl_;
     if (!state.swapChain) { error = "Renderer is not initialized."; return false; }
     if (width == 0 || height == 0 || (width == state.width && height == state.height)) return true;
+    state.resetGeometryViewport();
     state.context->ClearState();
     state.context->Flush();
     state.backbuffer.Reset(); state.depth.Reset();
@@ -1203,13 +1206,24 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     auto& state = *impl_;
     ++state.usageEpoch;
     state.raySceneActive = false;
-    if (!state.device || !state.backbuffer) { error = "Renderer has no render target."; return false; }
+    const bool diagnosticMainScene = !settings.offscreenTarget;
+    if (diagnosticMainScene) state.beginGeometryFrame(world, assets);
+    if (!state.device || !state.backbuffer) {
+        if (diagnosticMainScene) state.failGeometryFrame();
+        error = "Renderer has no render target."; return false;
+    }
     const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
-    if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1))
+    if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1)) {
+        if (diagnosticMainScene) state.resetGeometryViewport();
         return clear(editorClear, error);
+    }
+    struct GeometryFrameScope {
+        Impl& state;
+        bool mainScene, completed = false;
+        ~GeometryFrameScope() { if (mainScene && !completed) state.failGeometryFrame(); }
+    } geometryFrameScope{state, diagnosticMainScene};
     ID3D11ShaderResourceView* noIndirect = nullptr;
     state.context->PSSetShaderResources(9, 1, &noIndirect);
-    const bool diagnosticMainScene = !settings.offscreenTarget;
     if (diagnosticMainScene) {
         state.hardwareActive = false;
         if (settings.hardwareRayTracing && !state.hardwareRequested) {
@@ -1457,6 +1471,16 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         ? state.sceneTarget.Get() : state.backbuffer.Get();
     const float backgroundClear[4] = {world.blackBackground ? 0.0f : 0.025f, world.blackBackground ? 0.0f : 0.035f, world.blackBackground ? 0.0f : 0.055f, 1.0f};
     state.context->ClearRenderTargetView(backbuffer, backgroundClear);
+    if (diagnosticMainScene) state.prepareGeometryStatistics(hardwareFrameReady && !realtimeGiRequested);
+    const auto drawMainGeometry = [&](ID3D11PixelShader* shader) {
+        if (diagnosticMainScene) state.beginGeometrySample();
+        struct SampleScope {
+            Impl& state;
+            bool mainScene;
+            ~SampleScope() { if (mainScene) state.endGeometrySample(); }
+        } sampleScope{state, diagnosticMainScene};
+        return state.drawGeometry(shader, world, assets, error, materialOverride);
+    };
     if (settings.path == RenderPath::Deferred) {
         state.beginDiagnosticPass("GBuffer");
         ID3D11RenderTargetView* targets[3]{};
@@ -1466,7 +1490,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.context->ClearRenderTargetView(targets[i], clear);
         }
         state.context->OMSetRenderTargets(3, targets, state.depth.Get());
-        if (!state.drawGeometry(state.gbufferPS.Get(), world, assets, error, materialOverride)) return false;
+        if (!drawMainGeometry(state.gbufferPS.Get())) return false;
         state.beginDiagnosticPass("Deferred lighting / debug");
         state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
         ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(), state.gbufferViews[1].Get(), state.gbufferViews[2].Get(), state.shadowView.Get(), state.rayTriangleView.Get()};
@@ -1478,7 +1502,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
         state.drawFullscreen(state.backgroundPS.Get());
         state.beginDiagnosticPass("Forward geometry / debug");
-        if (!state.drawGeometry(state.forwardPS.Get(), world, assets, error, materialOverride)) return false;
+        if (!drawMainGeometry(state.forwardPS.Get())) return false;
     }
     // Release the shared SRV before any next DX12 write, including tool previews.
     ID3D11ShaderResourceView* emptyIndirect = nullptr;
@@ -1534,7 +1558,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
     const HRESULT removed = state.device->GetDeviceRemovedReason();
-    return !failed(removed, "Render/device status", error);
+    const bool complete = !failed(removed, "Render/device status", error);
+    geometryFrameScope.completed = complete;
+    return complete;
 }
 
 void SceneRenderer::setShaderRoot(std::filesystem::path root) { impl_->shaderRoot = std::filesystem::absolute(std::move(root)).lexically_normal(); }
@@ -1544,6 +1570,7 @@ void SceneRenderer::setMaterialShaderPath(std::filesystem::path path) {
 std::filesystem::path SceneRenderer::materialShaderPath() const { return impl_->materialPath(); }
 std::string SceneRenderer::shaderSource() const { return impl_->materialSource; }
 std::uint64_t SceneRenderer::shaderRevision() const { return impl_->revision; }
+const SceneGeometryStatistics& SceneRenderer::geometryStatistics() const { return impl_->geometryStatistics; }
 
 bool SceneRenderer::applyShaderSource(const std::string& source, std::string& diagnostics) {
     rae::diagnostics::TraceScope trace("Shader Compile / Pipeline Build", "Shader");
