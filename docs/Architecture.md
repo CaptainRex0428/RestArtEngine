@@ -175,6 +175,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 ## 文件与持久化
 
+资产重新导入由 `Assets/AssetImport::reimportAsset` 执行，隔离解析和临时写入后原子替换目标，保留 GUID、名称和位置。更新后的 `MeshGeometryKey` 让渲染、拾取和预览缓存识别同 GUID 的几何变化。`Assets/AssetOperations::deleteContentAsset` 负责项目路径校验、保存场景引用检查以及文件／内存同步删除；Editor 额外保护活场景引用、活动编辑状态和项目必需文件，删除网格／材质成功后清空可能含旧引用的撤销历史。Assets 层不依赖 Editor 或 World，具体操作边界见 [Importing.md](Importing.md)。
+
 场景文件 `.rascene` 使用可读 JSON，文件头 `format` 为 `RAEngine.Scene`。当前写出 **v3**：Actor、变换、可见性，以及按 GUID 引用材质与网格（JSON 里保存数值 ID，容器清单里写成 16 位十六进制）；v1（内嵌材质快照与网格描述）与 v2（材质引用、网格仍内嵌）仍可读取。可选字段 `background`（`"sky"` 默认 / `"black"`）选择程序化天空或纯黑背景；纯黑时渲染器把标志写入 `SceneConstants.cameraPosition.w`（该分量在着色器中原本未使用），由 `Background()` 直接返回黑色，常量缓冲布局不变。旧 v1/v2 网格描述通过相对场景的 `sourcePath` 重建网格；v3 只引用 GUID，几何在 `.rasset` 内，不依赖原 OBJ 加载。首次启动与 Content 切换场景均先加载材质／网格，再解析场景引用，普通 Load Scene 保持使用当前内存资产；保存与移动边界见 [资产格式的当前限制](AssetFormat.md#当前使用限制)。移动项目时应同时保留工程描述、工程 `Content/` 与 `Shaders/` 的相对结构。
 
 材质存为工程 `Content/Materials/` 目录树内的 `.rasset` 容器，保存按 GUID 保留已有文件位置，新资产按名称生成文件名并避免同名覆盖：GUID 标识，清单保存 ID 和名称，`payload` 保存 Base Color、Roughness、Metallic、Grid 与 Two-sided。旧 `Content/Materials/*.ramat` 仍可读：加载优先 `.rasset`，同 GUID 的 `.ramat` 跳过；保存写 `.rasset` 且不删除 `.ramat`。新建材质默认单面；旧文件缺少 `twoSided` 时按双面读取，存在该字段但不是布尔值时拒绝加载。加载 v3 场景时按 GUID 从工程材质解析引用（v1 使用场景内材质快照）；使用 `Reload material assets` 可显式读入工程材质文件。`Save material assets` 同时保存当前场景 v3 的资产引用；普通场景保存也会先写已提交的材质与网格容器，再写引用。

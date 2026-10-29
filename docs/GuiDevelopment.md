@@ -43,6 +43,8 @@ Scene Overview 与 Scene Viewport 角落同步显示场景三角面数和 GPU �
 
 ## 资产浏览与详情窗口
 
+项目导入网格在列表／网格共用右键菜单提供 `Reimport`、`Reimport from...`。前者使用记录来源，后者成功后更新来源；两者保留资产身份和场景引用。菜单只记录操作请求，离开资产遍历后再替换与刷新，避免索引失效。`Delete...` 经确认后调用资产删除服务，同步库、选择和详情状态；执行时重新检查活场景引用及编辑保护，保存场景引用由资产服务检查。删除网格／材质会清空场景 Undo／Redo，确认框须明确提示，取消或失败不清历史。源文件路径与 Content／Engine 来源标签分开显示。详细限制见 [Importing.md](Importing.md)。
+
 `Content & Editors` 采用 Sources／导航／筛选／Asset View 分区，交互组织参考 [UE Content Browser 官方说明](https://dev.epicgames.com/documentation/unreal-engine/content-browser-interface-in-unreal-engine)，配色和控件仍使用本引擎主题。宽面板采用两行工具栏，窄窗换行；Sources 可调整宽度或隐藏，内容宽度小于 500 时自动隐藏，路径导航仍可用。进入目录会展开 Sources 对应祖先，不每帧强制重开用户收起的节点。
 
 List／Tiles 共用 `AssetRegistry::query` 的目录、名称／路径搜索、类型、递归范围与排序结果；文件夹卡片支持双击导航。Tiles 缩略图偏好 48–128px，低高度时进一步收敛，保留两行名称和类型标签；列表保留名称，宽度允许时显示类型与大小。卡片背景、选择与文本复用主题颜色，长名与完整路径通过 tooltip 查看。底部显示资产／文件夹数量及选择状态；空目录与搜索无结果有不同提示。

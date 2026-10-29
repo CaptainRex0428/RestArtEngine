@@ -5,6 +5,7 @@
 #include <commdlg.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/Assets/AssetFile.h>
+#include <RestArtEngine/Assets/AssetOperations.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -89,6 +90,26 @@ void continueButtonRow(const char* nextLabel) {
 std::string pathText(const std::filesystem::path& path) {
     const auto utf8 = path.generic_u8string();
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+}
+
+std::wstring importFileFilters() {
+    std::wstring patterns;
+    for (const auto& format : assets::supportedImportFormats()) {
+        if (!patterns.empty()) patterns += L';';
+        patterns += L'*';
+        patterns.append(format.extension.begin(), format.extension.end());
+    }
+    std::wstring filters = L"Supported assets (" + patterns + L")";
+    filters.push_back(L'\0'); filters += patterns; filters.push_back(L'\0');
+    for (const auto& format : assets::supportedImportFormats()) {
+        filters.append(format.description.begin(), format.description.end());
+        filters.push_back(L'\0'); filters += L'*';
+        filters.append(format.extension.begin(), format.extension.end());
+        filters.push_back(L'\0');
+    }
+    filters += L"All files (*.*)"; filters.push_back(L'\0');
+    filters += L"*.*"; filters.push_back(L'\0'); filters.push_back(L'\0');
+    return filters;
 }
 
 }
@@ -1227,6 +1248,7 @@ void SceneEditor::chooseImportFiles() {
 }
 
 void SceneEditor::importFiles(const std::vector<std::filesystem::path>& sources, std::string_view destinationFolder) {
+    importReportIsReimport_ = false;
     assets::AssetImportOptions options;
     options.skipDegenerateTriangles = imgui::uiPreferences().importSkipDegenerateTriangles;
     importReport_ = assets::importAssets(assets_, project_.contentRoot, destinationFolder, sources, options);
@@ -1245,6 +1267,57 @@ void SceneEditor::importFiles(const std::vector<std::filesystem::path>& sources,
     status_ = importStatus_;
     if (importReport_.rejectedCount() || importReport_.warningCount())
         importResultsOpen_ = importResultsFocusRequested_ = true;
+}
+
+void SceneEditor::chooseReimportFile(const std::string& relativePath) {
+    std::vector<wchar_t> path(32768, L'\0');
+    const auto filters = importFileFilters();
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner = GetActiveWindow();
+    dialog.lpstrFile = path.data();
+    dialog.nMaxFile = static_cast<DWORD>(path.size());
+    dialog.lpstrFilter = filters.c_str();
+    dialog.lpstrTitle = L"Choose source file to reimport this asset";
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&dialog)) {
+        if (const auto code = CommDlgExtendedError())
+            status_ = contentError_ = "The reimport file picker could not open (Windows error " +
+                std::to_string(code) + ").";
+        return; // Cancel leaves the selected asset, its source and report unchanged.
+    }
+    std::string error;
+    reimportContentAsset(relativePath, std::filesystem::path(path.data()), error);
+}
+
+bool SceneEditor::reimportContentAsset(std::string_view relativePath, const std::filesystem::path& sourceOverride,
+    std::string& error) {
+    // Own the key before refreshContent invalidates a caller's registry entry.
+    const std::string key(relativePath);
+    assets::AssetImportOptions options;
+    options.skipDegenerateTriangles = imgui::uiPreferences().importSkipDegenerateTriangles;
+    auto result = assets::reimportAsset(assets_, project_.contentRoot, key, sourceOverride, options);
+    const bool success = result.succeeded();
+    error = result.error;
+    importReportIsReimport_ = true;
+    importReport_.items.clear();
+    importReport_.items.push_back(std::move(result));
+    if (success) {
+        refreshContent();
+        selectedAsset_ = key;
+        selectedMesh_ = importReport_.items.front().id;
+        assetDetailsMeshValid_ = false;
+        importStatus_ = "Reimported '" + key + "'. Existing scene references were retained.";
+        contentError_.clear();
+    } else {
+        importStatus_ = "Reimport failed: " + error;
+        contentError_ = error;
+    }
+    if (const auto warnings = importReport_.warningCount())
+        importStatus_ += " " + std::to_string(warnings) + (warnings == 1 ? " warning." : " warnings.");
+    status_ = importStatus_;
+    if (!success || importReport_.warningCount())
+        importResultsOpen_ = importResultsFocusRequested_ = true;
+    return success;
 }
 
 void SceneEditor::queueExternalImport(std::vector<std::filesystem::path> sources, float x, float y,
@@ -1278,6 +1351,7 @@ void SceneEditor::processExternalImports() {
         }
         if (accepted) importFiles(request.sources, request.destinationFolder);
         else {
+            importReportIsReimport_ = false;
             importReport_ = {};
             for (const auto& source : request.sources) {
                 assets::AssetImportResult rejected;
@@ -1300,15 +1374,17 @@ void SceneEditor::drawImportResults() {
     importResultsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (visible) {
         if (const auto warnings = importReport_.warningCount())
-            ImGui::TextWrapped("%zu imported, %zu rejected, %zu warning%s. Successful imports are saved as project assets.",
-                importReport_.importedCount(), importReport_.rejectedCount(), warnings, warnings == 1 ? "" : "s");
+            ImGui::TextWrapped("%zu %s, %zu rejected, %zu warning%s. Successful imports are saved as project assets.",
+                importReport_.importedCount(), importReportIsReimport_ ? "reimported" : "imported",
+                importReport_.rejectedCount(), warnings, warnings == 1 ? "" : "s");
         else
-            ImGui::TextWrapped("%zu imported, %zu rejected. Successful imports are saved as project assets.",
-                importReport_.importedCount(), importReport_.rejectedCount());
+            ImGui::TextWrapped("%zu %s, %zu rejected. Successful imports are saved as project assets.",
+                importReport_.importedCount(), importReportIsReimport_ ? "reimported" : "imported", importReport_.rejectedCount());
         ImGui::Separator();
         ImGui::BeginChild("##import-results", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()));
         for (const auto& result : importReport_.items) {
-            ImGui::TextWrapped("%s: %s", result.succeeded() ? "Imported" : "Rejected", pathText(result.sourcePath).c_str());
+            ImGui::TextWrapped("%s: %s", result.succeeded() ? (importReportIsReimport_ ? "Reimported" : "Imported") : "Rejected",
+                pathText(result.sourcePath).c_str());
             ImGui::TextWrapped("%s", result.succeeded() ? pathText(result.assetPath).c_str() : result.error.c_str());
             if (result.succeeded() && !result.warnings.empty()) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, .70f, .25f, 1.0f));
@@ -1685,6 +1761,7 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
         if (const auto* mesh = assets_.findMesh(entry->id)) {
             ImGui::TextDisabled("Geometry");
             ImGui::Text("%zu vertices / %zu triangles", mesh->vertices.size(), mesh->indices.size() / 3);
+            if (!mesh->sourcePath.empty()) ImGui::TextWrapped("Source file: %s", mesh->sourcePath.c_str());
         }
     } else if (entry->type == assets::AssetType::Material) {
         if (const auto* material = assets_.findMaterial(entry->id)) {
@@ -1945,7 +2022,16 @@ void SceneEditor::drawFolderTreeNode(const std::string& folder) {
 
 std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) const {
     if (entry.readOnly()) return "Engine is read-only.";
-    if (entry.path.lexically_normal() == scenePath_.lexically_normal()) return "The open scene cannot be deleted.";
+    const auto sameFile = [&](const std::filesystem::path& path) {
+        if (entry.path.lexically_normal() == path.lexically_normal()) return true;
+        std::error_code code;
+        return !path.empty() && std::filesystem::equivalent(entry.path, path, code) && !code;
+    };
+    if (sameFile(scenePath_)) return "The open scene cannot be deleted.";
+    if (sameFile(project_.defaultScene))
+        return "The project's startup scene cannot be deleted.";
+    if (entry.type == assets::AssetType::Shader)
+        return "Shader dependencies must be managed outside the Content browser.";
     if (entry.type == assets::AssetType::Mesh) {
         if (const auto* mesh = assets_.findMesh(entry.id); mesh && mesh->primitive != assets::MeshPrimitive::Imported)
             return "Built-in meshes are required by the editor.";
@@ -1957,10 +2043,46 @@ std::string SceneEditor::contentDeleteReason(const assets::AssetEntry& entry) co
     }
     if (entry.type == assets::AssetType::Material && entry.id == selectedMaterial_ && materialWindowOpen_)
         return "Close the material editor before deleting this asset.";
-    if ((entry.type == assets::AssetType::Material && assets_.findMaterial(entry.id)) ||
-        (entry.type == assets::AssetType::Mesh && assets_.findMesh(entry.id)))
-        return "Loaded assets cannot be deleted while this project is open.";
+    if (entry.type == assets::AssetType::Material && (materialsDirty_ ||
+        (entry.id == selectedMaterial_ && materialDraftDirty_)))
+        return "Save or discard this material's changes before deleting it.";
     return {};
+}
+
+bool SceneEditor::deleteContentAsset(std::string_view relativePath, std::string& error) {
+    const std::string key(relativePath);
+    // Revalidate the current disk identity before checking unsaved scene refs.
+    refreshContent();
+    const auto* target = registry_.find(key);
+    error = target ? contentDeleteReason(*target) : "Asset no longer exists. Refresh Content and try again.";
+    if (!error.empty()) { status_ = contentError_ = error; return false; }
+    const auto id = target->id;
+    const auto type = target->type;
+    if (!assets::deleteContentAsset(assets_, project_.contentRoot, key, error)) {
+        status_ = contentError_ = "Cannot delete the asset: " + error;
+        return false;
+    }
+    // Undo callbacks may restore Actor or material references. Only clear after
+    // publication succeeds; sceneDirty_ still describes unsaved scene edits.
+    if (type == assets::AssetType::Mesh || type == assets::AssetType::Material) undo_.clear();
+    if (selectedMesh_ == id) selectedMesh_ = assets_.meshes.empty() ? 0 : assets_.meshes.front().id;
+    if (selectedMaterial_ == id) {
+        selectedMaterial_ = assets_.findMaterial(assets::EngineDefaultMaterialId) ? assets::EngineDefaultMaterialId
+            : assets_.materials.empty() ? 0 : assets_.materials.front().id;
+        materialDraft_ = assets_.findMaterial(selectedMaterial_) ? *assets_.findMaterial(selectedMaterial_) : assets::MaterialAsset{};
+        materialDraftDirty_ = false;
+        materialPreviewParamsValid_ = false;
+    }
+    if (pendingMaterial_ == id) pendingMaterial_ = 0;
+    if (selectedAsset_ == key) selectedAsset_.clear();
+    if (assetDetailsPath_ == key) {
+        closeAssetDetails();
+        assetDetailsPath_.clear();
+        assetDetailsMeshValid_ = false;
+    }
+    refreshContent();
+    status_ = "Deleted '" + key + "'. The external source file was kept.";
+    return true;
 }
 
 void SceneEditor::drawAssetItemActions(const assets::AssetEntry& entry) {
@@ -1986,6 +2108,19 @@ void SceneEditor::drawAssetItemActions(const assets::AssetEntry& entry) {
             pendingContentCopy_ = entry.id;
         const auto* mesh = entry.type == assets::AssetType::Mesh ? assets_.findMesh(entry.id) : nullptr;
         const bool builtin = mesh && mesh->primitive != assets::MeshPrimitive::Imported;
+        if (entry.type == assets::AssetType::Mesh) {
+            const bool canReimport = mesh && !builtin && !entry.readOnly() && entry.path.extension() == ".rasset";
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reimport", nullptr, false, canReimport && !mesh->sourcePath.empty())) {
+                pendingContentReimport_ = entry.relativePath;
+                pendingReimportChooseSource_ = false;
+            }
+            if (ImGui::MenuItem("Reimport from...", nullptr, false, canReimport)) {
+                pendingContentReimport_ = entry.relativePath;
+                pendingReimportChooseSource_ = true;
+            }
+            ImGui::Separator();
+        }
         if (ImGui::MenuItem("Rename file...", nullptr, false, !builtin && !entry.readOnly())) {
             renameTarget_ = entry.relativePath;
             renameBuffer_ = pathText(entry.path.stem());
@@ -1996,12 +2131,21 @@ void SceneEditor::drawAssetItemActions(const assets::AssetEntry& entry) {
             deleteTarget_ = entry.relativePath;
             deleteOpen_ = true;
         }
-        if (!reason.empty()) ImGui::TextDisabled("%s", reason.c_str());
+        if (!reason.empty()) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 330.0f);
+            ImGui::TextDisabled("%s", reason.c_str());
+            ImGui::PopTextWrapPos();
+        }
         ImGui::EndPopup();
     }
 }
 
 void SceneEditor::processContentActions() {
+    if (!pendingContentReimport_.empty()) {
+        const auto path = std::exchange(pendingContentReimport_, {});
+        if (std::exchange(pendingReimportChooseSource_, false)) chooseReimportFile(path);
+        else { std::string error; reimportContentAsset(path, {}, error); }
+    }
     if (!pendingContentMove_.empty()) {
         const auto source = std::exchange(pendingContentMove_, {});
         const auto target = std::exchange(pendingContentMoveFolder_, {});
@@ -2256,23 +2400,20 @@ void SceneEditor::drawContentDialogs() {
         deleteOpen_ = false;
     }
     if (ImGui::BeginPopupModal("Delete asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Delete '%s' from disk?", deleteTarget_.c_str());
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 440.0f);
+        ImGui::TextWrapped("Delete '%s' from this project?", deleteTarget_.c_str());
         const auto* target = registry_.find(deleteTarget_);
         const auto reason = target ? contentDeleteReason(*target) : std::string("Asset no longer exists.");
         if (!reason.empty()) ImGui::TextWrapped("%s", reason.c_str());
-        ImGui::TextUnformatted("References in other saved scenes are not checked.");
+        ImGui::TextWrapped("This permanently deletes the project asset. Its external source file is kept. Saved scene references are checked before deletion.");
+        if (target && (target->type == assets::AssetType::Mesh || target->type == assets::AssetType::Material))
+            ImGui::TextWrapped("Deleting this asset cannot be undone and clears the scene's Undo / Redo history.");
+        ImGui::PopTextWrapPos();
         ImGui::BeginDisabled(!reason.empty());
         if (ImGui::Button("Delete", ImVec2(90.0f, 0.0f))) {
-            std::error_code code;
-            std::filesystem::remove(project_.contentRoot / utf8Path(deleteTarget_), code);
-            if (code) {
-                status_ = "Cannot delete the asset: " + code.message();
-            } else {
-                status_ = "Deleted '" + deleteTarget_ + "'.";
-                if (selectedAsset_ == deleteTarget_) selectedAsset_.clear();
-                deleteTarget_.clear();
-                refreshContent();
-            }
+            std::string error;
+            deleteContentAsset(deleteTarget_, error);
+            deleteTarget_.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();

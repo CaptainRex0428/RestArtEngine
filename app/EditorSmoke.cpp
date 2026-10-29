@@ -3502,6 +3502,39 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                     "The real import checkbox did not update and save the shared option.");
                 capture(enabled ? "import_options_skip" : "import_options_strict", true);
                 pressKey(ImGuiKey_Escape);
+            },
+            [&](const std::string& path, const char* action, bool grid) {
+                const auto* entry = editor.assetRegistry().find(path);
+                require(entry != nullptr, "Lifecycle asset menu target is absent.");
+                const auto name = entry->name, folder = entry->folder;
+                editor.closeAssetDetails();
+                editor.closeImportResults();
+                editor.selectContentFolder(folder);
+                editor.setContentSearch(name);
+                editor.setContentTypeFilter(assets::AssetType::Unknown);
+                editor.setContentGridView(grid);
+                capture("lifecycle_menu_ready", true);
+                ImGuiWindow* area = nullptr;
+                for (auto* window : context->Windows)
+                    if (window->Active && std::strstr(window->Name, "##content-assets")) area = window;
+                require(area != nullptr, "Lifecycle Content area is absent.");
+                const auto scope = ImHashStr(path.c_str(), 0, area->ID);
+                input.mouse = itemRect(area, ImHashStr(grid ? "##asset-tile" : "##asset-row", 0, scope)).GetCenter();
+                capture("lifecycle_menu_hover", true);
+                input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, true); };
+                capture("lifecycle_menu_press", true);
+                input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, false); };
+                capture("lifecycle_menu_open", true);
+                capture("lifecycle_menu_stable", true);
+                require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+                    "Right-click did not open the asset menu.");
+                auto* popup = context->OpenPopupStack.back().Window;
+                if (action && *action) click(itemRect(popup, ImHashStr(action, 0, popup->ID)).GetCenter());
+            },
+            [&](const char* windowName, const char* label) {
+                if (!label || !*label) { pressKey(ImGuiKey_Escape); return; }
+                auto* window = findWindow(windowName);
+                click(itemRect(window, ImHashStr(label, 0, window->ID)).GetCenter());
             });
     }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);

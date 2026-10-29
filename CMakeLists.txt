@@ -54,6 +54,7 @@ add_executable(RestArtEngine
     src/Assets/AssetLibrary.cpp
     src/Assets/MeshQuery.cpp
     src/Assets/AssetImport.cpp
+    src/Assets/AssetOperations.cpp
     src/Assets/FbxImporter.cpp
     src/Assets/AssetRegistry.cpp
     src/Assets/AssetFile.cpp
@@ -198,6 +199,17 @@ if(BUILD_TESTING)
         target_compile_options(AssetImportTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME AssetImportTests COMMAND AssetImportTests)
+    add_executable(AssetLifecycleTests tests/AssetLifecycleTests.cpp
+        src/Assets/AssetImport.cpp src/Assets/AssetOperations.cpp src/Assets/FbxImporter.cpp
+        src/Assets/AssetLibrary.cpp src/Assets/AssetRegistry.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
+    target_include_directories(AssetLifecycleTests PRIVATE include vendor/nlohmann/single_include)
+    target_link_libraries(AssetLifecycleTests PRIVATE ufbx)
+    target_compile_definitions(AssetLifecycleTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(AssetLifecycleTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME AssetLifecycleTests COMMAND AssetLifecycleTests)
     add_executable(GarbageCollectorTests tests/GarbageCollectorTests.cpp src/Core/GarbageCollector.cpp)
     target_include_directories(GarbageCollectorTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(GarbageCollectorTests PRIVATE UNICODE _UNICODE NOMINMAX)

@@ -49,4 +49,12 @@ struct AssetImportReport {
     const std::filesystem::path& contentRoot, std::string_view destinationFolder,
     std::span<const std::filesystem::path> sources, const AssetImportOptions& options = {});
 
+// Replaces one loaded Project imported mesh in place. Empty sourceOverride uses
+// its recorded sourcePath; a replacement source becomes the new recorded path.
+// GUID, display name and Content file location are retained. Source validation
+// or publication failure leaves both the existing asset and library unchanged.
+[[nodiscard]] AssetImportResult reimportAsset(AssetLibrary& library,
+    const std::filesystem::path& contentRoot, std::string_view relativePath,
+    const std::filesystem::path& sourceOverride = {}, const AssetImportOptions& options = {});
+
 } // namespace rae::assets

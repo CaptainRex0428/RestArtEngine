@@ -3,6 +3,7 @@
 #include "RestArtEngine/Assets/AssetFile.h"
 #include "AssetSerialization.h"
 #include "ContentFiles.h"
+#include "AssetOperationPaths.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@ constexpr std::array formats{
     AssetImportFormat{".fbx", "Autodesk FBX"},
 };
 static_assert(std::is_nothrow_move_constructible_v<MeshAsset>);
+static_assert(std::is_nothrow_move_assignable_v<MeshAsset>);
 
 std::string extensionOf(const std::filesystem::path& path) {
     auto extension = detail::pathUtf8(path.extension());
@@ -243,6 +245,86 @@ AssetImportReport importAssets(AssetLibrary& library, const std::filesystem::pat
         report.items.push_back(std::move(result));
     }
     return report;
+}
+
+AssetImportResult reimportAsset(AssetLibrary& library, const std::filesystem::path& contentRoot,
+    std::string_view relativePath, const std::filesystem::path& sourceOverride, const AssetImportOptions& options) {
+    AssetImportResult result;
+    result.sourcePath = sourceOverride;
+    try {
+        const auto target = detail::checkedContentFile(contentRoot, relativePath);
+        if (extensionOf(target) != ".rasset")
+            throw std::runtime_error("Reimport requires a modern .rasset mesh asset.");
+        AssetFile original;
+        std::string error;
+        if (!readAssetFileHeader(target, original, error)) throw std::runtime_error(error);
+        if (original.type != AssetFileType::StaticMesh || isEngineAssetId(original.id))
+            throw std::runtime_error("Only Project imported meshes can be reimported.");
+        auto* existing = library.findMesh(original.id);
+        if (!existing || existing->origin != AssetOrigin::Project || existing->primitive != MeshPrimitive::Imported)
+            throw std::runtime_error("Reimport requires a loaded Project imported mesh.");
+        if (std::count_if(library.meshes.begin(), library.meshes.end(),
+                [&](const auto& mesh) { return mesh.id == original.id; }) != 1 || library.findMaterial(original.id))
+            throw std::runtime_error("The asset GUID is ambiguous in the loaded library.");
+        detail::requireUniqueContentIdentity(detail::checkedContentFiles(contentRoot), original.id);
+        const auto originalSize = std::filesystem::file_size(target);
+        const auto originalModified = std::filesystem::last_write_time(target);
+        if (result.sourcePath.empty()) result.sourcePath = detail::pathFromUtf8(existing->sourcePath);
+        if (result.sourcePath.empty()) throw std::runtime_error("No source file is recorded. Use Reimport from file.");
+        const auto extension = extensionOf(result.sourcePath);
+        if (std::none_of(formats.begin(), formats.end(), [&](const auto& format) { return format.extension == extension; }))
+            throw std::runtime_error("Unsupported source format. Supported formats: OBJ, FBX.");
+        if (!std::filesystem::is_regular_file(result.sourcePath))
+            throw std::runtime_error("The source file is missing or unreadable. Use Reimport from file to choose another source.");
+        AssetLibrary parsed;
+        AssetId parsedId = 0;
+        MeshImportDiagnostics diagnostics;
+        const bool valid = extension == ".obj" ? parsed.importObj(result.sourcePath, parsedId, error)
+            : parsed.importFbx(result.sourcePath, parsedId, error, &diagnostics, options);
+        if (!valid) throw std::runtime_error(error);
+        if (diagnostics.skippedDegenerateTriangles)
+            result.warnings.push_back("Skipped " + std::to_string(diagnostics.skippedDegenerateTriangles) +
+                " degenerate triangle(s) with zero area. Valid geometry was retained.");
+        if (diagnostics.repairedNormals)
+            result.warnings.push_back("Rebuilt " + std::to_string(diagnostics.repairedNormals) +
+                " unusable vertex normal(s) from valid triangles.");
+        auto mesh = std::move(*parsed.findMesh(parsedId));
+        mesh.id = existing->id;
+        mesh.name = existing->name;
+        mesh.origin = AssetOrigin::Project;
+        auto file = makeMeshAssetFile(mesh);
+        attachThumbnail(file, renderMeshThumbnail(mesh));
+        result.assetPath = target;
+        result.name = mesh.name;
+
+        // This cleanup owns temporary files only, never the existing target.
+        ImportFiles files;
+        auto staging = target.parent_path() / detail::pathFromUtf8(".ra-reimport-" + assetIdText(generateAssetId()) + ".tmp");
+        if (!std::filesystem::create_directory(staging)) throw std::runtime_error("Cannot create reimport staging directory.");
+        files.temporaryFolder = std::move(staging);
+        files.temporary = files.temporaryFolder / "asset.rasset";
+        if (!writeAssetFile(files.temporary, file, error)) throw std::runtime_error(error);
+        detail::rejectOperationLinks(target);
+        AssetFile current;
+        if (!readAssetFileHeader(target, current, error) || current.id != original.id || current.type != original.type ||
+            std::filesystem::file_size(target) != originalSize || std::filesystem::last_write_time(target) != originalModified)
+            throw std::runtime_error("The asset file changed during reimport. Refresh Content and retry.");
+#ifdef _WIN32
+        if (!MoveFileExW(files.temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Cannot replace the asset file: " + std::system_category().message(static_cast<int>(GetLastError())));
+#else
+        std::filesystem::rename(files.temporary, target);
+#endif
+        *existing = std::move(mesh);
+        result.id = existing->id;
+    } catch (const std::exception& failure) {
+        result.id = 0;
+        result.assetPath.clear();
+        result.name.clear();
+        result.warnings.clear();
+        result.error = failure.what();
+    }
+    return result;
 }
 
 } // namespace rae::assets

@@ -67,6 +67,12 @@ public:
     void selectContentAsset(std::string path);
     // Save a new Project material without applying/saving unrelated drafts or assets.
     bool copyMaterialToProject(assets::AssetId source, std::string& error);
+    // Content actions retain asset identity and never alter the external source.
+    // An empty override reuses the recorded source. These are also the menu's
+    // execution paths; callers of delete must obtain user confirmation first.
+    bool reimportContentAsset(std::string_view relativePath, const std::filesystem::path& sourceOverride,
+        std::string& error);
+    bool deleteContentAsset(std::string_view relativePath, std::string& error);
     [[nodiscard]] const std::string& selectedContentAsset() const noexcept { return selectedAsset_; }
     // Native drops are queued between frames, then checked against the visible
     // Content asset area before entering the same pipeline as Import....
@@ -147,6 +153,7 @@ private:
     void drawShader(renderer::SceneRenderer&);
     void selectMaterial(assets::AssetId);
     void chooseImportFiles();
+    void chooseReimportFile(const std::string& relativePath);
     void importFiles(const std::vector<std::filesystem::path>& sources, std::string_view destinationFolder);
     void processExternalImports();
     void drawImportResults();
@@ -174,6 +181,8 @@ private:
     bool contentEngineVisible_ = true;
     float contentSourcesWidth_ = 170.0f, contentThumbnailSize_ = 72.0f;
     std::string pendingContentOpen_, pendingContentMove_, pendingContentMoveFolder_;
+    std::string pendingContentReimport_;
+    bool pendingReimportChooseSource_ = false;
     assets::AssetId pendingContentCopy_ = 0;
     bool assetDragCancelled_ = false;
     struct ExternalImport {
@@ -186,6 +195,7 @@ private:
     std::vector<ExternalImport> externalImports_;
     assets::AssetImportReport importReport_;
     std::string importStatus_;
+    bool importReportIsReimport_ = false;
     bool importResultsOpen_ = false, importResultsFocusRequested_ = false, importResultsFocused_ = false;
     // Rebuilt from the asset child every draw; a hidden/collapsed Content panel
     // never retains an eligible rectangle from a previous frame.

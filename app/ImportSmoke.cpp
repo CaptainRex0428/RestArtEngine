@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 
 namespace {
@@ -48,7 +49,9 @@ ImGuiWindow* contentArea() {
 
 void runImportSmoke(rae::editor::SceneEditor& editor, rae::imgui::ImGuiLayer& ui, rae::renderer::SceneRenderer& renderer,
     const std::filesystem::path& output, const std::function<void(const char*)>& frame,
-    const std::function<void(bool)>& setImportOption) {
+    const std::function<void(bool)>& setImportOption,
+    const std::function<void(const std::string&, const char*, bool)>& assetMenu,
+    const std::function<void(const char*, const char*)>& dialogButton) {
     namespace fs = std::filesystem;
     using namespace rae;
     require(ui.isInitialized(), "Native import test requires an initialized UI adapter.");
@@ -266,6 +269,117 @@ Connections: {
     require(renderer.render(previewSettings, preview, reloaded, error), "Imported FBX geometry failed GPU rendering.");
     require(renderer.saveScreenshot((output / "import_fbx_render.bmp").c_str(), error),
         "Cannot capture the imported FBX render.");
+
+    // Reimport/deletion use the existing small FBX fixture in this isolated
+    // project. The original native-import assertions above remain independent.
+    const auto lifecycleEntry = std::find_if(editor.assetRegistry().entries().begin(), editor.assetRegistry().entries().end(),
+        [fbxId](const auto& entry) { return entry.id == fbxId; });
+    require(lifecycleEntry != editor.assetRegistry().entries().end(), "Lifecycle FBX entry is missing.");
+    const auto lifecycleKey = lifecycleEntry->relativePath;
+    const auto lifecyclePath = lifecycleEntry->path;
+    const auto meshName = editor.assets().findMesh(fbxId)->name;
+    const auto readBytes = [](const fs::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+    };
+    const auto writeBytes = [](const fs::path& path, const std::string& text) {
+        std::ofstream stream(path, std::ios::binary);
+        stream << text;
+        require(bool(stream), "Cannot write lifecycle source fixture.");
+    };
+    const auto beforeGeometry = editor.assets().findMesh(fbxId)->geometryKey();
+    const auto beforeHistory = editor.undoStack().size();
+    scene::World lifecyclePreview;
+    lifecyclePreview.createActor("Lifecycle preview", fbxId, assets::EngineDefaultMaterialId);
+    require(renderer.render(previewSettings, lifecyclePreview, editor.assets(), error) &&
+        renderer.saveScreenshot((output / "lifecycle_before.bmp").c_str(), error), "Cannot render lifecycle baseline.");
+    auto sourceText = readBytes(fbx);
+    const std::string originalVertices = "-1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1, -1,-1,1, 1,-1,1, 1,1,1, -1,1,1, 0,-1,-1";
+    const auto vertexStart = sourceText.find(originalVertices);
+    require(vertexStart != std::string::npos, "Lifecycle FBX vertex fixture changed.");
+    sourceText.replace(vertexStart, originalVertices.size(),
+        "-2,-1,-1, 2,-1,-1, 2,1,-1, -2,1,-1, -2,-1,1, 2,-1,1, 2,1,1, -2,1,1, 0,-1,-1");
+    writeBytes(fbx, sourceText);
+    assetMenu(lifecycleKey, "Reimport", false);
+    require(editor.lastImportReport().importedCount() == 1 && editor.lastImportReport().items.front().id == fbxId &&
+        editor.assets().findMesh(fbxId)->name == meshName &&
+        editor.lastImportReport().items.front().assetPath == lifecyclePath &&
+        editor.assets().findMesh(fbxId)->geometryKey() != beforeGeometry && editor.undoStack().size() == beforeHistory,
+        "Original-source menu reimport lost identity, location, geometry revision or scene history.");
+    editor.closeImportResults();
+    require(renderer.render(previewSettings, lifecyclePreview, editor.assets(), error) &&
+        renderer.saveScreenshot((output / "lifecycle_after.bmp").c_str(), error), "Cannot render reimported geometry.");
+    require(readBytes(output / "lifecycle_before.bmp") != readBytes(output / "lifecycle_after.bmp"),
+        "Reimporting geometry under the same GUID did not update the GPU output.");
+
+    const auto replacement = sources / L"替换来源.obj";
+    writeBytes(replacement, "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n");
+    const auto liveActor = editor.world().createActor("Lifecycle reference", fbxId, assets::EngineDefaultMaterialId);
+    require(editor.reimportContentAsset(lifecycleKey, replacement, error), "New-source reimport failed.");
+    require(editor.world().findActor(liveActor)->mesh.meshId == fbxId && editor.assets().findMesh(fbxId)->indices.size() == 3 &&
+        editor.assets().findMesh(fbxId)->name == meshName && editor.selectedContentAsset() == lifecycleKey,
+        "New-source reimport did not preserve the existing Actor reference and asset name/selection.");
+    const auto sourceUtf8 = fs::absolute(replacement).lexically_normal().generic_u8string();
+    require(editor.assets().findMesh(fbxId)->sourcePath == std::string(sourceUtf8.begin(), sourceUtf8.end()),
+        "Successful new-source reimport did not update the recorded source path.");
+    const auto stableFile = readBytes(lifecyclePath);
+    const auto stableGeometry = editor.assets().findMesh(fbxId)->geometryKey();
+    const auto stableSource = editor.assets().findMesh(fbxId)->sourcePath;
+    require(!editor.reimportContentAsset(lifecycleKey, bad, error) && readBytes(lifecyclePath) == stableFile &&
+        editor.assets().findMesh(fbxId)->geometryKey() == stableGeometry &&
+        editor.assets().findMesh(fbxId)->sourcePath == stableSource && editor.undoStack().size() == beforeHistory,
+        "Unsupported replacement source changed the existing asset or history.");
+    editor.closeImportResults();
+    const auto replacementText = readBytes(replacement);
+    fs::remove(replacement);
+    require(!editor.reimportContentAsset(lifecycleKey, {}, error) && readBytes(lifecyclePath) == stableFile &&
+        editor.assets().findMesh(fbxId)->geometryKey() == stableGeometry,
+        "Missing recorded source did not fail without changing the asset.");
+    frame("lifecycle_missing_source");
+    editor.closeImportResults();
+    writeBytes(replacement, replacementText);
+    require(!editor.deleteContentAsset(lifecycleKey, error) && fs::exists(lifecyclePath) &&
+        editor.undoStack().size() == beforeHistory, "Deleting an asset used by an unsaved Actor was allowed.");
+    require(editor.world().removeActor(liveActor), "Cannot remove lifecycle reference fixture.");
+
+    const auto referenceScene = content / "Scenes/Lifecycle-reference.rascene";
+    require(lifecyclePreview.save(referenceScene, editor.assets(), error), "Cannot save lifecycle reference fixture.");
+    require(!editor.deleteContentAsset(lifecycleKey, error) && fs::exists(lifecyclePath) &&
+        editor.undoStack().size() == beforeHistory, "Deleting an asset used by a saved scene was allowed.");
+    fs::remove(referenceScene);
+    // The current source is exercised through the real menu once more, now
+    // pointing at the chosen replacement rather than the original FBX.
+    assetMenu(lifecycleKey, "Reimport", true);
+    require(editor.lastImportReport().importedCount() == 1 && editor.assets().findMesh(fbxId)->indices.size() == 3,
+        "Original-path reimport did not reuse the newly selected source.");
+
+    for (const auto theme : {imgui::EditorTheme::Black, imgui::EditorTheme::DarkBlue}) {
+        imgui::setTheme(theme);
+        assetMenu(lifecycleKey, "", theme == imgui::EditorTheme::DarkBlue);
+        frame(theme == imgui::EditorTheme::Black ? "lifecycle_menu_black" : "lifecycle_menu_blue");
+        dialogButton("", "");
+        assetMenu(lifecycleKey, "Delete...", theme == imgui::EditorTheme::DarkBlue);
+        frame(theme == imgui::EditorTheme::Black ? "lifecycle_delete_black" : "lifecycle_delete_blue");
+        require(ImGui::FindWindowByName("Delete asset") && ImGui::FindWindowByName("Delete asset")->Active,
+            "Asset Delete menu did not open its confirmation dialog.");
+        dialogButton("Delete asset", "Cancel");
+        require(editor.assets().findMesh(fbxId) && fs::exists(lifecyclePath) && editor.undoStack().size() == beforeHistory,
+            "Canceling deletion changed disk, library or scene history.");
+    }
+    assetMenu(lifecycleKey, "Delete...", false);
+    dialogButton("Delete asset", "Delete");
+    require(!fs::exists(lifecyclePath) && !editor.assets().findMesh(fbxId) &&
+        !editor.assetRegistry().find(lifecycleKey) && editor.undoStack().size() == 0 &&
+        fs::exists(fbx) && fs::exists(replacement), "Confirmed deletion did not remove only the project asset and stale history.");
+    require(editor.assets().saveMeshes(content, error), "Cannot save meshes after lifecycle deletion.");
+    assets::AssetLibrary afterDelete;
+    afterDelete.createDefaults();
+    require(afterDelete.loadMeshes(content, error) && !afterDelete.findMesh(fbxId),
+        "Saving or reloading resurrected a deleted asset.");
+    require(!editor.deleteContentAsset("engine://Meshes/Cube.rasset", error), "Engine deletion was not rejected.");
+    editor.setContentSearch("");
+    std::cout << "PASS: Content original/new-source reimport, same-GUID GPU refresh, missing/unsupported rollback, "
+        "live/saved reference protection, both-theme list/tile menus, delete cancel/confirm, source retention and no resurrection.\n";
     editor.closeImportResults();
     editor.selectContentFolder(originalFolder);
     imgui::setTheme(originalTheme);
