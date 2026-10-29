@@ -91,11 +91,23 @@
 
 参数预览测试使用隔离工程，验证拖动期间画面逐帧变化、已提交资产与磁盘不变、Shader revision 不变，以及 Discard 恢复和 Apply 前后画面一致。还需比较 Forward、Deferred、解析光追和三角形光追的预览结果与等价提交结果，检查保存／重载及切换材质时的草稿确认。使用 `--editor-self-test` 与 `scripts/Validate-Render.ps1` 获取当前构建的结果，其他平台／后端需分别验证。
 
-### 材质 Two-sided
+### 材质深度测试与面剔除
 
-所有材质统一具备独立的 `twoSided` 开关，不增加场景全局覆盖。新材质默认单面，旧文件缺字段时按双面兼容；实时预览、提交、丢弃和保存沿用已有材质流程。渲染实现将此选项统一用于光栅剔除、背面法线、阴影和解析／三角形光追，并处理镜像缩放。拾取遵循有效预览材质的面规则，单面背面不挡住后方对象。GPU 数据布局保持不变；具体编码与阴影方向约定见 Architecture。
+所有材质具有独立的 `Cull`（Off／Front／Back）、`ZTest` 与 `ZWrite`。新材质默认 Cull Back、ZTest Less、ZWrite On；Cull Off 对应双面，Cull Front 只保留背面并翻转着色法线。旧 `twoSided` 调用与资产仍兼容：旧 `.ramat`／场景快照缺字段按双面读取，现代 `.rasset` 缺字段按单面读取。实时预览、提交、丢弃和保存沿用已有材质流程。剔除覆盖光栅、阴影、解析／三角形光追、DXR 与 GI，并处理镜像缩放；拾取遵循有效预览材质的面规则。GPU 材质 flags 保留 Grid=1、Two-sided=2，新增 Cull Front=4，常量和三角形布局保持不变。
 
-Two-sided 的验收应覆盖平面正反面、镜像缩放、背面法线、Forward／Deferred、解析／三角形反射与阴影，以及 UI 实时预览、Apply／Discard、拾取、持久化和旧文件兼容。材质属性尚未提供通用撤销。
+ZTest 支持 Never、Less、Equal、LessEqual、Greater、NotEqual、GreaterEqual、Always 和 Disabled。ZWrite 独立控制写深度；Disabled 同时关闭深度测试与深度写入，Always 则允许通过测试并按 ZWrite 写入。状态逐材质绑定，Forward 与 Deferred 的几何 Pass 一致，阴影贴图固定使用 Less／写深度。深度比较与面剔除的底层语义分别见 [Direct3D 深度状态](https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-depth-stencil) 和 [Cull 模式](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_cull_mode)。
+
+当前 DXR 主可见性按最近命中确定。可见场景材质使用 Less／LessEqual 且 ZWrite On 时允许硬件光追／GI；其他深度状态保留用户请求、明确报告实际不可用，并继续光栅显示。恢复兼容状态会重新启用硬件并重置 GI 历史，防止间接图与光栅接收面不一致。深度自定义不是透明排序或自定义光照模型的实现。
+
+验收覆盖平面正反面、镜像缩放、背面法线、各深度比较的重叠几何、Forward／Deferred、解析／三角形反射与阴影、硬件兼容状态恢复，以及 UI 实时预览、Apply／Discard、拾取、持久化和旧文件兼容。材质属性尚未提供通用撤销。定向 GPU 入口为 `--material-render-state-self-test`。
+
+### 视锥剔除与千万三角形基准
+
+`SceneSettings::frustumCulling` 默认开启。每个网格按几何版本缓存局部包围盒；主视图和每个阴影级联分别用自己的裁剪矩阵进行保守包围盒测试，在 GPU 上传／绘制前跳过完全位于视锥外的 Actor。无效包围盒保守保留，镜像和非均匀缩放通过完整对象变换处理。相机视锥结果不用于移除 DXR 场景物体，因为屏幕外物体仍可能提供阴影、反射和间接光。当前未实现遮挡剔除。
+
+规模验收目标为视锥内至少 10,000,000 个三角形、硬件光追与实时 GI 同时开启，帧率以实际分辨率和采样预算报告。`--render-scale-test --capture-dir <输出目录>` 生成独立的 2500×2000 网格单元和两个彩色物体，在 1920×1080 下运行；地形包含一千万个不同的非退化三角形，不用重叠副本计数。基准校验主光栅 GPU 输入／裁剪计数、实际 DXR 场景计数与持续 dispatch、有效实时 GI、像素和图形错误，导出 JSON、BMP 与 CPU Trace。硬件不可用时该规模验收失败，不以软件回退作为通过。
+
+报告分别记录首次准备、暖机、稳态同步帧时间和 DXGI 进程 local／nonlocal 内存使用。同步帧时间包含 CPU 提交至 GPU 完成，排除 Present／垂直同步和编辑器 UI；不等于独立 GPU 执行时间，也不承诺任意场景、材质和采样设置的固定帧率。当前 DXR 仍使用全场世界空间 BLAS，静态帧通过场景输入缓存复用，几何或实例变换变化的重建成本需单独考虑。
 
 ## 平台与图形后端矩阵
 

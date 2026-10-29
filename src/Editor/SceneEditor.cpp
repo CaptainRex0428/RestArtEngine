@@ -1499,10 +1499,15 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
             const std::array<float, 5> values = material ? std::array<float, 5>{material->baseColor[0],
                 material->baseColor[1], material->baseColor[2], material->roughness, material->metallic} : std::array<float, 5>{};
             const bool grid = material && material->grid, twoSided = material && material->twoSided;
+            const bool cullFront = material && material->cullFront;
+            const bool depthWrite = material && material->depthWrite;
+            const auto depthTest = material ? material->depthTest : assets::MaterialDepthTest::Less;
             const auto key = mesh->geometryKey();
             if (!assetDetailsMeshValid_ || assetDetailsMeshId_ != mesh->id || assetDetailsMeshKey_ != key ||
                 assetDetailsShaderRevision_ != renderer.shaderRevision() || assetDetailsMaterialValues_ != values ||
                 assetDetailsMaterialGrid_ != grid || assetDetailsMaterialTwoSided_ != twoSided ||
+                assetDetailsMaterialCullFront_ != cullFront || assetDetailsMaterialDepthWrite_ != depthWrite ||
+                assetDetailsMaterialDepthTest_ != depthTest ||
                 !renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 scene::World previewWorld;
                 previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
@@ -1511,6 +1516,8 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
                 assetDetailsMeshId_ = mesh->id; assetDetailsMeshKey_ = key;
                 assetDetailsShaderRevision_ = renderer.shaderRevision(); assetDetailsMaterialValues_ = values;
                 assetDetailsMaterialGrid_ = grid; assetDetailsMaterialTwoSided_ = twoSided;
+                assetDetailsMaterialCullFront_ = cullFront; assetDetailsMaterialDepthWrite_ = depthWrite;
+                assetDetailsMaterialDepthTest_ = depthTest;
             }
             if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
@@ -2293,12 +2300,42 @@ void SceneEditor::drawMaterial() {
     ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 180.0f));
     materialDraftDirty_ |= ImGui::SliderFloat("Metallic", &materialDraft_.metallic, 0, 1, "%.3f", ImGuiSliderFlags_AlwaysClamp);
     materialDraftDirty_ |= ImGui::Checkbox("Grid", &materialDraft_.grid);
-    const auto& style = ImGui::GetStyle();
-    const float twoSidedWidth = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize("Two-sided").x;
-    const float contentRight = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + twoSidedWidth <= contentRight) ImGui::SameLine();
-    materialDraftDirty_ |= ImGui::Checkbox("Two-sided", &materialDraft_.twoSided);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render both faces and flip back-face normals. Changes preview immediately.");
+    constexpr const char* cullLabels[]{"Off (two-sided)", "Front", "Back"};
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
+    if (ImGui::BeginCombo("Cull", cullLabels[static_cast<int>(materialDraft_.effectiveCullMode())])) {
+        for (int index = 0; index < static_cast<int>(std::size(cullLabels)); ++index) {
+            const auto mode = static_cast<assets::MaterialCullMode>(index);
+            const bool selected = materialDraft_.effectiveCullMode() == mode;
+            if (ImGui::Selectable(cullLabels[index], selected) && !selected) {
+                materialDraft_.setCullMode(mode);
+                materialDraftDirty_ = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Choose which faces to discard. Off renders both sides. Changes preview immediately.");
+    constexpr const char* depthLabels[]{"Never", "Less", "Equal", "Less equal", "Greater", "Not equal", "Greater equal", "Always", "Off"};
+    ImGui::SetNextItemWidth(std::clamp(ImGui::GetContentRegionAvail().x - 105.0f, 40.0f, 240.0f));
+    if (ImGui::BeginCombo("ZTest", depthLabels[static_cast<int>(materialDraft_.depthTest)])) {
+        for (int index = 0; index < static_cast<int>(std::size(depthLabels)); ++index) {
+            const auto test = static_cast<assets::MaterialDepthTest>(index);
+            const bool selected = materialDraft_.depthTest == test;
+            if (ImGui::Selectable(depthLabels[index], selected) && !selected) {
+                materialDraft_.depthTest = test;
+                materialDraftDirty_ = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Raster depth comparison. Off disables both depth testing and depth writes.");
+    ImGui::BeginDisabled(materialDraft_.depthTest == assets::MaterialDepthTest::Disabled);
+    materialDraftDirty_ |= ImGui::Checkbox("ZWrite", &materialDraft_.depthWrite);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write this material's depth for later geometry. The preference is retained while ZTest is Off.");
+    if (!materialDraft_.hardwareDepthCompatible())
+        ImGui::TextWrapped("Hardware ray tracing and GI require ZTest Less or Less equal with ZWrite enabled.");
     ImGui::EndDisabled();
     ImGui::TextDisabled("Project shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
     if (pendingMaterial_) {
@@ -2459,7 +2496,9 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
                 draft->roughness != materialPreviewParams_.roughness ||
                 draft->metallic != materialPreviewParams_.metallic ||
                 draft->grid != materialPreviewParams_.grid ||
-                draft->twoSided != materialPreviewParams_.twoSided;
+                draft->effectiveCullMode() != materialPreviewParams_.effectiveCullMode() ||
+                draft->depthTest != materialPreviewParams_.depthTest ||
+                draft->depthWrite != materialPreviewParams_.depthWrite;
             if (cameraChanged || parametersChanged || materialPreviewAge_ > 0.15f) {
                 if (!renderer.renderMaterialPreview(*draft, 160, materialPreviewYaw_, materialPreviewPitch_,
                         materialPreviewDistance_, materialPreviewError_))

@@ -34,7 +34,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance,
         uint index = query.CandidatePrimitiveIndex();
         RayTriangle tri = rayTriangles[index];
         float facing = dot(direction, tri.normal);
-        if (IsTwoSided(tri.properties) || (shadowRay ? facing > 0.0 : facing < 0.0))
+        if (AcceptsMaterialFace(facing, tri.properties, shadowRay))
             query.CommitNonOpaqueTriangleHit();
     }
     if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
@@ -45,7 +45,8 @@ bool TraceScene(float3 origin, float3 direction, out float distance,
         + hardwareVertexNormals[index * 3 + 1] * bary.x
         + hardwareVertexNormals[index * 3 + 2] * bary.y;
     hitNormal = dot(smoothNormal, smoothNormal) > 1e-12 ? normalize(smoothNormal) : geometricNormal;
-    if (IsTwoSided(rayTriangles[index].properties) && dot(hitNormal, direction) > 0.0)
+    if ((IsTwoSided(rayTriangles[index].properties) || IsFrontCulled(rayTriangles[index].properties)) &&
+        dot(hitNormal, direction) > 0.0)
         hitNormal = -hitNormal;
     distance = query.CommittedRayT();
     hitObject = -((int)index + 2);

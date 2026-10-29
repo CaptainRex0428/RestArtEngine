@@ -151,7 +151,9 @@ Ground 默认启用 `Grid`：世界 XZ 平面每 1 个单位一格，每 5 个�
 
 界面仍维护独立参数草稿。`Apply material` 将预览提交为内存中的资产参数，`Discard draft` 恢复最近已提交版本。之后使用 `Save material assets` 将已应用参数写入 `Content/Materials/` 下的 `.rasset`（按 GUID 保留已有文件的子目录和文件名，新资产使用名称；旧 `.ramat` 保留只读）；草稿尚未 Apply 时该保存按钮禁用。切换材质时，Apply & switch 提交后切换，Discard & switch 丢弃后切换，Cancel 保留当前草稿与预览。
 
-`Two-sided` 是所有材质共有、逐材质设置的选项。关闭时剔除背面；开启时两面可见，背面使用翻转后的法线参与材质和光照计算。开关即时预览，Apply／Save／Discard 语义与数值参数相同；光栅、阴影及解析／三角形光追都使用该材质设置。新材质默认关闭；旧 `.ramat` 或场景快照缺少 `twoSided` 字段时默认开启，保留原来未剔除背面的行为，保存后会明确写入布尔值。
+`Cull` 是逐材质的面剔除选项：Back 剔除背面、Front 剔除正面、Off 双面可见；显示背面时使用翻转法线参与光照。它替代原 Two-sided 复选框，兼容已有资产中的 `twoSided`。`ZTest` 选择深度比较，`ZWrite` 控制深度写入；默认 Less／On，Disabled 会同时禁止测试和写入。三者即时预览，Apply／Save／Discard 与数值参数语义相同。Cull 同时作用于光栅、阴影、光追和拾取；ZTest／ZWrite 改变光栅主可见性。当前硬件光追／GI 要求可见材质使用 Less 或 LessEqual 且写深度，其他设置会报告实际不可用，恢复后自动重新启用。旧 `.ramat` 或场景快照缺少 `twoSided` 时仍按双面读取，现代容器缺该字段仍按单面读取。
+
+视口拾取遵循 Cull 并跳过 ZTest Never 的材质；其他自定义深度模式仍按几何最近命中拾取，不模拟 Always／Greater 或关闭深度写入时的最终绘制顺序，可从 Outliner 选择这些特殊效果对象。
 
 `Save material assets` 写入独立 `.rasset` 容器并保存当前场景的 v3 引用。`Save Scene` 保存 Actor 与资产 GUID 引用，先把已提交材质和网格写入独立容器，再写 v3 场景；不内嵌材质参数，也不会自动应用参数草稿。`Save All` 会先应用草稿，再保存材质、Shader 与场景；Shader 编译失败时显示错误并留在编辑器中。
 

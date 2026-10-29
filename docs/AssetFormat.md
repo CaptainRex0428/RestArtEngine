@@ -95,11 +95,16 @@ Content 浏览器保留原有项目相对路径；引擎项使用 `engine://Mate
   "roughness": 0.25,
   "metallic": 0.65,
   "grid": false,
-  "twoSided": false
+  "twoSided": false,
+  "cullMode": "back",
+  "depthTest": "less",
+  "depthWrite": true
 }
 ```
 
 材质是独立资产（如 `Content/Materials/Copper.rasset`），场景只引用 GUID。旧 `.ramat` 文件保留在磁盘上可继续读取；材质编辑器保存时写 `.rasset`，不删除旧文件。`textures` 尚未实现。
+
+`cullMode` 为 `off`／`front`／`back`，`twoSided` 作为兼容字段与 `off` 对应，同时提供且相互矛盾时拒绝加载。缺少 `cullMode` 时按原 `twoSided` 解析；现代容器缺少两字段时为 Back，旧 `.ramat`／场景快照为 Off。`depthTest` 使用 `never`、`less`、`equal`、`lessEqual`、`greater`、`notEqual`、`greaterEqual`、`always`、`disabled` 字符串，缺省为 `less`；`depthWrite` 缺省为 `true`。未知值或错误类型拒绝加载，保留原内存资产。这些字段为后端无关的材质状态，GPU 原生枚举与缓存不写入资产。
 
 ## 场景与场景缩略图
 

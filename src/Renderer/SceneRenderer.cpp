@@ -304,7 +304,8 @@ const assets::MaterialAsset* resolveMaterial(const assets::AssetLibrary& assets,
 }
 float materialFlags(const assets::MaterialAsset& material) {
     // Numeric integer flags shared by raster and ray material properties.
-    return static_cast<float>((material.grid ? 1u : 0u) | (material.twoSided ? 2u : 0u));
+    return static_cast<float>((material.grid ? 1u : 0u) | (material.twoSided ? 2u : 0u) |
+        (material.effectiveCullMode() == assets::MaterialCullMode::Front ? 4u : 0u));
 }
 bool mirroredTransform(const scene::Actor& actor) {
     return std::signbit(actor.transform.scale[0]) ^ std::signbit(actor.transform.scale[1]) ^
@@ -318,7 +319,9 @@ struct RaySceneInput {
     assets::MeshGeometryKey geometry{};
     assets::MeshPrimitive primitive{};
     std::array<float, 14> values{}; // transform, base color, roughness, metallic
-    bool grid = false, twoSided = false;
+    bool grid = false, twoSided = false, cullFront = false;
+    assets::MaterialDepthTest depthTest = assets::MaterialDepthTest::Less;
+    bool depthWrite = true;
     bool operator==(const RaySceneInput&) const = default;
 };
 std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
@@ -334,7 +337,9 @@ std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const a
         result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(), mesh->primitive,
             {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
              t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
-             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided});
+             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
+             material->effectiveCullMode() == assets::MaterialCullMode::Front,
+             material->depthTest, material->depthWrite});
     }
     return result;
 }
@@ -350,6 +355,7 @@ struct SceneRenderer::Impl {
     std::unique_ptr<d3d12::HardwareRayTracing> hardwareRayTracing;
     bool hardwarePipelineReady = false, hardwareActive = false;
     bool hardwareRuntimeFailed = false, hardwareRequested = false;
+    bool hardwareDepthWasCompatible = true;
     std::string hardwareStatus = "Hardware ray tracing has not been initialized.";
     GlobalIlluminationStatus giStatus;
     std::uint64_t giHistoryEpoch = 0;
@@ -410,8 +416,6 @@ struct SceneRenderer::Impl {
     assets::AssetLibrary defaultAssets;
     scene::World defaultWorld;
     ComPtr<ID3D11RasterizerState> rasterizer;
-    // Index bits: mirrored transform (1), two-sided material (2).
-    std::array<ComPtr<ID3D11RasterizerState>, 4> materialRasterizers;
     ComPtr<ID3D11DepthStencilState> depthEnabled, depthDisabled;
     ComPtr<ID3D11SamplerState> sampler, shadowSampler;
     static constexpr UINT shadowMapSize = 2048;
@@ -422,6 +426,7 @@ struct SceneRenderer::Impl {
     // Private DX11 diagnostic resources; public snapshots contain no native handles.
 #include "RenderDiagnostics.inl"
 #include "GeometryStatistics.inl"
+#include "MaterialRenderStates.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
         DXGI_SWAP_CHAIN_DESC1 description{};
@@ -571,14 +576,7 @@ struct SceneRenderer::Impl {
         raster.CullMode = D3D11_CULL_NONE;
         raster.DepthClipEnable = TRUE;
         if (failed(device->CreateRasterizerState(&raster, &rasterizer), "Create rasterizer", error)) return false;
-        for (unsigned index = 0; index < materialRasterizers.size(); ++index) {
-            raster.CullMode = (index & 2u) ? D3D11_CULL_NONE : D3D11_CULL_BACK;
-            // Mesh winding agrees with authored normals. Mirroring changes
-            // its projected order while inverse-transpose normals stay valid.
-            raster.FrontCounterClockwise = (index & 1u) ? FALSE : TRUE;
-            if (failed(device->CreateRasterizerState(&raster, &materialRasterizers[index]),
-                       "Create material rasterizer", error)) return false;
-        }
+        if (!createMaterialRenderStates(error)) return false;
         D3D11_DEPTH_STENCIL_DESC depthDescription{};
         depthDescription.DepthEnable = TRUE;
         depthDescription.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -760,7 +758,8 @@ struct SceneRenderer::Impl {
 
     bool drawGeometry(ID3D11PixelShader* pixelShader, const scene::World& world,
                       const assets::AssetLibrary& assets, std::string& error,
-                      const assets::MaterialAsset* materialPreview) {
+                      const assets::MaterialAsset* materialPreview,
+                      const XMFLOAT4X4* clipMatrix = nullptr) {
         const UINT stride = sizeof(assets::MeshVertex), offset = 0;
         context->IASetInputLayout(inputLayout.Get());
         context->VSSetShader(geometryVS.Get(), nullptr, 0);
@@ -775,10 +774,10 @@ struct SceneRenderer::Impl {
             const auto* mesh = assets.findMesh(actor.mesh.meshId);
             const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialPreview);
             if (!mesh || !material) continue;
+            if (clipMatrix && !intersectsView(actor, *mesh, *clipMatrix)) continue;
             if (preparedMeshes.insert(mesh->id).second && !prepareMesh(*mesh, error)) return false;
             auto& gpu = meshes.at(mesh->id);
-            const unsigned rasterIndex = (mirroredTransform(actor) ? 1u : 0u) | (material->twoSided ? 2u : 0u);
-            context->RSSetState(materialRasterizers[rasterIndex].Get());
+            bindMaterialRenderState(*material, mirroredTransform(actor), pixelShader == nullptr);
             ObjectConstants data{};
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
@@ -1406,7 +1405,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.context->ClearDepthStencilView(cascadeDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
             shadowScene.viewProjection = cascade == 0 ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
             state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &shadowScene, 0, 0);
-            if (!state.drawGeometry(nullptr, world, assets, error, materialOverride)) return false;
+            if (!state.drawGeometry(nullptr, world, assets, error, materialOverride,
+                    settings.frustumCulling ? &shadowScene.viewProjection : nullptr)) return false;
         }
         // Explicitly release the shadow DSV before binding the same resource as
         // a pixel shader SRV; relying on D3D11's automatic hazard resolution
@@ -1421,7 +1421,29 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.globalIllumination.mode == GlobalIlluminationMode::Realtime;
     bool hardwareFrameReady = false;
     ID3D11ShaderResourceView* indirectView = nullptr;
-    if (diagnosticMainScene && settings.hardwareRayTracing && state.hardwarePipelineReady &&
+    bool hardwareDepthCompatible = true;
+    const assets::MaterialAsset* incompatibleDepthMaterial = nullptr;
+    for (const auto& actor : world.actors) {
+        if (!actor.visible || !validTransform(actor)) continue;
+        const auto* mesh = assets.findMesh(actor.mesh.meshId);
+        const auto* material = resolveMaterial(assets, actor.mesh.materialId, materialOverride);
+        if (mesh && !mesh->indices.empty() && material && !material->hardwareDepthCompatible()) {
+            hardwareDepthCompatible = false;
+            incompatibleDepthMaterial = material;
+            break;
+        }
+    }
+    if (diagnosticMainScene) {
+        if (hardwareDepthCompatible != state.hardwareDepthWasCompatible) ++state.giHistoryEpoch;
+        state.hardwareDepthWasCompatible = hardwareDepthCompatible;
+        if (settings.hardwareRayTracing && !hardwareDepthCompatible) {
+            state.hardwareStatus = "Hardware ray tracing inactive: material '" + incompatibleDepthMaterial->name +
+                "' uses a raster-only depth state. Use ZTest Less/LessEqual and ZWrite On for DXR/GI.";
+            if (settings.globalIllumination.method != GlobalIlluminationMethod::Disabled)
+                state.giStatus.reason = state.hardwareStatus;
+        }
+    }
+    if (diagnosticMainScene && hardwareDepthCompatible && settings.hardwareRayTracing && state.hardwarePipelineReady &&
         state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
         state.beginDiagnosticPass(realtimeGiRequested ? "DXR realtime GI transport / resolve" : "DXR hardware scene");
         d3d12::Frame frame;
@@ -1479,7 +1501,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             bool mainScene;
             ~SampleScope() { if (mainScene) state.endGeometrySample(); }
         } sampleScope{state, diagnosticMainScene};
-        return state.drawGeometry(shader, world, assets, error, materialOverride);
+        return state.drawGeometry(shader, world, assets, error, materialOverride,
+            settings.frustumCulling ? &data.viewProjection : nullptr);
     };
     if (settings.path == RenderPath::Deferred) {
         state.beginDiagnosticPass("GBuffer");

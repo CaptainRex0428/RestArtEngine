@@ -40,6 +40,55 @@ inline void readVector(const Json& value, float (&result)[3]) {
         if (!std::isfinite(result[axis])) throw std::runtime_error("Vector contains a non-finite component.");
     }
 }
+inline const char* materialCullModeName(MaterialCullMode mode) {
+    switch (mode) {
+    case MaterialCullMode::Off: return "off";
+    case MaterialCullMode::Front: return "front";
+    case MaterialCullMode::Back: return "back";
+    }
+    throw std::runtime_error("Invalid material cull mode.");
+}
+inline const char* materialDepthTestName(MaterialDepthTest test) {
+    switch (test) {
+    case MaterialDepthTest::Never: return "never";
+    case MaterialDepthTest::Less: return "less";
+    case MaterialDepthTest::Equal: return "equal";
+    case MaterialDepthTest::LessEqual: return "lessEqual";
+    case MaterialDepthTest::Greater: return "greater";
+    case MaterialDepthTest::NotEqual: return "notEqual";
+    case MaterialDepthTest::GreaterEqual: return "greaterEqual";
+    case MaterialDepthTest::Always: return "always";
+    case MaterialDepthTest::Disabled: return "disabled";
+    }
+    throw std::runtime_error("Invalid material depth test.");
+}
+inline void readMaterialRenderState(const Json& value, MaterialAsset& material, bool legacyTwoSided) {
+    // Missing fields retain the historical defaults of each file format.
+    const bool twoSided = value.value("twoSided", legacyTwoSided);
+    auto cull = twoSided ? MaterialCullMode::Off : MaterialCullMode::Back;
+    if (value.contains("cullMode")) {
+        const auto mode = value.at("cullMode").get<std::string>();
+        if (mode == "off") cull = MaterialCullMode::Off;
+        else if (mode == "front") cull = MaterialCullMode::Front;
+        else if (mode == "back") cull = MaterialCullMode::Back;
+        else throw std::runtime_error("Material cullMode must be off, front or back.");
+        if (value.contains("twoSided") && twoSided != (cull == MaterialCullMode::Off))
+            throw std::runtime_error("Material cullMode conflicts with twoSided.");
+    }
+    material.setCullMode(cull);
+    const auto depth = value.value("depthTest", std::string("less"));
+    if (depth == "never") material.depthTest = MaterialDepthTest::Never;
+    else if (depth == "less") material.depthTest = MaterialDepthTest::Less;
+    else if (depth == "equal") material.depthTest = MaterialDepthTest::Equal;
+    else if (depth == "lessEqual") material.depthTest = MaterialDepthTest::LessEqual;
+    else if (depth == "greater") material.depthTest = MaterialDepthTest::Greater;
+    else if (depth == "notEqual") material.depthTest = MaterialDepthTest::NotEqual;
+    else if (depth == "greaterEqual") material.depthTest = MaterialDepthTest::GreaterEqual;
+    else if (depth == "always") material.depthTest = MaterialDepthTest::Always;
+    else if (depth == "disabled") material.depthTest = MaterialDepthTest::Disabled;
+    else throw std::runtime_error("Invalid material depthTest name.");
+    material.depthWrite = value.value("depthWrite", true);
+}
 inline void validateMaterial(const MaterialAsset& material) {
     readId(Json(material.id));
     if (material.name.empty()) throw std::runtime_error("Material name cannot be empty.");
@@ -48,12 +97,15 @@ inline void validateMaterial(const MaterialAsset& material) {
     if (!std::isfinite(material.roughness) || material.roughness < 0 || material.roughness > 1 ||
         !std::isfinite(material.metallic) || material.metallic < 0 || material.metallic > 1)
         throw std::runtime_error("Roughness and metallic must be finite and between zero and one.");
+    (void)materialDepthTestName(material.depthTest);
 }
 inline Json materialJson(const MaterialAsset& material) {
     validateMaterial(material);
     return {{"id",material.id}, {"name",material.name},
         {"baseColor",material.baseColor}, {"roughness",material.roughness}, {"metallic",material.metallic},
-        {"grid",material.grid}, {"twoSided",material.twoSided}};
+        {"grid",material.grid}, {"twoSided",material.twoSided},
+        {"cullMode",materialCullModeName(material.effectiveCullMode())},
+        {"depthTest",materialDepthTestName(material.depthTest)}, {"depthWrite",material.depthWrite}};
 }
 inline MaterialAsset readMaterial(const Json& value) {
     MaterialAsset result;
@@ -65,7 +117,7 @@ inline MaterialAsset readMaterial(const Json& value) {
     result.grid = value.value("grid", false);
     // Before this option existed the renderer disabled back-face culling.
     // value<bool> also rejects non-boolean fields instead of coercing them.
-    result.twoSided = value.value("twoSided", true);
+    readMaterialRenderState(value, result, true);
     validateMaterial(result);
     return result;
 }

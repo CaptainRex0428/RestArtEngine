@@ -240,7 +240,9 @@ struct SceneInput {
     assets::AssetId mesh = 0, material = 0;
     assets::MeshGeometryKey geometry{};
     std::array<float, 14> values{}; // transform, base color, roughness, metallic
-    bool grid = false, twoSided = false;
+    bool grid = false, twoSided = false, cullFront = false;
+    assets::MaterialDepthTest depthTest = assets::MaterialDepthTest::Less;
+    bool depthWrite = true;
     bool operator==(const SceneInput&) const = default;
 };
 std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::AssetLibrary& assets,
@@ -256,7 +258,9 @@ std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::Ass
         result.push_back({actor.id, mesh->id, material->id, mesh->geometryKey(),
             {t.position[0], t.position[1], t.position[2], t.rotation[0], t.rotation[1], t.rotation[2],
              t.scale[0], t.scale[1], t.scale[2], material->baseColor[0], material->baseColor[1],
-             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided});
+             material->baseColor[2], material->roughness, material->metallic}, material->grid, material->twoSided,
+             material->effectiveCullMode() == assets::MaterialCullMode::Front,
+             material->depthTest, material->depthWrite});
     }
     return result;
 }
@@ -318,7 +322,8 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             XMStoreFloat3(&triangle.position2, points[2]); XMStoreFloat3(&triangle.normal, faceNormal);
             triangle.color = {material->baseColor[0], material->baseColor[1], material->baseColor[2], 1};
             triangle.properties = {material->roughness, material->metallic, 3,
-                static_cast<float>((material->grid ? 1u : 0u) | (material->twoSided ? 2u : 0u))};
+                static_cast<float>((material->grid ? 1u : 0u) | (material->twoSided ? 2u : 0u) |
+                    (material->effectiveCullMode() == assets::MaterialCullMode::Front ? 4u : 0u))};
             triangles.push_back(triangle);
             for (unsigned vertex = 0; vertex < 3; ++vertex) {
                 XMFLOAT3 position, normal;

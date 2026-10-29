@@ -117,10 +117,24 @@ FullscreenOutput VSFullscreen(uint vertexId : SV_VertexID)
     return output;
 }
 
-// properties.w is an integer value: bit 0 Grid, bit 1 Two-sided.
+// properties.w is an integer value: bit 0 Grid, bit 1 Cull Off, bit 2 Cull Front.
 bool IsTwoSided(float4 properties)
 {
     return ((uint)properties.w & 2u) != 0;
+}
+
+bool IsFrontCulled(float4 properties)
+{
+    return !IsTwoSided(properties) && ((uint)properties.w & 4u) != 0;
+}
+
+bool AcceptsMaterialFace(float facing, float4 properties, bool shadowRay)
+{
+    if (IsTwoSided(properties)) return true;
+    // Shadow maps observe light -> receiver; visibility rays travel in the
+    // opposite direction, so their accepted face is reversed as well.
+    bool acceptBack = shadowRay != IsFrontCulled(properties);
+    return acceptBack ? facing > 0.0 : facing < 0.0;
 }
 
 Surface MaterialAt(float3 position, float3 normal, float4 color, float4 properties)
@@ -166,6 +180,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         float3 localOrigin = mul(float4(origin, 1), rayObjects[i].inverseWorld).xyz;
         float3 localDirection = mul(float4(direction, 0), rayObjects[i].inverseWorld).xyz;
         bool twoSided = IsTwoSided(rayObjects[i].properties);
+        bool farSurface = !twoSided && (shadowRay != IsFrontCulled(rayObjects[i].properties));
         float t = 1e20;
         float3 localNormal = float3(0, 1, 0);
         if (rayObjects[i].properties.z < 0.5)
@@ -176,9 +191,9 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
             float discriminant = b * b - a * c;
             if (discriminant >= 0 && a > 1e-12)
             {
-                // A shadow visibility ray travels toward the light. For a
-                // single-sided caster its light-facing surface is the far hit.
-                t = (-b + (shadowRay && !twoSided ? 1.0 : -1.0) * sqrt(discriminant)) / a;
+                // Front culling selects the inside/back surface. The choice
+                // reverses for a receiver -> light visibility ray.
+                t = (-b + (farSurface ? 1.0 : -1.0) * sqrt(discriminant)) / a;
                 if (t <= RAY_EPSILON) t = (-b + sqrt(discriminant)) / a;
                 localNormal = localOrigin + localDirection * t;
             }
@@ -241,7 +256,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
             float farDistance = min(min(maximum.x, maximum.y), maximum.z);
             if (farDistance >= max(nearDistance, 0.0))
             {
-                t = shadowRay && !twoSided ? farDistance :
+                t = farSurface ? farDistance :
                     (nearDistance > RAY_EPSILON ? nearDistance : farDistance);
                 float3 hit = localOrigin + localDirection * t;
                 float3 a = abs(hit);
@@ -253,12 +268,11 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         if (t > RAY_EPSILON && t < distance)
         {
             float facing = dot(localDirection, localNormal);
-            // Shadow-map geometry is viewed light -> receiver; visibility
-            // rays run in the opposite direction and accept the opposite side.
-            if (!twoSided && (shadowRay ? facing <= 0.0 : facing >= 0.0)) continue;
+            if (!AcceptsMaterialFace(facing, rayObjects[i].properties, shadowRay)) continue;
             distance = t;
             hitNormal = normalize(mul(float4(localNormal, 0), rayObjects[i].normalTransform).xyz);
-            if (twoSided && dot(hitNormal, direction) > 0.0) hitNormal = -hitNormal;
+            if ((twoSided || IsFrontCulled(rayObjects[i].properties)) && dot(hitNormal, direction) > 0.0)
+                hitNormal = -hitNormal;
             hitObject = i;
         }
     }
@@ -270,7 +284,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         RayTriangle tri = rayTriangles[j];
         bool twoSided = IsTwoSided(tri.properties);
         float facing = dot(direction, tri.normal);
-        if (!twoSided && (shadowRay ? facing <= 0.0 : facing >= 0.0)) continue;
+        if (!AcceptsMaterialFace(facing, tri.properties, shadowRay)) continue;
         float3 edge0 = tri.position1 - tri.position0;
         float3 edge1 = tri.position2 - tri.position0;
         float3 pvec = cross(direction, edge1);
@@ -288,7 +302,7 @@ bool TraceScene(float3 origin, float3 direction, out float distance, out float3 
         {
             distance = t;
             hitNormal = normalize(tri.normal);
-            if (twoSided && facing > 0.0) hitNormal = -hitNormal;
+            if ((twoSided || IsFrontCulled(tri.properties)) && facing > 0.0) hitNormal = -hitNormal;
             hitObject = -(j + 2);
         }
     }
@@ -616,7 +630,7 @@ float4 PSBackground(FullscreenOutput input) : SV_TARGET
 float3 SurfaceNormal(float3 normal, bool frontFace)
 {
     normal = normalize(normal);
-    return IsTwoSided(objectParameters) && !frontFace ? -normal : normal;
+    return (IsTwoSided(objectParameters) || IsFrontCulled(objectParameters)) && !frontFace ? -normal : normal;
 }
 
 float4 PSForward(GeometryOutput input, bool frontFace : SV_IsFrontFace) : SV_TARGET

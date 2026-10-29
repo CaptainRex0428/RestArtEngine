@@ -137,6 +137,10 @@ SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const a
         const auto* material = assets.findMaterial(actor.mesh.materialId);
         if (!mesh || !material) continue;
         if (materialOverride && materialOverride->id == material->id) material = materialOverride;
+        // Never cannot contribute a visible surface. Other custom depth modes
+        // retain geometric nearest-hit picking; this CPU query does not replay
+        // the raster submission order or depth-buffer contents.
+        if (material->depthTest == assets::MaterialDepthTest::Never) continue;
         const XMMATRIX matrix = actorMatrix(actor.transform);
         const float determinant = XMVectorGetX(XMMatrixDeterminant(matrix));
         if (!std::isfinite(determinant) || determinant == 0) continue;
@@ -147,8 +151,9 @@ SurfaceHit closestSurface(const ViewRay& ray, const scene::World& world, const a
         const assets::MeshRay localRay{{localOrigin.x, localOrigin.y, localOrigin.z},
             {localDirection.x, localDirection.y, localDirection.z}};
         assets::MeshRayHit meshHit;
-        if (!queries.intersect(*mesh, localRay, hit.distance, material->twoSided,
-                1e-8f / std::abs(determinant), meshHit)) continue;
+        const auto cullMode = material->effectiveCullMode();
+        if (!queries.intersect(*mesh, localRay, hit.distance, cullMode == assets::MaterialCullMode::Off,
+                1e-8f / std::abs(determinant), meshHit, cullMode == assets::MaterialCullMode::Front)) continue;
         hit.actor = actor.id;
         hit.distance = meshHit.distance;
         XMStoreFloat3(&hit.point, ray.origin + XMVectorScale(ray.direction, meshHit.distance));

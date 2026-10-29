@@ -1,4 +1,5 @@
 #include "RestArtEngine/Assets/AssetFile.h"
+#include "AssetSerialization.h"
 
 #include <algorithm>
 #include <array>
@@ -221,6 +222,9 @@ AssetFile makeMaterialAssetFile(const MaterialAsset& material) {
             {"metallic", material.metallic},
             {"grid", material.grid},
             {"twoSided", material.twoSided},
+            {"cullMode", detail::materialCullModeName(material.effectiveCullMode())},
+            {"depthTest", detail::materialDepthTestName(material.depthTest)},
+            {"depthWrite", material.depthWrite},
         }},
     };
     return file;
@@ -231,15 +235,17 @@ bool readMaterialAssetFile(const AssetFile& file, MaterialAsset& material, std::
     if (file.type != AssetFileType::Material) { error = "The asset is not a material."; return false; }
     try {
         const auto& payload = file.manifest.at("payload");
-        material = MaterialAsset{};
-        material.id = file.id;
-        material.name = file.name;
+        MaterialAsset loaded;
+        loaded.id = file.id;
+        loaded.name = file.name;
         const auto& color = payload.at("baseColor");
-        for (std::size_t index = 0; index < 3; ++index) material.baseColor[index] = color.at(index).get<float>();
-        material.roughness = payload.at("roughness").get<float>();
-        material.metallic = payload.at("metallic").get<float>();
-        material.grid = payload.value("grid", false);
-        material.twoSided = payload.value("twoSided", false);
+        detail::readVector(color, loaded.baseColor);
+        loaded.roughness = payload.at("roughness").get<float>();
+        loaded.metallic = payload.at("metallic").get<float>();
+        loaded.grid = payload.value("grid", false);
+        detail::readMaterialRenderState(payload, loaded, false);
+        detail::validateMaterial(loaded);
+        material = std::move(loaded);
         return true;
     } catch (const std::exception& exception) {
         error = std::string("Material payload is invalid: ") + exception.what();

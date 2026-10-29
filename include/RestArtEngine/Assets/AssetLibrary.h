@@ -77,6 +77,8 @@ private:
     mutable MeshGeometryKey boundsKey_;
     mutable MeshBounds bounds_;
 };
+enum class MaterialCullMode { Off, Front, Back };
+enum class MaterialDepthTest { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always, Disabled };
 struct MaterialAsset {
     AssetId id = 0;
     std::string name;
@@ -87,6 +89,19 @@ struct MaterialAsset {
     // New materials cull back faces; legacy files without this field retain
     // their previously implicit two-sided visibility when deserialized.
     bool twoSided = false;
+    bool cullFront = false;
+    MaterialDepthTest depthTest = MaterialDepthTest::Less;
+    bool depthWrite = true;
+    [[nodiscard]] MaterialCullMode effectiveCullMode() const noexcept {
+        return twoSided ? MaterialCullMode::Off : cullFront ? MaterialCullMode::Front : MaterialCullMode::Back;
+    }
+    void setCullMode(MaterialCullMode mode) noexcept {
+        twoSided = mode == MaterialCullMode::Off;
+        cullFront = mode == MaterialCullMode::Front;
+    }
+    [[nodiscard]] bool hardwareDepthCompatible() const noexcept {
+        return depthWrite && (depthTest == MaterialDepthTest::Less || depthTest == MaterialDepthTest::LessEqual);
+    }
     AssetOrigin origin = AssetOrigin::Project;
 };
 class AssetLibrary {

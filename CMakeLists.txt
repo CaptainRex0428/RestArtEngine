@@ -35,6 +35,8 @@ add_executable(RestArtEngine
     app/GarbageCollectionSmoke.cpp
     app/HardwareRayTracingSmoke.cpp
     app/GlobalIlluminationSmoke.cpp
+    app/RenderScaleSmoke.cpp
+    app/MaterialRenderStateSmoke.cpp
     src/Core/Engine.cpp
     src/Core/GarbageCollector.cpp
     src/Core/TraceProfiler.cpp
@@ -118,6 +120,15 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT RestArtEngine)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(MaterialRenderStateTests tests/MaterialRenderStateTests.cpp
+        src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp
+        src/Assets/AssetLibrary.cpp)
+    target_include_directories(MaterialRenderStateTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(MaterialRenderStateTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(MaterialRenderStateTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME MaterialRenderStateTests COMMAND MaterialRenderStateTests)
     add_executable(MeshQueryTests tests/MeshQueryTests.cpp src/Assets/MeshQuery.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp)
     target_include_directories(MeshQueryTests PRIVATE include vendor/nlohmann/single_include)

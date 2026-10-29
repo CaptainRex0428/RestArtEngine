@@ -517,7 +517,8 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             useMaterialPreview ? editor.materialPreview() : nullptr), error);
         const auto screenshotPath = output / (std::string(name) + ".bmp");
         const std::string_view captureName(name);
-        if (drawEditor && (captureName.starts_with("material_") || captureName.starts_with("two_sided_ui_")))
+        if (drawEditor && (captureName.starts_with("material_") || captureName.starts_with("two_sided_ui_") ||
+            captureName.starts_with("cull_front_ui_") || captureName.starts_with("depth_never_ui_")))
             saveScenePixels(renderer, settings, screenshotPath);
         ui.endFrame();
         if (!renderer.saveScreenshot(screenshotPath.c_str(), error)) {
@@ -2113,6 +2114,13 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             const auto* bar = tabBar();
             return itemRect(bar->Window, ImHashStr(label, 0, bar->SelectedTabId));
         };
+        const auto selectMaterialOption = [&](const char* control, const char* option) {
+            click(materialRect(control).GetCenter());
+            require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+                std::string("Material combo did not open: ") + control);
+            auto* popup = context->OpenPopupStack.back().Window;
+            click(itemRect(popup, ImHashStr(option, 0, popup->ID)).GetCenter());
+        };
         auto* detailsWindow = findWindow("Details");
         require(detailsWindow != nullptr, "Material-preview Details panel is missing.");
         if (detailsWindow->DockNode && detailsWindow->DockNode->SelectedTabId != detailsWindow->TabId)
@@ -2386,24 +2394,25 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             settings.path = renderer::RenderPath::Deferred;
             settings.debugView = 1;
             settings.rayTracing = false;
+            settings.hardwareRayTracing = false;
             settings.shadowMethod = renderer::ShadowMethod::Disabled;
             require(!assets.findMaterial(materialId)->twoSided,
                 "Two-sided UI fixture expected the new default single-sided material.");
             capture("two_sided_ui_before", true);
             const auto single = scenePixels(output / "two_sided_ui_before.bmp", settings);
-            click(materialRect("Two-sided").GetCenter());
+            selectMaterialOption("Cull", "Off (two-sided)");
             require(editor.materialPreview() && editor.materialPreview()->twoSided &&
                 !assets.findMaterial(materialId)->twoSided && renderer.shaderRevision() == shaderVersion,
-                "Two-sided checkbox did not preview independently without committing or recompiling.");
+                "Cull Off did not preview independently without committing or recompiling.");
             capture("two_sided_ui_preview", true);
             const auto doubleSided = scenePixels(output / "two_sided_ui_preview.bmp", settings);
-            require(single != doubleSided, "Two-sided checkbox did not immediately reveal the plane's back face.");
+            require(single != doubleSided, "Cull Off did not immediately reveal the plane's back face.");
             click(materialRect("Discard draft").GetCenter());
             capture("two_sided_ui_discarded", true);
             require(!editor.materialPreview() &&
                 scenePixels(output / "two_sided_ui_discarded.bmp", settings) == single,
                 "Discard failed to restore single-sided visibility.");
-            click(materialRect("Two-sided").GetCenter());
+            selectMaterialOption("Cull", "Off (two-sided)");
             click(materialRect("Apply material").GetCenter());
             capture("two_sided_ui_applied", true);
             require(!editor.materialPreview() && assets.findMaterial(materialId)->twoSided &&
@@ -2415,17 +2424,54 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 "The UI-applied Two-sided value did not survive isolated material persistence.");
             const auto planeActorId = actor->id;
             const auto backFacePoint = scenePoint(settings.viewportWidth * .62f, settings.viewportHeight * .58f);
-            click(materialRect("Two-sided").GetCenter());
+            selectMaterialOption("Cull", "Back");
             require(editor.materialPreview() && !editor.materialPreview()->twoSided,
                 "Two-sided picking fixture did not preview single-sided visibility.");
             click(backFacePoint);
             require(editor.selectedActor() == 0, "The culled single-sided back face still blocked viewport picking.");
-            click(materialRect("Two-sided").GetCenter());
+            selectMaterialOption("Cull", "Off (two-sided)");
             require(editor.materialPreview() && editor.materialPreview()->twoSided,
                 "Two-sided picking fixture did not restore its double-sided preview.");
             click(backFacePoint);
             require(editor.selectedActor() == planeActorId,
                 "A visible two-sided preview back face could not be selected.");
+            selectMaterialOption("Cull", "Front");
+            require(editor.materialPreview() &&
+                editor.materialPreview()->effectiveCullMode() == assets::MaterialCullMode::Front &&
+                assets.findMaterial(materialId)->effectiveCullMode() == assets::MaterialCullMode::Off,
+                "Cull Front did not create an independent live draft.");
+            capture("cull_front_ui_preview", true);
+            require(scenePixels(output / "cull_front_ui_preview.bmp", settings) != single,
+                "Cull Front did not retain the plane's back face.");
+            click(materialRect("Discard draft").GetCenter());
+            selectMaterialOption("ZTest", "Never");
+            require(editor.materialPreview() && editor.materialPreview()->depthTest == assets::MaterialDepthTest::Never &&
+                assets.findMaterial(materialId)->depthTest == assets::MaterialDepthTest::Less,
+                "ZTest did not preview independently from the applied material.");
+            capture("depth_never_ui_preview", true);
+            require(scenePixels(output / "depth_never_ui_preview.bmp", settings) != doubleSided,
+                "ZTest Never did not change the rendered plane during preview.");
+            click(materialRect("Discard draft").GetCenter());
+            require(!editor.materialPreview() && assets.findMaterial(materialId)->depthTest == assets::MaterialDepthTest::Less,
+                "Discard did not restore the applied depth test.");
+            selectMaterialOption("Cull", "Front");
+            selectMaterialOption("ZTest", "Always");
+            click(materialRect("ZWrite").GetCenter());
+            require(editor.materialPreview() && !editor.materialPreview()->depthWrite &&
+                editor.materialPreview()->depthTest == assets::MaterialDepthTest::Always &&
+                assets.findMaterial(materialId)->depthWrite && renderer.shaderRevision() == shaderVersion,
+                "ZWrite/ZTest draft committed or recompiled before Apply.");
+            click(materialRect("Apply material").GetCenter());
+            require(!editor.materialPreview() &&
+                assets.findMaterial(materialId)->effectiveCullMode() == assets::MaterialCullMode::Front &&
+                assets.findMaterial(materialId)->depthTest == assets::MaterialDepthTest::Always &&
+                !assets.findMaterial(materialId)->depthWrite, "Apply did not commit the complete render state.");
+            require(assets.saveMaterials(savedFolder, error), error);
+            require(restoredAssets.loadMaterials(savedFolder, error), error);
+            require(restoredAssets.findMaterial(materialId)->effectiveCullMode() == assets::MaterialCullMode::Front &&
+                restoredAssets.findMaterial(materialId)->depthTest == assets::MaterialDepthTest::Always &&
+                !restoredAssets.findMaterial(materialId)->depthWrite,
+                "UI-applied Cull/ZTest/ZWrite did not survive isolated persistence.");
             require(contents(project.defaultScene) == sceneOnDisk && contents(materialPath) == materialOnDisk &&
                 renderer.shaderRevision() == shaderVersion,
                 "Two-sided editing changed real project files or recompiled shaders.");
@@ -2433,7 +2479,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             click(materialRect("Discard draft").GetCenter());
             world = originalWorld; settings = originalSettings;
             capture("material_editor", true);
-            std::cout << "PASS: Two-sided checkbox real-time back-face preview, independent asset state, "
+            std::cout << "PASS: Cull Off/Front/Back and ZTest/ZWrite live controls, independent drafts, "
                 "Discard/Apply, matching back-face picking, isolated persistence, and no shader recompilation.\n";
         }
         std::cout << "PASS: Material slider feedback while held, scene-only pixel changes, temporary asset overrides, "

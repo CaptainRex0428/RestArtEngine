@@ -15,6 +15,8 @@
 #include "GarbageCollectionSmoke.h"
 #include "HardwareRayTracingSmoke.h"
 #include "GlobalIlluminationSmoke.h"
+#include "RenderScaleSmoke.h"
+#include "MaterialRenderStateSmoke.h"
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -643,6 +645,7 @@ int wmain(int argc, wchar_t** argv) {
     bool selfTest = false, editorSelfTest = false, gcSelfTest = false, showUI = true, vsync = true;
     bool hardwareRtSelfTest = false;
     bool giSelfTest = false, pathTracingOverride = false;
+    bool renderScaleTest = false, materialRenderStateTest = false;
     std::optional<bool> hardwareRtOverride;
     bool temporaryCaptures = false, explicitCaptureDir = false, disableGc = false;
     std::optional<double> gcInterval, gcIdle, gcCaptureAge;
@@ -662,6 +665,8 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--gc-self-test") gcSelfTest = true;
             else if (arg == "--hardware-rt-self-test") hardwareRtSelfTest = true;
             else if (arg == "--gi-self-test") giSelfTest = true;
+            else if (arg == "--render-scale-test") renderScaleTest = true;
+            else if (arg == "--material-render-state-self-test") materialRenderStateTest = true;
             else if (arg == "--trace-output" && i + 1 < argc) traceOutput = argv[++i];
             else if (arg == "--capture-temp") temporaryCaptures = true;
             else if (arg == "--no-gc") disableGc = true;
@@ -694,6 +699,8 @@ int wmain(int argc, wchar_t** argv) {
                 std::cout << "RestArtEngine: DX11 scene and asset editor\n"
                     "--forward | --deferred   --rt (analytic)   --hardware-rt | --no-hardware-rt\n"
                     "--hardware-rt-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
+                    "--render-scale-test (10M triangles, 1080p hardware realtime GI benchmark)\n"
+                    "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
                     "--trace-output PATH (record application frames to Chrome Trace JSON)\n"
                     "F9/Capture: Save As dialog; --frames alone does not save an image.\n"
@@ -710,9 +717,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (projectPath.empty() && !arg.starts_with("--")) projectPath = argv[i];
             else throw std::runtime_error("Unsupported argument: " + arg + ". This scene currently runs on DX11. Use --help.");
         }
-        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest))
+        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest))
             throw std::runtime_error("--capture-temp requires --frames and cannot be combined with --capture-dir or self-tests.");
-        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest) && !explicitCaptureDir)
+        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest) && !explicitCaptureDir)
             captureDir = std::filesystem::temp_directory_path() / "RestArtEngine/Validation";
         rae::GarbageCollector gc;
         std::string gcError;
@@ -724,7 +731,7 @@ int wmain(int argc, wchar_t** argv) {
         if (disableGc) gcSettings.enabled = false;
         if (!gc.setSettings(gcSettings, gcError)) throw std::runtime_error(gcError);
         // Validation outputs are durable evidence; self-tests use isolated GC services.
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest) {
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) {
             std::error_code tempError;
             const auto root = std::filesystem::temp_directory_path(tempError) / "RestArtEngine/Captures";
             if (tempError || !gc.initializeTemporaryCaptures(root, gcError)) {
@@ -750,7 +757,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::filesystem::remove_all(path, cleanupCode);
             }
         } tempProjectCleanup;
-        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest) {
+        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             if (!runProjectManager(engineRoot, project, gc, error)) {
                 if (!error.empty()) throw std::runtime_error(error);
@@ -761,7 +768,7 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
-            if (editorSelfTest || hardwareRtSelfTest || giSelfTest) {
+            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest) {
                 std::error_code copyCode;
                 isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
                     ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
@@ -787,7 +794,7 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIcon = loadEngineIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
-        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest;
+        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest;
         const auto title = windowTitle(project.name);
         const RECT monitor = primaryMonitorRect();
         SceneRenderer renderer;
@@ -898,6 +905,14 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (giSelfTest) {
             runGlobalIlluminationSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (renderScaleTest) {
+            runRenderScaleSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (materialRenderStateTest) {
+            runMaterialRenderStateSmoke(renderer, captureDir);
             return 0;
         }
         std::cout << "RestArtEngine / D3D11 / " << renderer.adapterName() << '\n';
@@ -1112,7 +1127,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

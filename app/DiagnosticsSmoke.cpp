@@ -458,7 +458,12 @@ void runDiagnosticsSmoke(rae::renderer::SceneRenderer& renderer, const std::file
                 const auto fixtureActor = world.createActor("Statistics quad", quadMeshId, material.id);
                 checkGeometry(prefix + "in-view-and-unused-assets", 2, 2, 2);
                 world.findActor(fixtureActor)->transform.position[0] = 1000;
-                checkGeometry(prefix + "outside-frustum", 2, 2, 0);
+                // CPU frustum rejection prevents submission altogether; with
+                // it disabled, the GPU receives and clips both triangles.
+                checkGeometry(prefix + "outside-frustum", 2, 0, 0);
+                settings.frustumCulling = false;
+                checkGeometry(prefix + "outside-frustum-gpu-only", 2, 2, 0);
+                settings.frustumCulling = true;
                 world.findActor(fixtureActor)->transform.position[0] = 0;
                 const auto duplicate = world.duplicateActor(fixtureActor);
                 // A depth-hidden identical instance still reaches primitive

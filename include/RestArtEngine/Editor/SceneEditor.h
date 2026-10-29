@@ -180,6 +180,8 @@ private:
     std::uint64_t assetDetailsShaderRevision_ = 0;
     std::array<float, 5> assetDetailsMaterialValues_{};
     bool assetDetailsMaterialGrid_ = false, assetDetailsMaterialTwoSided_ = false;
+    bool assetDetailsMaterialCullFront_ = false, assetDetailsMaterialDepthWrite_ = true;
+    assets::MaterialDepthTest assetDetailsMaterialDepthTest_ = assets::MaterialDepthTest::Less;
     float materialPreviewYaw_ = 0.65f, materialPreviewPitch_ = 0.18f, materialPreviewDistance_ = 3.0f;
     std::string contentError_;
     scene::World world_;
