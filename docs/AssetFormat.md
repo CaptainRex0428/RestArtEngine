@@ -215,6 +215,5 @@ Content 浏览器优先读该文件；不存在或读取失败时回退到按 Ac
 - 保存的原子性：临时文件＋rename，避免断电或崩溃留下半写资产。
 - 是否需要 `--dump-asset` 工具输出清单与块表，方便排查损坏文件。
 
-### Camera 场景扩展（v6 / v7）
+场景还可包含可选的 `camera` 与 `lighting` 配置；它们是场景级配置。`camera` 包含 `yaw/pitch/distance/target/exposure`，表示显式存储的初始视角。`lighting` 包含 `directionalIntensity/environmentIntensity` 与 `areaLight`（`enabled/center/halfAxisU/halfAxisV/radiance`）；半轴为非零正交世界空间向量，叉积指向单面发光侧。数值必须有限，能量非负，视距／俯仰／曝光遵循编辑器范围；解析或保存校验失败保留原场景／已发布文件。缺少字段的旧场景不启用场景照明覆盖，也不强制覆盖当前相机。矩形发光面的渲染范围见 [GI 文档](GlobalIllumination.md#单矩形发光面示例)。
 
-Camera Actor 使用独立 camera 对象保存 projection、verticalFovDegrees、orthographicHeight、nearClip、farClip、aspectRatio，并复用 Actor transform。camera/light/mesh 组件互斥；defaultCameraActor 引用同场景的 Camera Actor。旧场景的 camera 开场书签保持原语义，新书签可含 lens 和 pose。相机无网格/材质依赖，资源清单与删除检查据此处理。非默认景深配置使用v7，在Camera或开场书签lens中保存完整depthOfField对象；关闭效果保留调参，旧v1–v6默认无景深。格式选择、有效范围和兼容说明见 [Camera 系统](Camera.md)。

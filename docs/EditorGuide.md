@@ -267,14 +267,9 @@ F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板�
 
 完整目录职责、UE 概念对照及当前能力边界见 [Architecture.md](Architecture.md)。
 
-## 导入网格的材质 Slot 与 UV
+## 保存场景初始视角与照明
 
-导入网格按源文件的面材质 ID 建立命名 Slot。选中 Actor 后，Details 的每个 Slot 可单独选择材质、打开材质编辑器或 Reset 恢复继承；修改立即生效并可撤销／重做。有效材质依次取 Actor 的 Slot override、网格 Slot 默认材质、Actor 的原单材质 fallback。旧单 Slot 网格保留原材质控件。将材质从 Content 拖到模型上时，只修改鼠标命中三角形所属的 Slot；其他 Actor 实例与 Slot 不变。
+Scene 面板的 Store current view 把当前轨道相机与曝光记录为场景初始视角，Restore view 恢复，Clear opening view 清除；Save Scene 将其写入场景，普通相机导航不会自动修改这份书签。打开／重新加载场景时自动应用；旧场景没有书签则保持现有视角。
 
-Slot 绑定随 Save Scene 保存，材质参数仍由 Save Asset／Save All 保存；这两类修改遵守已有独立 dirty 规则。模型重导入时按稳定源 Slot 标识恢复绑定，新增 Slot 继承默认，已删除 Slot 不会错绑到其他表面。源材质同名导致身份无法唯一识别时，重导入会明确拒绝，保留原资产；可在源文件中使用唯一材质名称，再作为新资产导入。
+Save lighting in scene 保存方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸和辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。[PathTracing_CornellBox](../Projects/PathTracing_CornellBox/README.md) 使用这组配置。矩形发光面当前只支持渐进式 Path Tracing，其他模式会提示限制。
 
-Mesh 的 Asset Details 显示材质 Slot 和实际保存的 UV 通道名称。FBX 最多保留前四套（UV0–UV3），OBJ 保存一套；没有的通道不分配数据。全部 Slot、分区、UV 坐标与几何保存在同一个 `.rasset`，无需外部 UV 文件。此功能保留几何属性，不自动转换源 DCC 材质图或导入其贴图。
-
-## 相机与视口
-
-视口相机、场景 Camera Actor、正交视图和独立相机预览的操作、保存与渲染边界见 [Camera 系统](Camera.md)。`Viewport settings` 的 `Four views` 开启四分屏，每格独立导航并支持最大化；Camera Details 的 `Depth of field` 控制对焦距离、光圈和传感器高度，支持撤销与保存。
