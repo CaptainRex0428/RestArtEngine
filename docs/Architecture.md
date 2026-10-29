@@ -139,13 +139,13 @@ Actor 删除统一通过 World 的稳定 ID 完成。Outliner 按钮、右键菜
 
 编辑器使用 Dear ImGui `v1.91.9b-docking`。`EditorDockManager` 集中维护六个面板的稳定身份和默认位置，创建工具栏下方的 DockSpace，并处理恢复默认布局。`SceneEditor` 负责面板内容及编辑器会话，业务面板不再计算屏幕边缘距离或手工吸附。实时分割树、标签分组、悬浮位置及其持久化交给 ImGui；内部 `DockBuilder` 调用限于默认布局创建／恢复及旧布局迁移。
 
-DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。新增 Scene 时，仅在缺少 Scene 设置的旧布局中把它加入原 Details 所在节点；旧 Details 为自由浮窗时按原位置尺寸创建双页签浮动组。迁移不重建其他节点，后续已有 Scene 配置即尊重用户安排。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。六个工作区面板显式留在主 viewport，保持主窗口内 Docking；材质编辑器使用单独的系统 viewport。
+DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置没有此根节点，首次使用会建立默认停靠树；已有根节点时保留用户布局。新增 Scene 时，仅在缺少 Scene 设置的旧布局中把它加入原 Details 所在节点；旧 Details 为自由浮窗时按原位置尺寸创建双页签浮动组。迁移不重建其他节点，后续已有 Scene 配置即尊重用户安排。`Layout > Restore default layout` 显式重建默认树。布局使用现有 `RestArtEngine.imgui.ini`，没有第二套布局序列化器；它属于本机编辑器设置，不写入工程场景文件。DockSpace 宿主与工具栏固定在主 viewport，六个工作区面板和普通工具允许自动外移为系统浮窗并回嵌；材质编辑器保留显式独立系统 viewport 的策略。
 
 默认左上为 Outliner，左下的 Scene / Details 共用同一个 dock 节点，底部 Content 的 Meshes 保留资源列表与导入／创建入口。Scene 编辑场景级背景、光照和阴影；Details 编辑主选中 Actor 的名称、可见性、变换与资产分配，并以同一 Actor ID 实时解析实例身份、可见性、当前 Mesh 几何与来源，以及该实例唯一的 Material 引用，不从 Content 的 `selectedMesh_` 取目标，不遍历同 Mesh 实例汇总材质。多选明确主实例，无选中或已删除实例显示空状态，资源失效显示缺失提示；不新增 Mesh 材质绑定。场景／Outliner 选择事件请求显示 Details，Content 选择／导入只更新资源浏览状态；焦点请求按事件消费一次，手动切页后不逐帧抢回。实例属性页归入 Actor 输入作用域，Scene / Details 保留既有窗口身份和原生 Docking 布局。
 
-场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 根据本帧实际图像内容区域设置 `SceneSettings` 的主客户区／纹理局部矩形；图像和 Gizmo 使用对应的桌面矩形，拾取鼠标减去主 viewport 原点。两者通过同帧原点转换，移动主窗口后仍使用相同图像区域和投影宽高比。渲染器提供纹理与尺寸接口，不依赖 Dock 节点或编辑器面板。无 UI 渲染路径继续输出到交换链。
+场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 按本帧真实内容矩形请求场景目标尺寸，在取得纹理后绘制图像，并设置 `SceneSettings` 的纹理局部矩形。主窗口内保留主客户区偏移，外部系统视口从纹理 `(0,0)` 渲染并完整铺满内容区域；鼠标射线、拖放投影、Gizmo 和相机平移显式在桌面图像矩形与纹理局部矩形之间映射。`SceneRenderer::ensureSceneTargetSize` 独立重建 scene color／depth／GBuffer，失败保留旧完整资源；旧纹理保留至本帧所有 UI 平台提交之后，常规 Present 或无主 Present 路径显式调用 `releaseRetiredSceneTargets` 释放。阴影资源和主 swapchain 不因浮窗尺寸改变而重建。渲染器不依赖 Dock 节点或编辑器面板，无 UI 渲染路径继续输出到交换链。
 
-材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Details 的 Actor 材质入口和当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化或隐藏主 UI 时可单独提交材质界面，`EditorDockManager::keepAlive` 保留原 Dock 树。
+材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Details 的 Actor 材质入口和当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化时保持工作区提交和 Dock 树存活，Windows 随 owner 隐藏的普通工具窗恢复后继续使用；独立材质窗口可保持可见，隐藏的场景浮窗不持续渲染。F1／F11 隐藏主 UI 时普通工作区浮窗一并隐藏，保留 ImGui 布局并在恢复时重建；材质界面继续独立提交，`EditorDockManager::keepAlive` 保留原 Dock 树。
 
 `ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
 

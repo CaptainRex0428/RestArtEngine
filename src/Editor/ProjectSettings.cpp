@@ -37,7 +37,6 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
     projectSettingsFocused_ = false;
     if (!projectSettingsOpen_) return;
     const auto* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowViewport(viewport->ID);
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(720, 540), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(ImVec2(560, 390), ImVec2(FLT_MAX, FLT_MAX));

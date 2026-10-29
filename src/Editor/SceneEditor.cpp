@@ -648,7 +648,6 @@ void SceneEditor::drawOutlineSettings() {
     // not keep suppressing scene shortcuts on the next ones.
     outlineSettingsFocused_ = false;
     if (!outlineSettingsOpen_) return;
-    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     // Small centered dialog: auto-resize keeps the controls visible instead of
     // pushing the colour presets below a scrollbar.
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -729,7 +728,6 @@ void SceneEditor::drawGarbageCollection() {
         garbageCollectionRequested_ = false;
         garbageCollectionMessage_ = "Collection finished. See the latest result below.";
     }
-    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::SetNextWindowSize({480, 620}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints({280, 220}, {FLT_MAX, FLT_MAX});
     const bool visible = ImGui::Begin("Garbage collection", &garbageCollectionOpen_, ImGuiWindowFlags_NoDocking);
@@ -2856,7 +2854,8 @@ void SceneEditor::drawMaterialWindow(renderer::SceneRenderer& renderer) {
     ImGui::End();
 }
 
-void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture) {
+void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRenderer& renderer, bool& vsync, bool& capture,
+                       bool mainSurfaceVisible) {
     // Capture requested feature values even while Project Settings is closed.
     // Save All and the close prompt share the same configuration draft.
     syncProjectSettings(settings);
@@ -2897,82 +2896,87 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
     const ImGuiStyle& style = ImGui::GetStyle();
     const float rowHeight = ImGui::GetFrameHeight();
     const float toolbarHeight = rowHeight * 2.0f + style.WindowPadding.y * 2.0f + style.WindowBorderSize * 2.0f;
-    dockManager_.beginFrame(toolbarHeight);
-    ImGui::SetNextWindowViewport(mainViewport->ID);
-    ImGui::SetNextWindowPos(mainViewport->WorkPos);
-    ImGui::SetNextWindowSize({mainViewport->WorkSize.x, toolbarHeight});
-    ImGui::Begin("RestArtEngine Editor", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar);
-    if (ImGui::BeginMenuBar()) {
-        dockManager_.drawLayoutMenu();
-        drawEditMenu();
-        drawUiMenu();
-        drawDebugMenu(renderer);
-        drawProjectMenu();
-        commandButton("scene.save");
-        if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
-        if (ImGui::Button("Save All")) saveAll(renderer);
-        ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
-        ImGui::EndMenuBar();
-    }
-    // EndMenuBar restores the content cursor below the menu decoration.
-    ImGui::SetNextItemWidth(110);
-    int path = settings.path == renderer::RenderPath::Deferred ? 1 : 0;
-    if (ImGui::Combo("##pipeline", &path, "Forward\0Deferred\0"))
-        settings.path = path ? renderer::RenderPath::Deferred : renderer::RenderPath::Forward;
-    ImGui::SameLine(); ImGui::SetNextItemWidth(135);
-    ImGui::Combo("##view", &settings.debugView,
-        "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
-    ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
-    ImGui::SameLine();
-    {
-        // Hardware activity alone does not imply that indirect lighting is on.
-        // Keep the actual GI state ahead of the long device/FPS text so it is
-        // visible in narrow layouts. This entry only opens the existing settings.
-        const auto giStatus = renderer.globalIlluminationStatus();
-        const bool giRequested = settings.globalIllumination.method != renderer::GlobalIlluminationMethod::Disabled;
-        const bool hardwareActive = settings.hardwareRayTracing && renderer.hardwareRayTracingActive();
-        const bool giEffective = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
-        std::string giLabel = "GI: Off";
-        if (giRequested) {
-            if (!hardwareActive) giLabel = "GI: Inactive";
-            else if (settings.debugView != 0) giLabel = "GI: Paused";
-            else if (!giEffective) giLabel = "GI: Inactive";
-            else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
-            else giLabel = "GI: Progressive " + std::to_string(giStatus.accumulatedSamples) + "/" +
-                std::to_string(giStatus.targetSamples);
+    if (mainSurfaceVisible) {
+        dockManager_.beginFrame(toolbarHeight);
+        ImGui::SetNextWindowViewport(mainViewport->ID);
+        ImGui::SetNextWindowPos(mainViewport->WorkPos);
+        ImGui::SetNextWindowSize({mainViewport->WorkSize.x, toolbarHeight});
+        ImGui::Begin("RestArtEngine Editor", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar);
+        if (ImGui::BeginMenuBar()) {
+            dockManager_.drawLayoutMenu();
+            drawEditMenu();
+            drawUiMenu();
+            drawDebugMenu(renderer);
+            drawProjectMenu();
+            commandButton("scene.save");
+            if (ImGui::Button("Load Scene")) sceneReloadRequested_ = true;
+            if (ImGui::Button("Save All")) saveAll(renderer);
+            ImGui::TextDisabled("%s", sceneDirty_ ? "Scene *" : "Scene saved");
+            ImGui::EndMenuBar();
         }
-        if (ImGui::SmallButton((giLabel + "###GIStatus").c_str())) showProjectSettings();
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::TextUnformatted(giLabel.c_str());
-            ImGui::TextUnformatted("Click to open Project Settings.");
-            if (!giRequested) {
-                ImGui::TextUnformatted("Hardware preview has no diffuse color bleeding.");
-            } else {
-                ImGui::Text("Requested mode: %s", settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
-                    ? "Realtime" : "Progressive accumulation");
-                ImGui::Text("Requested indirect diffuse: %s", settings.globalIllumination.indirectDiffuse ? "On" : "Off");
-                ImGui::Text("Requested indirect specular: %s", settings.globalIllumination.indirectSpecular ? "On" : "Off");
-                if (!settings.globalIllumination.indirectDiffuse)
-                    ImGui::TextUnformatted("Diffuse color bleeding is disabled at the receiving surface.");
-                if (!settings.hardwareRayTracing)
-                    ImGui::TextUnformatted("GI is inactive because hardware ray tracing is disabled.");
-                else if (hardwareActive && settings.debugView != 0)
-                    ImGui::TextUnformatted("GI sampling is paused in this viewport debug mode.");
-                if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
+        // EndMenuBar restores the content cursor below the menu decoration.
+        ImGui::SetNextItemWidth(110);
+        int path = settings.path == renderer::RenderPath::Deferred ? 1 : 0;
+        if (ImGui::Combo("##pipeline", &path, "Forward\0Deferred\0"))
+            settings.path = path ? renderer::RenderPath::Deferred : renderer::RenderPath::Forward;
+        ImGui::SameLine(); ImGui::SetNextItemWidth(135);
+        ImGui::Combo("##view", &settings.debugView,
+            "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
+        ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
+        ImGui::SameLine();
+        {
+            // Hardware activity alone does not imply that indirect lighting is on.
+            // Keep the actual GI state ahead of the long device/FPS text so it is
+            // visible in narrow layouts. This entry only opens the existing settings.
+            const auto giStatus = renderer.globalIlluminationStatus();
+            const bool giRequested = settings.globalIllumination.method != renderer::GlobalIlluminationMethod::Disabled;
+            const bool hardwareActive = settings.hardwareRayTracing && renderer.hardwareRayTracingActive();
+            const bool giEffective = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
+            std::string giLabel = "GI: Off";
+            if (giRequested) {
+                if (!hardwareActive) giLabel = "GI: Inactive";
+                else if (settings.debugView != 0) giLabel = "GI: Paused";
+                else if (!giEffective) giLabel = "GI: Inactive";
+                else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
+                else giLabel = "GI: Progressive " + std::to_string(giStatus.accumulatedSamples) + "/" +
+                    std::to_string(giStatus.targetSamples);
             }
-            ImGui::EndTooltip();
+            if (ImGui::SmallButton((giLabel + "###GIStatus").c_str())) showProjectSettings();
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(giLabel.c_str());
+                ImGui::TextUnformatted("Click to open Project Settings.");
+                if (!giRequested) {
+                    ImGui::TextUnformatted("Hardware preview has no diffuse color bleeding.");
+                } else {
+                    ImGui::Text("Requested mode: %s", settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
+                        ? "Realtime" : "Progressive accumulation");
+                    ImGui::Text("Requested indirect diffuse: %s", settings.globalIllumination.indirectDiffuse ? "On" : "Off");
+                    ImGui::Text("Requested indirect specular: %s", settings.globalIllumination.indirectSpecular ? "On" : "Off");
+                    if (!settings.globalIllumination.indirectDiffuse)
+                        ImGui::TextUnformatted("Diffuse color bleeding is disabled at the receiving surface.");
+                    if (!settings.hardwareRayTracing)
+                        ImGui::TextUnformatted("GI is inactive because hardware ray tracing is disabled.");
+                    else if (hardwareActive && settings.debugView != 0)
+                        ImGui::TextUnformatted("GI sampling is paused in this viewport debug mode.");
+                    if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
+                }
+                ImGui::EndTooltip();
+            }
         }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Project: %s | %s / %s | %.0f FPS | F1 UI, F2 pipeline, F11 fullscreen",
+            project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
+            renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
+        ImGui::End();
+    } else {
+        // Keep the saved DockSpace alive while submitting its native floating
+        // windows, without collapsing the dock tree onto a minimized surface.
+        dockManager_.keepAlive();
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Project: %s | %s / %s | %.0f FPS | F1 UI, F2 pipeline, F11 fullscreen",
-        project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
-        renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
-    ImGui::End();
-
     drawGarbageCollection();
     drawOutlineSettings();
     drawProjectSettings(settings, renderer);
@@ -2987,7 +2991,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             createMeshActor(mesh, transform, "Place Mesh");
         }, [this](scene::ActorId actor, assets::AssetId material) {
             assignActorMaterial(actor, material);
-    }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_ || importResultsFocused_);
+    }, materialPreview(), diagnosticsPanel_.isFocused() || projectSettingsFocused_ || importResultsFocused_, mainSurfaceVisible);
     if (selectedActor_ != sceneInspectorActor_ || viewport_.pickedThisFrame())
         dockManager_.requestFocus(EditorPanel::Details);
     sceneInspectorActor_ = selectedActor_;

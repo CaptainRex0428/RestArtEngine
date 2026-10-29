@@ -137,6 +137,7 @@ struct SmokeInput {
     ImGuiID hook{};
     ImVec2 mouse{-100, -100};
     ImVec2 displaySize{};
+    bool usePlatformZOrder = false;
     std::function<void(ImGuiIO&)> events;
     void attach(ImGuiContext* target) {
         context = target;
@@ -159,6 +160,8 @@ struct SmokeInput {
                     break;
                 }
             }
+            if (input.usePlatformZOrder)
+                hovered = ImGui::FindHoveredViewportFromPlatformWindowStack(input.mouse);
             if (ctx->IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
                 ctx->IO.AddMouseViewportEvent(hovered ? hovered->ID : 0);
             if (input.displaySize.x > 0) ctx->IO.DisplaySize = input.displaySize;
@@ -476,6 +479,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     std::string error;
     ImGuiContext* context = nullptr;
     std::string renderedUiText;
+    bool smokeMainSurfaceVisible = true;
     const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false,
                              bool useMaterialPreview = true, bool useOutline = true) {
         struct TraceFrame {
@@ -497,18 +501,19 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
         if (drawEditor) {
             bool vsync = false, screenshot = false;
             if (recordUiText) ImGui::LogToBuffer();
-            editor.draw(settings, renderer, vsync, screenshot);
+            editor.draw(settings, renderer, vsync, screenshot, smokeMainSurfaceVisible);
             // A viewport tab that was just floated can report a degenerate image
             // rectangle for one frame; retry so captures never record the cleared
             // surface and the pipeline comparison stays deterministic.
             for (int retry = 0; retry < 3 && settings.viewportVisible && settings.viewportWidth < 1; ++retry) {
-                ui.endFrame();
+                ui.endFrame(smokeMainSurfaceVisible);
+                if (!smokeMainSurfaceVisible) renderer.releaseRetiredSceneTargets();
                 ui.beginFrame(1.0f / 60.0f);
                 context = ImGui::GetCurrentContext();
                 settings.viewportWidth = settings.viewportHeight = 0;
                 settings.editorViewport = false;
                 settings.viewportVisible = true;
-                editor.draw(settings, renderer, vsync, screenshot);
+                editor.draw(settings, renderer, vsync, screenshot, smokeMainSurfaceVisible);
             }
             if (recordUiText) {
                 renderedUiText = context->LogBuffer.c_str();
@@ -524,23 +529,37 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
                 require(viewport != nullptr, "Visible renderer viewport has no ImGui window.");
                 const auto& rect = viewport->WorkRect;
                 const auto origin = ImGui::GetMainViewport()->Pos;
-                require(std::abs(settings.viewportX - (rect.Min.x - origin.x)) <= 1 &&
-                    std::abs(settings.viewportY - (rect.Min.y - origin.y)) <= 1 &&
+                const bool external = viewport->Viewport != ImGui::GetMainViewport();
+                require(std::abs(settings.viewportX - (external ? 0.0f : rect.Min.x - origin.x)) <= 1 &&
+                    std::abs(settings.viewportY - (external ? 0.0f : rect.Min.y - origin.y)) <= 1 &&
                     std::abs(settings.viewportWidth - rect.GetWidth()) <= 2 &&
                     std::abs(settings.viewportHeight - rect.GetHeight()) <= 2,
                     "Scene renderer rectangle differs from this frame's dock content rectangle.");
+                if (external)
+                    require(renderer.sceneTextureWidth() == static_cast<unsigned>(settings.viewportWidth) &&
+                        renderer.sceneTextureHeight() == static_cast<unsigned>(settings.viewportHeight),
+                        "External scene target does not match its complete floating image rectangle.");
             }
         }
         auto renderSettings = settings;
         if (!useOutline) { renderSettings.outlineActors = nullptr; renderSettings.outlineActorCount = 0; }
-        require(renderer.render(renderSettings, world, assets, error,
-            useMaterialPreview ? editor.materialPreview() : nullptr), error);
+        if (smokeMainSurfaceVisible || settings.viewportVisible)
+            require(renderer.render(renderSettings, world, assets, error,
+                useMaterialPreview ? editor.materialPreview() : nullptr), error);
         const auto screenshotPath = output / (std::string(name) + ".bmp");
         const std::string_view captureName(name);
         if (drawEditor && (captureName.starts_with("material_") || captureName.starts_with("two_sided_ui_") ||
             captureName.starts_with("cull_front_ui_") || captureName.starts_with("depth_never_ui_")))
             saveScenePixels(renderer, renderSettings, screenshotPath);
-        ui.endFrame();
+        if (drawEditor && settings.viewportVisible && captureName.starts_with("floating_"))
+            saveScenePixels(renderer, renderSettings, screenshotPath);
+        ui.endFrame(smokeMainSurfaceVisible);
+        // A minimized main swap chain is neither rendered nor presented. Native
+        // window evidence is captured from each platform target below.
+        if (!smokeMainSurfaceVisible) {
+            renderer.releaseRetiredSceneTargets();
+            return;
+        }
         if (!renderer.saveScreenshot(screenshotPath.c_str(), error)) {
             int screenshotErrno = 0;
             unsigned long screenshotDosErrno = 0;
@@ -2004,52 +2023,44 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     openAssignedMaterial();
     require(!IsIconic(materialHwnd), "Opening a material did not restore its minimized tool window.");
 
-    const auto saveMaterialCapture = [&](const char* filename) {
+    const auto savePlatformCapture = [&](const ImGuiWindow* window, const char* filename) {
         // Redraw this real platform viewport and read its swapchain before
         // Present: DISCARD swapchains do not guarantee post-Present contents.
         // No private backend structs or desktop occlusion are involved.
         ImGuiContextScope active(context);
-        const auto* window = findWindow("Material Editor###MaterialWorkspace");
-        require(window && window->Active && window->Viewport->DrawData,
-            "Native material capture has no submitted material UI.");
-        const ImGuiViewport* lastRendered = nullptr;
-        for (int index = 1; index < context->PlatformIO.Viewports.Size; ++index) {
-            const auto* viewport = context->PlatformIO.Viewports[index];
-            if (!(viewport->Flags & ImGuiViewportFlags_IsMinimized)) lastRendered = viewport;
-        }
-        require(lastRendered == window->Viewport,
-            "The material workspace was not the last platform target rendered for capture.");
+        require(window && window->Active && window->Viewport != context->Viewports[0] && window->Viewport->DrawData,
+            "Native platform capture has no submitted window UI.");
         auto& platform = context->PlatformIO;
         require(platform.Renderer_RenderWindow && platform.Renderer_SwapBuffers,
-            "Native material capture has no platform render/present callbacks.");
+            "Native platform capture has no platform render/present callbacks.");
         platform.Renderer_RenderWindow(window->Viewport, nullptr);
         using Microsoft::WRL::ComPtr;
         ComPtr<ID3D11RenderTargetView> target;
         renderer.context()->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
-        require(target != nullptr, "Native material capture has no DX11 render target.");
+        require(target != nullptr, "Native platform capture has no DX11 render target.");
         ComPtr<ID3D11Resource> resource;
         target->GetResource(resource.GetAddressOf());
         ComPtr<ID3D11Texture2D> texture;
-        require(SUCCEEDED(resource.As(&texture)), "Native material target is not a 2D texture.");
+        require(SUCCEEDED(resource.As(&texture)), "Native platform target is not a 2D texture.");
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
         require(desc.Width == static_cast<UINT>(window->Viewport->Size.x) &&
             desc.Height == static_cast<UINT>(window->Viewport->Size.y) && desc.SampleDesc.Count == 1,
-            "Native material target dimensions do not match its independent viewport.");
+            "Native platform target dimensions do not match its independent viewport.");
         require(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
-            "Native material capture has an unsupported pixel format.");
+            "Native platform capture has an unsupported pixel format.");
         const auto format = desc.Format;
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = desc.MiscFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
         require(SUCCEEDED(renderer.device()->CreateTexture2D(&desc, nullptr, staging.GetAddressOf())),
-            "Could not allocate the native material capture readback texture.");
+            "Could not allocate the native platform capture readback texture.");
         std::vector<unsigned char> pixels(static_cast<std::size_t>(desc.Width) * desc.Height * 4);
         renderer.context()->CopyResource(staging.Get(), texture.Get());
         D3D11_MAPPED_SUBRESOURCE mapped{};
         require(SUCCEEDED(renderer.context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)),
-            "Could not map the native material capture surface.");
+            "Could not map the native platform capture surface.");
         for (UINT row = 0; row < desc.Height; ++row) {
             const auto* source = static_cast<const unsigned char*>(mapped.pData) + static_cast<std::size_t>(row) * mapped.RowPitch;
             auto* destination = pixels.data() + static_cast<std::size_t>(row) * desc.Width * 4;
@@ -2064,7 +2075,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         file.bfType = 0x4d42;
         file.bfOffBits = sizeof(file) + sizeof(bitmap);
         require(pixels.size() <= std::numeric_limits<DWORD>::max() - file.bfOffBits,
-            "Native material capture exceeds the BMP file size limit.");
+            "Native platform capture exceeds the BMP file size limit.");
         file.bfSize = static_cast<DWORD>(file.bfOffBits + pixels.size());
         bitmap.biSize = sizeof(bitmap);
         bitmap.biWidth = static_cast<LONG>(desc.Width);
@@ -2078,8 +2089,21 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         image.write(reinterpret_cast<const char*>(&bitmap), sizeof(bitmap));
         image.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
         image.flush();
-        require(static_cast<bool>(image), "Could not write the native material GPU UI capture.");
+        require(static_cast<bool>(image), "Could not write the native platform GPU UI capture.");
         platform.Renderer_SwapBuffers(window->Viewport, nullptr);
+    };
+
+    const auto saveMaterialCapture = [&](const char* filename) {
+        const auto* window = findWindow("Material Editor###MaterialWorkspace");
+        require(window && window->Active, "Material workspace is not submitted for capture.");
+        const ImGuiViewport* lastRendered = nullptr;
+        for (int index = 1; index < context->PlatformIO.Viewports.Size; ++index) {
+            const auto* viewport = context->PlatformIO.Viewports[index];
+            if (!(viewport->Flags & ImGuiViewportFlags_IsMinimized)) lastRendered = viewport;
+        }
+        require(lastRendered == window->Viewport,
+            "The material workspace was not the last platform target rendered for capture.");
+        savePlatformCapture(window, filename);
     };
 
     const auto tabBar = [&]() -> ImGuiTabBar* {
@@ -3536,6 +3560,322 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 auto* window = findWindow(windowName);
                 click(itemRect(window, ImHashStr(label, 0, window->ID)).GetCenter());
             });
+    }
+    {
+        // Ordinary dock panels must keep their full image and interaction area
+        // after becoming native windows, independently of the main swap chain.
+        ImGuiContextScope active(context);
+        input.usePlatformZOrder = true;
+        const auto savedWorld = world;
+        const auto savedSettings = settings;
+        const auto savedFolder = editor.contentFolder();
+        const auto savedAsset = editor.selectedContentAsset();
+        std::size_t layoutBytes = 0;
+        const char* layoutData = ImGui::SaveIniSettingsToMemory(&layoutBytes);
+        const std::string savedLayout(layoutData, layoutBytes);
+        editor.closeDiagnostics(); editor.closeProjectSettings(); editor.closeAssetDetails();
+        world.createDefaultScene();
+        settings.cameraYaw = .65f; settings.cameraPitch = .4f; settings.cameraDistance = 8;
+        settings.cameraTarget[0] = 0; settings.cameraTarget[1] = 1; settings.cameraTarget[2] = 0;
+        settings.rayTracing = settings.hardwareRayTracing = false;
+        settings.debugView = 0;
+        editor.resetLayout();
+        input.mouse = {-100, -100};
+        capture("floating_initial_layout", true);
+        capture("floating_initial_layout", true);
+        const auto desktop = context->Viewports[0]->GetMainRect();
+        const auto platformHandle = [&](const char* name) {
+            const auto* window = findWindow(name);
+            require(window && window->Active && window->Viewport != context->Viewports[0],
+                std::string("Panel did not acquire a native viewport outside the main window: ") + name);
+            const auto hwnd = static_cast<HWND>(window->Viewport->PlatformHandle);
+            require(hwnd && hwnd != mainHwnd && IsWindow(hwnd), std::string("Panel has no independent HWND: ") + name);
+            return hwnd;
+        };
+        const auto moveNativePanel = [&](const char* name, ImVec2 position, ImVec2 size) {
+            const auto hwnd = platformHandle(name);
+            require(SetWindowPos(hwnd, nullptr, static_cast<int>(position.x), static_cast<int>(position.y),
+                static_cast<int>(size.x), static_cast<int>(size.y), SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+                std::string("Cannot move/resize the native test panel: ") + name);
+            capture("floating_native_resize", true);
+            capture("floating_native_resize", true);
+            const auto* window = findWindow(name);
+            require(window->WorkRect.GetWidth() > 200 && window->WorkRect.GetHeight() > 150 &&
+                window->WorkRect.Min.x > desktop.Max.x,
+                std::string("Panel content remained clipped to the main editor: ") + name);
+        };
+        dragDock(dockTabCenter(findWindow("Content & Editors")), {desktop.Max.x + 170, desktop.Min.y + 100});
+        moveNativePanel("Content & Editors", {desktop.Max.x + 40, desktop.Min.y + 430}, {660, 440});
+        const auto contentHwnd = platformHandle("Content & Editors");
+        savePlatformCapture(findWindow("Content & Editors"), "floating_content_grid_native.bmp");
+        const auto sceneProject = [&](float x, float y, float z) {
+            using namespace DirectX;
+            const float distance = settings.cameraDistance, pitch = settings.cameraPitch;
+            const auto target = XMVectorSet(settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2], 1);
+            const auto eye = XMVectorAdd(target, XMVectorSet(distance * std::cos(pitch) * std::sin(settings.cameraYaw),
+                distance * std::sin(pitch), distance * std::cos(pitch) * std::cos(settings.cameraYaw), 0));
+            const auto view = XMMatrixLookAtRH(eye, target, XMVectorSet(0, 1, 0, 0));
+            const auto projection = XMMatrixPerspectiveFovRH(XMConvertToRadians(50.f),
+                static_cast<float>(settings.viewportWidth) / settings.viewportHeight, .05f, 100.f);
+            const auto rect = findWindow("Scene Viewport##Interaction")->WorkRect;
+            const auto point = XMVector3Project(XMVectorSet(x, y, z, 1), rect.Min.x, rect.Min.y,
+                static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight),
+                0, 1, projection, view, XMMatrixIdentity());
+            return ImVec2(XMVectorGetX(point), XMVectorGetY(point));
+        };
+        const auto beginFloatingAssetDrag = [&](const std::string& path, bool grid) {
+            SetForegroundWindow(contentHwnd);
+            capture("floating_content_native_focus", true);
+            capture("floating_content_native_focus", true);
+            require(GetForegroundWindow() == contentHwnd, "Native Content did not gain focus before the drag.");
+            const auto* entry = editor.assetRegistry().find(path);
+            require(entry != nullptr, "Native Content drag asset is not registered: " + path);
+            const auto folder = entry->folder, name = entry->name;
+            const auto type = entry->type;
+            editor.selectContentFolder(folder); editor.setContentSearch(name); editor.setContentTypeFilter(type);
+            editor.setContentRecursive(false); editor.setContentGridView(grid); editor.selectContentAsset(path);
+            capture("floating_content_source_layout", true);
+            capture("floating_content_source_layout", true);
+            ImGuiWindow* browser = nullptr;
+            for (auto* window : context->Windows)
+                if (window->Active && std::strstr(window->Name, "##content-assets")) browser = window;
+            require(browser && browser->Viewport != context->Viewports[0], "Content asset child returned to the main viewport.");
+            const auto pathId = ImHashStr(path.c_str(), 0, browser->ID);
+            const auto sourceId = ImHashStr(grid ? "##asset-tile" : "##asset-row", 0, pathId);
+            auto sourceRect = itemRect(browser, sourceId);
+            sourceRect.ClipWith(browser->ClipRect);
+            // Native windows may overlap after monitor placement constraints.
+            // Start on a genuinely exposed part of the item, like a user would,
+            // rather than clicking a wide row's potentially covered centre.
+            ImVec2 source{};
+            bool exposed = false;
+            for (const float fraction : {.1f, .5f, .9f}) {
+                const ImVec2 point{sourceRect.Min.x + sourceRect.GetWidth() * fraction, sourceRect.GetCenter().y};
+                if (ImGui::FindHoveredViewportFromPlatformWindowStack(point) == browser->Viewport) {
+                    source = point; exposed = true; break;
+                }
+            }
+            require(exposed && sourceRect.Contains(source), "The native Content item has no exposed drag source.");
+            input.mouse = source;
+            capture("floating_content_source_hover", true);
+            const double nextSingleClick = context->IO.MouseClickedTime[0] + context->IO.MouseDoubleClickTime;
+            for (int frame = 0; context->Time <= nextSingleClick && frame < 60; ++frame)
+                capture("floating_content_click_settle", true);
+            require(!context->IO.MouseDown[0] && context->Time > nextSingleClick, "Floating asset source is still in a prior click.");
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+            capture("floating_content_source_press", true);
+            require(context->ActiveId == sourceId, "Native Content press did not activate the intended asset widget.");
+            input.mouse.x += 18;
+            capture("floating_content_source_drag", true);
+            require(context->DragDropActive && context->DragDropPayload.IsDataType("RAE_ASSET") &&
+                context->DragDropPayload.DataSize == static_cast<int>(path.size()) &&
+                std::memcmp(context->DragDropPayload.Data, path.data(), path.size()) == 0,
+                "An external Content widget did not start its actual asset payload.");
+        };
+        const auto releaseFloatingAsset = [&](ImVec2 destination, const char* prefix) {
+            input.mouse = destination;
+            capture((std::string(prefix) + "_hover").c_str(), true);
+            capture((std::string(prefix) + "_hover").c_str(), true);
+            input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+            capture(prefix, true);
+            capture(prefix, true, true);
+        };
+        const auto dropFloatingMesh = [&](bool grid, const char* prefix) {
+            const auto count = world.actors.size(), history = editor.undoStack().cursor();
+            beginFloatingAssetDrag("engine://Meshes/Cube.rasset", grid);
+            require(world.actors.size() == count, "Native Content created an Actor before delivery.");
+            releaseFloatingAsset(sceneProject(2.2f, 0, 0), prefix);
+            const auto id = editor.selectedActor();
+            const auto* actor = world.findActor(id);
+            require(world.actors.size() == count + 1 && actor && actor->mesh.meshId == assets::EngineCubeMeshId &&
+                editor.undoStack().cursor() == history + 1 && editor.undoStack().undoLabel() == "Place Mesh" &&
+                std::abs(actor->transform.position[0] - 2.2f) < .15f,
+                "Native Content-to-scene Mesh delivery lost coordinates, identity or its undo transaction.");
+            const auto placed = actor->transform;
+            require(editor.undo() && !world.findActor(id) && world.actors.size() == count,
+                "Undo did not remove the Mesh dropped from external Content.");
+            require(editor.redo() && world.findActor(id) &&
+                std::memcmp(&world.findActor(id)->transform, &placed, sizeof(placed)) == 0,
+                "Redo did not restore the Mesh dropped across native windows.");
+            require(editor.undo(), "Native Mesh drop fixture could not restore its starting scene.");
+            capture("floating_mesh_undo", true);
+        };
+        dropFloatingMesh(true, "floating_grid_to_main_scene");
+
+        dragDock(dockTabCenter(findWindow("Scene Viewport##Interaction")), {desktop.Max.x + 850, desktop.Min.y + 100});
+        moveNativePanel("Scene Viewport##Interaction", {desktop.Max.x + 740, desktop.Min.y + 30}, {840, 650});
+        const auto sceneHwnd = platformHandle("Scene Viewport##Interaction");
+        require(sceneHwnd != contentHwnd && settings.viewportX == 0 && settings.viewportY == 0 &&
+            renderer.sceneTextureWidth() == static_cast<unsigned>(settings.viewportWidth) &&
+            renderer.sceneTextureHeight() == static_cast<unsigned>(settings.viewportHeight),
+            "External Scene is still using the main swap chain rectangle or Content's native surface.");
+        const auto firstSize = ImVec2(static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight));
+        moveNativePanel("Scene Viewport##Interaction", {desktop.Max.x + 740, desktop.Min.y + 30}, {980, 720});
+        require(settings.viewportWidth > firstSize.x + 100 && settings.viewportHeight > firstSize.y + 40,
+            "Resizing an external Scene did not resize its independent scene texture.");
+        savePlatformCapture(findWindow("Scene Viewport##Interaction"), "floating_scene_full_native.bmp");
+        const auto raw = contents(output / "floating_native_resize.scene.rgba");
+        bool variedScene = false;
+        for (std::size_t pixel = 4; pixel + 3 < raw.size(); pixel += 4)
+            variedScene |= !std::equal(raw.begin(), raw.begin() + 3, raw.begin() + static_cast<std::ptrdiff_t>(pixel));
+        require(raw.size() == static_cast<std::size_t>(settings.viewportWidth) * settings.viewportHeight * 4 && variedScene,
+            "External Scene readback has incorrect dimensions or no rendered image.");
+        verifyLayoutRoundtrip("layout-native-external.ini");
+        {
+            std::size_t size = 0;
+            const char* ini = ImGui::SaveIniSettingsToMemory(&size);
+            const std::string nativeLayout(ini, size);
+            struct NativeLayoutState { ImGuiID id, viewport; ImVec2ih position, extent, viewportPosition; };
+            std::array<NativeLayoutState, 2> expected{};
+            const std::array<const char*, 2> names{"Content & Editors", "Scene Viewport##Interaction"};
+            for (std::size_t index = 0; index < names.size(); ++index) {
+                const auto* state = ImGui::FindWindowSettingsByID(ImHashStr(names[index]));
+                require(state && state->ViewportId != context->Viewports[0]->ID, "Native viewport identity was not serialized.");
+                expected[index] = {state->ID, state->ViewportId, state->Pos, state->Size, state->ViewportPos};
+            }
+            auto* restored = ImGui::CreateContext();
+            ImGui::SetCurrentContext(restored);
+            ImGui::GetIO().IniFilename = nullptr;
+            ImGui::LoadIniSettingsFromMemory(nativeLayout.data(), nativeLayout.size());
+            bool matched = true;
+            for (const auto& state : expected) {
+                const auto* loaded = ImGui::FindWindowSettingsByID(state.id);
+                matched &= loaded && loaded->ViewportId == state.viewport && loaded->Pos.x == state.position.x &&
+                    loaded->Pos.y == state.position.y && loaded->Size.x == state.extent.x && loaded->Size.y == state.extent.y &&
+                    loaded->ViewportPos.x == state.viewportPosition.x && loaded->ViewportPos.y == state.viewportPosition.y;
+            }
+            ImGui::DestroyContext(restored);
+            ImGui::SetCurrentContext(context);
+            require(matched, "Fresh-context layout reload lost native viewport IDs or external desktop bounds.");
+        }
+        click(sceneProject(-.35f, 1.35f, 0));
+        require(editor.selectedActor() == 1, "Desktop mouse picking missed the sphere in the external Scene.");
+        click(itemRect(findWindow("Scene Viewport##Interaction"),
+            findWindow("Scene Viewport##Interaction")->GetID("Move [W]")).GetCenter());
+        const auto beforeGizmo = world.findActor(1)->transform;
+        const auto gizmoHistory = editor.undoStack().cursor();
+        const auto start = sceneProject(.55f, 1, 0), end = sceneProject(1.05f, 1, 0);
+        drag(start, end, "floating_scene_gizmo_moved");
+        require(world.findActor(1)->transform.position[0] > beforeGizmo.position[0] + .2f &&
+            editor.undoStack().cursor() == gizmoHistory + 1, "External Scene gizmo did not move the selected Actor in desktop coordinates.");
+        require(editor.undo() && std::memcmp(&world.findActor(1)->transform, &beforeGizmo, sizeof(beforeGizmo)) == 0,
+            "Undo did not restore the external Scene gizmo transform.");
+        capture("floating_scene_gizmo_undo", true);
+        dropFloatingMesh(false, "floating_list_to_external_scene");
+        const auto beforeMaterial = world.findActor(1)->mesh.materialId;
+        const auto materialHistory = editor.undoStack().cursor();
+        beginFloatingAssetDrag("engine://Materials/DefaultMaterial.rasset", true);
+        releaseFloatingAsset(sceneProject(-.35f, 1.35f, 0), "floating_material_to_external_scene");
+        require(world.findActor(1)->mesh.materialId == assets::EngineDefaultMaterialId &&
+            editor.undoStack().cursor() == materialHistory + 1 && editor.undoStack().undoLabel() == "Assign Material",
+            "Material delivery from external Content did not resolve the external Scene hit.");
+        require(editor.undo() && world.findActor(1)->mesh.materialId == beforeMaterial,
+            "Undo did not restore the external Scene material assignment.");
+        savePlatformCapture(findWindow("Content & Editors"), "floating_content_list_native.bmp");
+
+        const char* diagnosticsName = "Diagnostics##RestArtEngine.Diagnostics";
+        editor.showDiagnostics(editor::DiagnosticsTab::Profiler);
+        editor.showProjectSettings();
+        capture("floating_tools_open", true);
+        ImGui::SetWindowPos(diagnosticsName, {desktop.Max.x + 45, desktop.Min.y + 925}, ImGuiCond_Always);
+        ImGui::SetWindowSize(diagnosticsName, {650, 480}, ImGuiCond_Always);
+        ImGui::SetWindowPos("Project Settings", {desktop.Max.x + 1760, desktop.Min.y + 40}, ImGuiCond_Always);
+        ImGui::SetWindowSize("Project Settings", {540, 620}, ImGuiCond_Always);
+        capture("floating_tools_external", true);
+        capture("floating_tools_external", true);
+        const auto diagnosticsHwnd = platformHandle(diagnosticsName);
+        const auto projectSettingsHwnd = platformHandle("Project Settings");
+        savePlatformCapture(findWindow(diagnosticsName), "floating_diagnostics_native.bmp");
+        savePlatformCapture(findWindow("Project Settings"), "floating_project_settings_native.bmp");
+        struct RetainedPlatformWindow { const char* name; HWND handle; ImGuiID viewport; RECT bounds; };
+        std::array<RetainedPlatformWindow, 4> retained{{
+            {"Scene Viewport##Interaction", sceneHwnd}, {"Content & Editors", contentHwnd},
+            {diagnosticsName, diagnosticsHwnd}, {"Project Settings", projectSettingsHwnd}}};
+        for (auto& state : retained) {
+            state.viewport = findWindow(state.name)->ViewportId;
+            require(GetWindowRect(state.handle, &state.bounds) != FALSE, "Cannot remember native panel bounds before minimizing.");
+        }
+        input.mouse = {-100, -100};
+        const auto sceneFrameBeforeMinimize = renderer.geometryStatistics().frameId;
+        ShowWindow(mainHwnd, SW_MINIMIZE);
+        smokeMainSurfaceVisible = false;
+        capture("floating_minimized_initial", true, true);
+        capture("floating_minimized_steady", true, true);
+        require(IsIconic(mainHwnd), "Main test window did not remain minimized during external UI submission.");
+        // Ordinary platform windows use the main HWND as owner. Windows may
+        // hide those popups while their owner is minimized; complete submission
+        // must retain their HWNDs/settings rather than retiring their viewports.
+        for (const auto& state : retained) {
+            RECT bounds{};
+            require(platformHandle(state.name) == state.handle && findWindow(state.name)->ViewportId == state.viewport &&
+                GetWindowRect(state.handle, &bounds) && EqualRect(&bounds, &state.bounds),
+                "The minimized editor retired or repositioned a hidden owned platform window.");
+        }
+        require(findWindow("Content & Editors")->Active && findWindow(diagnosticsName)->Active &&
+            findWindow("Project Settings")->Active && findWindow("Scene Viewport##Interaction")->Active &&
+            !IsWindowVisible(sceneHwnd) && !settings.viewportVisible &&
+            renderer.geometryStatistics().frameId == sceneFrameBeforeMinimize,
+            "The minimized loop stopped retaining external UI or rendered a hidden owned scene surface.");
+        capture("floating_minimized_final", true, true);
+        require(!std::filesystem::exists(output / "floating_minimized_final.bmp"),
+            "A minimized main-swapchain screenshot was presented as external-window evidence.");
+        ShowWindow(mainHwnd, SW_RESTORE);
+        smokeMainSurfaceVisible = true;
+        input.mouse = {-100, -100};
+        capture("floating_main_restored", true);
+        capture("floating_main_restored", true);
+        for (const auto& state : retained)
+            require(platformHandle(state.name) == state.handle && IsWindowVisible(state.handle),
+                "Restoring the main editor did not reveal the retained native panels.");
+        require(settings.viewportVisible && settings.viewportX == 0 && settings.viewportY == 0 &&
+            renderer.geometryStatistics().frameId > sceneFrameBeforeMinimize,
+            "Restoring the main editor did not resume the external scene render.");
+        const auto floatingOrbitStart = sceneProject(2.8f, .5f, 0);
+        const auto yawBefore = settings.cameraYaw;
+        input.mouse = floatingOrbitStart;
+        capture("floating_restored_camera_hover", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, true); };
+        capture("floating_restored_camera_press", true);
+        input.mouse.x += 42;
+        capture("floating_restored_camera_drag", true);
+        input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(1, false); };
+        capture("floating_restored_camera_release", true);
+        require(settings.cameraYaw != yawBefore, "The retained external Scene camera stopped working after main-window restore.");
+        savePlatformCapture(findWindow("Scene Viewport##Interaction"), "floating_restored_scene_native.bmp");
+        savePlatformCapture(findWindow("Content & Editors"), "floating_restored_content_native.bmp");
+        savePlatformCapture(findWindow(diagnosticsName), "floating_restored_diagnostics_native.bmp");
+        editor.closeDiagnostics(); editor.closeProjectSettings();
+        capture("floating_tools_closed", true);
+        const auto* settingsPanel = findWindow("Viewport settings");
+        dragDock(dockTabCenter(findWindow("Scene Viewport##Interaction")), settingsPanel->DockNode->Rect().GetCenter());
+        require(findWindow("Scene Viewport##Interaction")->DockId == findWindow("Viewport settings")->DockId &&
+            findWindow("Scene Viewport##Interaction")->Viewport == context->Viewports[0],
+            "External Scene tab could not be docked back into the main editor.");
+        // Native tools can overlap on smaller desktops. Raise the source as
+        // a user would before grabbing its tab, then resolve its current bounds.
+        SetForegroundWindow(contentHwnd);
+        capture("floating_content_redock_focus", true);
+        capture("floating_content_redock_focus", true);
+        const auto contentTab = dockTabCenter(findWindow("Content & Editors"));
+        require(GetForegroundWindow() == contentHwnd &&
+            ImGui::FindHoveredViewportFromPlatformWindowStack(contentTab) == findWindow("Content & Editors")->Viewport,
+            "Native Content tab is obscured before re-docking.");
+        dragDock(contentTab, findWindow("Details")->DockNode->Rect().GetCenter());
+        require(findWindow("Content & Editors")->DockId == findWindow("Details")->DockId &&
+            findWindow("Content & Editors")->Viewport == context->Viewports[0],
+            "External Content tab could not be docked back into the main editor.");
+        verifyLayoutRoundtrip("layout-native-redocked.ini");
+        world = savedWorld; settings = savedSettings;
+        editor.setContentSearch(""); editor.setContentTypeFilter(assets::AssetType::Unknown);
+        editor.setContentRecursive(false); editor.setContentGridView(false);
+        editor.selectContentFolder(savedFolder); editor.selectContentAsset(savedAsset);
+        ImGui::LoadIniSettingsFromMemory(savedLayout.data(), savedLayout.size());
+        capture("floating_original_layout_restored", true);
+        capture("floating_original_layout_restored", true);
+        input.usePlatformZOrder = false;
+        std::cout << "PASS: ordinary native Content/Scene dock detach and re-dock, external layout reload, "
+            "independent scene targets, desktop picking/gizmo and cross-window Mesh/Material delivery, "
+            "plus native-panel retention and hidden-scene GPU suppression while the main window is minimized.\n";
     }
     const auto finalMaterialHwnd = static_cast<HWND>(findWindow("Material Editor###MaterialWorkspace")->Viewport->PlatformHandle);
     input.detach();

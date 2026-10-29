@@ -101,8 +101,9 @@ LRESULT CALLBACK platformWindowProc(HWND window, UINT message, WPARAM wparam, LP
     if (message == WM_DROPFILES && owned && ImGuiLayer::handleMessage(window, message, wparam, lparam)) {
         // The editor will check this drop against the current Content region.
     } else if (message == WM_CLOSE && owned) {
-        // Closing a material window only hides its UI. Let ImGui update the
-        // p_open flag next frame, then retire both HWND and swap chain together.
+        // Let closable tools update p_open on the next frame; panels without
+        // a close control retain their existing non-closable behavior. ImGui
+        // retires the HWND and swap chain together when a window is hidden.
         // In this pinned backend DefWindowProc would destroy the HWND too soon.
         if (auto* viewport = ImGui::FindViewportByPlatformHandle(window))
             viewport->PlatformRequestClose = true;
@@ -216,8 +217,9 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
     io.ConfigMemoryCompactTimer = FLT_MAX;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
     if (enablePlatformWindows) io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-    // The editor constrains its dock panels to the main viewport. Only an
-    // explicitly separate workspace requests its own native platform window.
+    // Keep ImGui's automatic viewport hosting: floating editor windows can
+    // cross the main window boundary and merge back when returned inside.
+    // Dedicated tools may override that policy for their own window class.
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.ConfigWindowsResizeFromEdges = true;
     io.IniFilename = nullptr;

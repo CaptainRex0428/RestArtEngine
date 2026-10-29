@@ -20,6 +20,7 @@ public:
     // editor creates and records the final instance through createFromMesh.
     // keyboardBlocked is this frame's external tool keyboard ownership. Mouse
     // drags keep their existing camera / gizmo / asset ownership independently.
+    // A minimized main surface does not hide an independent scene window.
     bool draw(renderer::SceneSettings&, scene::World&, const assets::AssetLibrary&,
               std::vector<scene::ActorId>& selection, scene::ActorId& selected,
               renderer::SceneRenderer& renderer, const std::function<void()>& duplicateForDrag,
@@ -27,7 +28,7 @@ public:
               const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
               const std::function<void(scene::ActorId, assets::AssetId)>& assignMaterial,
               const assets::MaterialAsset* materialOverride = nullptr,
-              bool keyboardBlocked = false);
+              bool keyboardBlocked = false, bool mainSurfaceVisible = true);
     bool isUsing() const { return usingGizmo_; }
     bool isHovered() const { return hovered_; }
     bool isFocused() const { return focused_; }

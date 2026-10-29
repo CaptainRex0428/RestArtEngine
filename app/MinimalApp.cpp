@@ -962,13 +962,26 @@ int wmain(int argc, wchar_t** argv) {
                     const float dt = std::chrono::duration<float>(now - previous).count();
                     previous = now;
                     ui.beginFrame(std::clamp(dt, 0.0001f, 0.1f));
-                    editor.drawMaterialWindow(renderer);
+                    if (showUI) {
+                        bool platformCapture = false;
+                        editor.draw(settings, renderer, vsync, platformCapture, false);
+                        // Detached Scene Viewports own a scene target even while
+                        // the main swap chain is minimized and never presented.
+                        if (settings.viewportVisible &&
+                            !renderer.render(settings, editor.world(), editor.assets(), error, editor.materialPreview()))
+                            throw std::runtime_error(error);
+                    } else {
+                        // F1/F11 hide the whole editing workspace, including
+                        // floating panels. Minimize must not reopen that UI.
+                        editor.drawMaterialWindow(renderer);
+                    }
                     if (windowState.closeRequested) {
                         editor.requestClose();
                         windowState.closeRequested = false;
                     }
                     if (editor.drawCloseDialog(renderer)) running = false;
                     ui.endFrame(false);
+                    renderer.releaseRetiredSceneTargets();
                 }
                 updateGarbageCollection(gc, renderer, ui, previousGc);
                 {

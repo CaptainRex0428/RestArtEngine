@@ -22,7 +22,8 @@ public:
     bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
     // Borrowed service; the caller keeps it alive until detached or editor destruction.
     void setGarbageCollector(rae::GarbageCollector* gc, const std::filesystem::path& settingsPath);
-    void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture);
+    void draw(renderer::SceneSettings&, renderer::SceneRenderer&, bool& vsync, bool& capture,
+              bool mainSurfaceVisible = true);
     // Also submitted while the scene window is minimized or its UI is hidden.
     // The tool keeps the same material/shader drafts when its OS window closes.
     void drawMaterialWindow(renderer::SceneRenderer&);

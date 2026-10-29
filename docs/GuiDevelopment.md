@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11；未接通跨平台 GUI 后端。 |
 | 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
-| 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮及布局恢复；材质编辑器另用系统独立窗口。 |
+| 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮、外部系统浮窗及布局恢复；材质编辑器保持独立窗口。 |
 | 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数与当前场景切换）、Details（Actor 实例属性）、Viewport settings、Content & Editors（`AssetRegistry` 驱动的文件夹树、列表/网格资产区、`Asset Details` 窗）、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 不再嵌套 Meshes 页签，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
 | 项目配置 | [ProjectSettings.cpp](../src/Editor/ProjectSettings.cpp) | `Project → Project Settings...` 打开独立可关闭窗口，左侧 Rendering 导航提供硬件光追／效果开关、GI 算法与采样预算，显示设备支持／请求／实际状态、累积进度和重启。修改自动反馈、显式保存，加入 Save All 与未保存退出提示；焦点不传给场景编辑。 |
 | 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选、Alt 拖动复制与 Content Mesh 拖入放置；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，默认品牌橙，可选主题强调色或自定义颜色。 |
@@ -25,7 +25,7 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 
 材质参数与工程共享 Shader 两页位于按需打开的系统独立 `MaterialWorkspace`，Scene 与 Details 中当前 Actor 实例的材质引用复用同一入口；Content 面板保留完整资产浏览（材质、网格、场景），材质编辑仍在独立窗口。Mesh 资产仍是几何数据，不新增虚构的 Mesh 材质绑定；Details 的材质入口严格取自当前实例，不汇总同 Mesh 的其他实例。
 
-编辑器通过锁定版 Win32/DX11 后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。主窗口最小化时可见工具窗继续交互；桌面 UI 坐标与主纹理局部坐标显式转换。其他工作区面板仍在主窗口内停靠，完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)。
+编辑器通过锁定版 Win32/DX11 后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。普通工作区面板与工具窗自动外移／回嵌，不逐帧绑定主 viewport；DockSpace 宿主和主工具栏继续位于主窗口。普通系统浮窗由主窗口拥有，随主窗口最小化隐藏、恢复后显示；独立材质窗口保留无父窗口的策略。最小化路径继续提交仍需处理的平台窗口并维持 Dock 树，隐藏的场景浮窗不持续渲染。普通面板保留既有无关闭按钮的语义，可关闭工具窗沿各自状态关闭。场景目标尺寸与主 swapchain 分开，图像桌面矩形与纹理局部矩形显式映射，不能按主窗口边界裁掉外部视口。完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)。
 
 ## Scene / Details 信息分工
 

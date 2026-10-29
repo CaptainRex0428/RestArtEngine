@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 #include <RestArtEngine/Editor/ViewportInteraction.h>
 #include <RestArtEngine/Editor/EditorDockManager.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
@@ -113,10 +117,12 @@ struct SurfaceHit {
     float distance = 0;
 };
 
-ViewRay viewRay(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection) {
+ViewRay viewRay(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection,
+                const ImVec2& imageMin, const ImVec2& imageMax) {
     const auto screenMouse = ImGui::GetMousePos();
-    const auto mainOrigin = ImGui::GetMainViewport()->Pos;
-    const ImVec2 mouse{screenMouse.x - mainOrigin.x, screenMouse.y - mainOrigin.y};
+    const ImVec2 mouse{
+        settings.viewportX + (screenMouse.x - imageMin.x) * settings.viewportWidth / (imageMax.x - imageMin.x),
+        settings.viewportY + (screenMouse.y - imageMin.y) * settings.viewportHeight / (imageMax.y - imageMin.y)};
     const auto unproject = [&](float depth) {
         return XMVector3Unproject(XMVectorSet(mouse.x, mouse.y, depth, 1),
             static_cast<float>(settings.viewportX), static_cast<float>(settings.viewportY),
@@ -277,15 +283,16 @@ void drawGeometryStatistics(const renderer::SceneGeometryStatistics& statistics,
 
 void drawDropPreview(const renderer::SceneSettings& settings, FXMMATRIX view, CXMMATRIX projection,
                      const scene::Transform& transform, FXMVECTOR contact, const XMFLOAT3& minimum,
-                     const XMFLOAT3& maximum, const ImVec2& clipMin, const ImVec2& clipMax) {
-    const auto desktopOrigin = ImGui::GetMainViewport()->Pos;
+                     const XMFLOAT3& maximum, const ImVec2& imageMin, const ImVec2& imageMax,
+                     const ImVec2& clipMin, const ImVec2& clipMax) {
     const auto project = [&](FXMVECTOR point, ImVec2& screen) {
         const auto clip = XMVector4Transform(XMVectorSetW(point, 1), view * projection);
         if (XMVectorGetW(clip) <= 1e-5f) return false;
         const auto pixel = XMVector3Project(point, static_cast<float>(settings.viewportX),
             static_cast<float>(settings.viewportY), static_cast<float>(settings.viewportWidth),
             static_cast<float>(settings.viewportHeight), 0, 1, projection, view, XMMatrixIdentity());
-        screen = {desktopOrigin.x + XMVectorGetX(pixel), desktopOrigin.y + XMVectorGetY(pixel)};
+        screen = {imageMin.x + (XMVectorGetX(pixel) - settings.viewportX) * (imageMax.x - imageMin.x) / settings.viewportWidth,
+            imageMin.y + (XMVectorGetY(pixel) - settings.viewportY) * (imageMax.y - imageMin.y) / settings.viewportHeight};
         return std::isfinite(screen.x) && std::isfinite(screen.y);
     };
     ImVec2 corners[8];
@@ -319,7 +326,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
                                const assets::AssetRegistry& registry,
                                const std::function<void(assets::AssetId, const scene::Transform&)>& createFromMesh,
                                const std::function<void(scene::ActorId, assets::AssetId)>& assignMaterial,
-                               const assets::MaterialAsset* materialOverride, bool keyboardBlocked) {
+                               const assets::MaterialAsset* materialOverride, bool keyboardBlocked, bool mainSurfaceVisible) {
     meshQueries_.retain(assets);
     hovered_ = focused_ = false;
     pickedThisFrame_ = false;
@@ -329,23 +336,55 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     settings.viewportVisible = false;
     settings.viewportWidth = settings.viewportHeight = 0;
     ImGuizmo::BeginFrame();
-    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::SetNextWindowSize({640, 480}, ImGuiCond_FirstUseEver);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     const bool visible = ImGui::Begin(EditorDockManager::panelName(EditorPanel::Viewport), nullptr,
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
-    if (!visible) {
+    const auto* windowViewport = ImGui::GetWindowViewport();
+    const bool inMainViewport = windowViewport == ImGui::GetMainViewport();
+    const auto platformWindow = static_cast<HWND>(windowViewport->PlatformHandleRaw
+        ? windowViewport->PlatformHandleRaw : windowViewport->PlatformHandle);
+    // Windows hides owned native tools when their owner minimizes, without
+    // necessarily marking them iconic. Keep their layout alive but skip hidden
+    // scene GPU work. A newly detached viewport may not own an HWND until this
+    // frame's platform update, so an absent handle is not a hidden window.
+    const bool hiddenOwnedWindow = !mainSurfaceVisible && !inMainViewport && platformWindow &&
+        !IsWindowVisible(platformWindow);
+    if (!visible || (!mainSurfaceVisible && inMainViewport) ||
+        hiddenOwnedWindow || (windowViewport->Flags & ImGuiViewportFlags_IsMinimized)) {
         usingGizmo_ = orbiting_ = panning_ = false;
         ImGui::End();
         return false;
     }
-    // Rendering uses main-client/texture pixels. ImGui, mouse input and Gizmo
-    // use desktop coordinates when platform viewports are enabled.
+    // Docked rendering retains the main-client pixel rectangle. An independent
+    // platform viewport owns a texture-local rectangle, unrelated to its desktop
+    // position or to the main window's size. Input always maps from the actual
+    // desktop image rectangle into that render rectangle.
     const ImVec2 contentMin = ImGui::GetCursorScreenPos();
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const ImVec2 mainOrigin = ImGui::GetMainViewport()->Pos;
-    const ImVec2 localMin{contentMin.x - mainOrigin.x, contentMin.y - mainOrigin.y};
+    const ImVec2 localMin = inMainViewport ? ImVec2(contentMin.x - mainOrigin.x, contentMin.y - mainOrigin.y) : ImVec2(0, 0);
+    const auto mainSize = ImGui::GetMainViewport()->Size;
+    const float requestedWidth = inMainViewport ? mainSize.x : available.x;
+    const float requestedHeight = inMainViewport ? mainSize.y : available.y;
+    if (!std::isfinite(requestedWidth) || !std::isfinite(requestedHeight) || available.x < 1 || available.y < 1 ||
+        requestedWidth > 16384 || requestedHeight > 16384) {
+        usingGizmo_ = orbiting_ = panning_ = false;
+        ImGui::TextWrapped("Scene viewport size is unavailable or exceeds the device texture limit.");
+        ImGui::End();
+        return false;
+    }
+    std::string targetError;
+    // A small target reserve also keeps material and asset previews usable in
+    // a narrow/minimized scene panel. It does not stretch or crop the image.
+    if (!renderer.ensureSceneTargetSize(std::max(256u, static_cast<unsigned>(std::ceil(requestedWidth))),
+            std::max(256u, static_cast<unsigned>(std::ceil(requestedHeight))), targetError)) {
+        usingGizmo_ = orbiting_ = panning_ = false;
+        ImGui::TextWrapped("Scene viewport unavailable: %s", targetError.c_str());
+        ImGui::End();
+        return false;
+    }
     const float targetWidth = static_cast<float>(renderer.sceneTextureWidth());
     const float targetHeight = static_cast<float>(renderer.sceneTextureHeight());
     const int left = static_cast<int>(std::clamp(localMin.x, 0.0f, targetWidth));
@@ -362,8 +401,9 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         return false;
     }
     settings.viewportVisible = true;
-    const ImVec2 imageMin{mainOrigin.x + left, mainOrigin.y + top};
-    const ImVec2 imageMax{mainOrigin.x + imageRight, mainOrigin.y + bottom};
+    const ImVec2 imageMin = inMainViewport ? ImVec2(mainOrigin.x + left, mainOrigin.y + top) : contentMin;
+    const ImVec2 imageMax = inMainViewport ? ImVec2(mainOrigin.x + imageRight, mainOrigin.y + bottom)
+        : ImVec2(contentMin.x + available.x, contentMin.y + available.y);
     ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(renderer.sceneTexture())),
         imageMin, imageMax, {left / targetWidth, top / targetHeight},
         {imageRight / targetWidth, bottom / targetHeight});
@@ -436,7 +476,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         const XMVECTOR right = XMVectorSet(cosYaw, 0.0f, -sinYaw, 0.0f);
         const XMVECTOR up = XMVectorSet(-sinYaw * sinPitch, cosPitch, -cosYaw * sinPitch, 0.0f);
         const float worldPerPixel = 2.0f * d * std::tan(XMConvertToRadians(25.0f)) /
-            std::max(1.0f, static_cast<float>(settings.viewportHeight));
+            std::max(1.0f, imageMax.y - imageMin.y);
         const float dx = io.MouseDelta.x * worldPerPixel;
         const float dy = io.MouseDelta.y * worldPerPixel;
         // Grab style: the scene follows the cursor, so the camera moves opposite.
@@ -467,7 +507,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
     ImGuizmo::SetRect(imageMin.x, imageMin.y,
-        static_cast<float>(settings.viewportWidth), static_cast<float>(settings.viewportHeight));
+        imageMax.x - imageMin.x, imageMax.y - imageMin.y);
     ImGuizmo::SetGizmoSizeClipSpace(.18f);
     ImGuizmo::Enable(!blocked && (hovered_ || usingGizmo_) && !orbiting_ && !panning_ && (!overToolbar || usingGizmo_));
     bool changed = false, gizmoHovered = false;
@@ -528,7 +568,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
     if (canInteract && hovered_ && !usingGizmo_ && !gizmoHovered && !orbiting_ && !panning_ && !io.KeyAlt &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         pickedThisFrame_ = true;
-        const auto hit = closestSurface(viewRay(settings, view, projection), world, assets, materialOverride, meshQueries_).actor;
+        const auto hit = closestSurface(viewRay(settings, view, projection, imageMin, imageMax), world, assets, materialOverride, meshQueries_).actor;
         if ((io.KeyCtrl || io.KeyShift) && hit) {
             // Additive picking mirrors the Outliner: toggle membership and keep
             // the clicked Actor as the primary one.
@@ -553,7 +593,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         XMFLOAT3 minimum, maximum;
         scene::Transform placement;
         XMVECTOR contact;
-        const auto ray = viewRay(settings, view, projection);
+        const auto ray = viewRay(settings, view, projection, imageMin, imageMax);
         if (material && assignMaterial) {
             const auto hit = closestSurface(ray, world, assets, materialOverride, meshQueries_);
             if (const auto* targetActor = world.findActor(hit.actor)) {
@@ -574,7 +614,7 @@ bool ViewportInteraction::draw(renderer::SceneSettings& settings, scene::World& 
         } else {
             if (const auto* accepted = ImGui::AcceptDragDropPayload("RAE_ASSET",
                     ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
-                drawDropPreview(settings, view, projection, placement, contact, minimum, maximum, dropArea.Min, dropArea.Max);
+                drawDropPreview(settings, view, projection, placement, contact, minimum, maximum, imageMin, imageMax, dropArea.Min, dropArea.Max);
                 if (accepted->IsDelivery()) createFromMesh(mesh->id, placement);
             }
         }

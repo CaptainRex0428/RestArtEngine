@@ -421,6 +421,19 @@ struct SceneRenderer::Impl {
     static constexpr UINT shadowMapSize = 2048;
     static constexpr UINT shadowCascadeCount = 2;
     std::uint32_t width = 0, height = 0;
+    std::uint32_t sceneWidth = 0, sceneHeight = 0;
+    struct SceneTargets {
+        ComPtr<ID3D11RenderTargetView> colorTarget;
+        ComPtr<ID3D11Texture2D> color;
+        ComPtr<ID3D11ShaderResourceView> colorView;
+        ComPtr<ID3D11DepthStencilView> depthTarget;
+        ComPtr<ID3D11ShaderResourceView> depthResource;
+        std::array<ComPtr<ID3D11RenderTargetView>, 3> gbufferTargets;
+        std::array<ComPtr<ID3D11ShaderResourceView>, 3> gbufferViews;
+    };
+    // UI draw lists borrow raw SRVs. A target replacement during UI building
+    // must keep every old generation until all platform windows have submitted.
+    std::vector<SceneTargets> retiredSceneTargets;
     std::string adapter;
 
     // Private DX11 diagnostic resources; public snapshots contain no native handles.
@@ -446,15 +459,26 @@ struct SceneRenderer::Impl {
         return !failed(created.As(&swapChain), "Query swap chain", error);
     }
 
-    bool createTargets(std::string& error) {
-        ComPtr<ID3D11Texture2D> texture;
-        if (failed(swapChain->GetBuffer(0, IID_PPV_ARGS(&texture)), "Get backbuffer", error)) return false;
-        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &backbuffer),
-                   "Create backbuffer view", error)) return false;
+    void retireSceneTargets() {
+        if (sceneView) {
+            auto& retired = retiredSceneTargets.emplace_back();
+            retired.colorTarget = std::move(sceneTarget);
+            retired.color = std::move(sceneTexture);
+            retired.colorView = std::move(sceneView);
+            retired.depthTarget = std::move(depth);
+            retired.depthResource = std::move(depthView);
+            retired.gbufferTargets = std::move(gbufferTargets);
+            retired.gbufferViews = std::move(gbufferViews);
+        }
+        sceneWidth = sceneHeight = 0;
+    }
 
+    bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
+        SceneTargets candidate;
+        ComPtr<ID3D11Texture2D> texture;
         D3D11_TEXTURE2D_DESC description{};
-        description.Width = width;
-        description.Height = height;
+        description.Width = targetWidth;
+        description.Height = targetHeight;
         description.MipLevels = 1;
         description.ArraySize = 1;
         // Typeless depth so the editor outline can read it as a float SRV while
@@ -468,13 +492,13 @@ struct SceneRenderer::Impl {
         D3D11_DEPTH_STENCIL_VIEW_DESC depthViewDescription{};
         depthViewDescription.Format = DXGI_FORMAT_D32_FLOAT;
         depthViewDescription.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        if (failed(device->CreateDepthStencilView(texture.Get(), &depthViewDescription, &depth),
+        if (failed(device->CreateDepthStencilView(texture.Get(), &depthViewDescription, &candidate.depthTarget),
                    "Create depth view", error)) return false;
         D3D11_SHADER_RESOURCE_VIEW_DESC depthResourceDescription{};
         depthResourceDescription.Format = DXGI_FORMAT_R32_FLOAT;
         depthResourceDescription.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         depthResourceDescription.Texture2D.MipLevels = 1;
-        if (failed(device->CreateShaderResourceView(texture.Get(), &depthResourceDescription, &depthView),
+        if (failed(device->CreateShaderResourceView(texture.Get(), &depthResourceDescription, &candidate.depthResource),
                    "Create depth resource view", error)) return false;
 
         // Keep scene color separate from the swap chain so docked and floating
@@ -483,9 +507,40 @@ struct SceneRenderer::Impl {
         description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         texture.Reset();
         if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create scene color", error)) return false;
-        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &sceneTarget), "Create scene color target", error)) return false;
-        if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &sceneView), "Create scene color SRV", error)) return false;
-        sceneTexture = texture;
+        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &candidate.colorTarget), "Create scene color target", error)) return false;
+        if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &candidate.colorView), "Create scene color SRV", error)) return false;
+        candidate.color = texture;
+
+        description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        for (std::size_t i = 0; i < candidate.gbufferTargets.size(); ++i) {
+            texture.Reset();
+            if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create G-buffer", error)) return false;
+            if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &candidate.gbufferTargets[i]), "Create G-buffer target", error)) return false;
+            if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &candidate.gbufferViews[i]), "Create G-buffer SRV", error)) return false;
+        }
+        // Publish only a complete target set. Invalid sizes/allocation failures
+        // never replace the texture already borrowed by this frame's UI.
+        retireSceneTargets();
+        sceneTarget = std::move(candidate.colorTarget);
+        sceneTexture = std::move(candidate.color);
+        sceneView = std::move(candidate.colorView);
+        depth = std::move(candidate.depthTarget);
+        depthView = std::move(candidate.depthResource);
+        gbufferTargets = std::move(candidate.gbufferTargets);
+        gbufferViews = std::move(candidate.gbufferViews);
+        sceneWidth = targetWidth;
+        sceneHeight = targetHeight;
+        return true;
+    }
+
+    bool createTargets(std::string& error) {
+        ComPtr<ID3D11Texture2D> texture;
+        if (failed(swapChain->GetBuffer(0, IID_PPV_ARGS(&texture)), "Get backbuffer", error)) return false;
+        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &backbuffer),
+                   "Create backbuffer view", error)) return false;
+        if (!createSceneTargets(width, height, error)) return false;
+        if (shadowTexture) return true;
 
         // A persistent directional shadow map. Keep this independent from the
         // camera depth buffer so it can be sampled by both forward and deferred
@@ -522,14 +577,6 @@ struct SceneRenderer::Impl {
         shadowSrvDescription.Texture2DArray.ArraySize = shadowCascadeCount;
         if (failed(device->CreateShaderResourceView(shadowTexture.Get(), &shadowSrvDescription, &shadowView), "Create shadow map shader view", error)) return false;
 
-        description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        for (std::size_t i = 0; i < gbufferTargets.size(); ++i) {
-            texture.Reset();
-            if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create G-buffer", error)) return false;
-            if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &gbufferTargets[i]), "Create G-buffer target", error)) return false;
-            if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &gbufferViews[i]), "Create G-buffer SRV", error)) return false;
-        }
         return true;
     }
 
@@ -908,12 +955,7 @@ void SceneRenderer::detachWindow() {
     state.resetGeometryViewport();
     if (state.context) { state.context->ClearState(); state.context->Flush(); }
     state.backbuffer.Reset();
-    state.sceneTarget.Reset();
-    state.sceneView.Reset();
-    state.depth.Reset();
-    state.depthView.Reset();
-    for (auto& target : state.gbufferTargets) target.Reset();
-    for (auto& view : state.gbufferViews) view.Reset();
+    state.retireSceneTargets();
     state.swapChain.Reset();
 }
 
@@ -969,20 +1011,34 @@ bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::strin
     error.clear();
     auto& state = *impl_;
     if (!state.swapChain) { error = "Renderer is not initialized."; return false; }
-    if (width == 0 || height == 0 || (width == state.width && height == state.height)) return true;
+    if (width == 0 || height == 0) return true;
+    if (width == state.width && height == state.height) return ensureSceneTargetSize(width, height, error);
     state.resetGeometryViewport();
     state.context->ClearState();
     state.context->Flush();
-    state.backbuffer.Reset(); state.depth.Reset();
-    state.sceneTarget.Reset(); state.sceneView.Reset();
-    state.shadowTexture.Reset(); state.shadowDepth.Reset();
-    for (auto& view : state.shadowDepthSlices) view.Reset();
-    state.shadowView.Reset();
-    for (auto& view : state.gbufferTargets) view.Reset();
-    for (auto& view : state.gbufferViews) view.Reset();
+    state.backbuffer.Reset();
     if (failed(state.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0), "Resize swap chain", error)) return false;
     state.width = width; state.height = height;
     return state.createTargets(error);
+}
+
+bool SceneRenderer::ensureSceneTargetSize(std::uint32_t width, std::uint32_t height, std::string& error) {
+    error.clear();
+    auto& state = *impl_;
+    if (!state.device || !state.context || !state.backbuffer) { error = "Renderer is not initialized."; return false; }
+    if (width == 0 || height == 0 || width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+        error = "Scene target dimensions must be between 1 and 16384 pixels.";
+        return false;
+    }
+    if (state.sceneTexture && width == state.sceneWidth && height == state.sceneHeight) return true;
+    if (!state.createSceneTargets(width, height, error)) return false;
+    state.resetGeometryViewport();
+    ++state.giHistoryEpoch;
+    return true;
+}
+
+void SceneRenderer::releaseRetiredSceneTargets() {
+    impl_->retiredSceneTargets.clear();
 }
 
 bool SceneRenderer::render(const SceneSettings& settings, std::string& error) {
@@ -1211,6 +1267,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         if (diagnosticMainScene) state.failGeometryFrame();
         error = "Renderer has no render target."; return false;
     }
+    // Runtime/fullscreen rendering targets the main swap chain. The editor's
+    // detached scene target may have a different size from the previous frame.
+    if (!settings.editorViewport && !settings.offscreenTarget &&
+        !ensureSceneTargetSize(state.width, state.height, error)) {
+        state.failGeometryFrame();
+        return false;
+    }
     const float editorClear[4] = {0.025f, 0.035f, 0.055f, 1.0f};
     if (settings.editorViewport && (!settings.viewportVisible || settings.viewportWidth < 1 || settings.viewportHeight < 1)) {
         if (diagnosticMainScene) state.resetGeometryViewport();
@@ -1248,10 +1311,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         bool mainScene;
         ~DiagnosticScope() { if (mainScene) state.finishDiagnostics(); }
     } diagnosticScope{state, diagnosticMainScene};
-    const int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(state.width) - 1) : 0;
-    const int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(state.height) - 1) : 0;
-    const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(state.width) - viewportX) : static_cast<int>(state.width);
-    const int viewportHeight = settings.viewportHeight > 0 ? std::clamp(settings.viewportHeight, 1, static_cast<int>(state.height) - viewportY) : static_cast<int>(state.height);
+    const bool sceneTarget = settings.editorViewport || settings.offscreenTarget;
+    const auto targetWidth = sceneTarget ? state.sceneWidth : state.width;
+    const auto targetHeight = sceneTarget ? state.sceneHeight : state.height;
+    const int viewportX = settings.viewportWidth > 0 ? std::clamp(settings.viewportX, 0, static_cast<int>(targetWidth) - 1) : 0;
+    const int viewportY = settings.viewportHeight > 0 ? std::clamp(settings.viewportY, 0, static_cast<int>(targetHeight) - 1) : 0;
+    const int viewportWidth = settings.viewportWidth > 0 ? std::clamp(settings.viewportWidth, 1, static_cast<int>(targetWidth) - viewportX) : static_cast<int>(targetWidth);
+    const int viewportHeight = settings.viewportHeight > 0 ? std::clamp(settings.viewportHeight, 1, static_cast<int>(targetHeight) - viewportY) : static_cast<int>(targetHeight);
     const float pitch = std::clamp(settings.cameraPitch, SceneSettings::minPitch, SceneSettings::maxPitch);
     const float requestedDistance = std::isfinite(settings.cameraDistance) ? settings.cameraDistance : 6.0f;
     const float distance = settings.offscreenTarget ? std::clamp(requestedDistance, 1.5f, 80.0f)
@@ -1283,7 +1349,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     data.parameters = XMFLOAT4(std::clamp(settings.roughness, 0.04f, 1.0f),
         std::clamp(settings.metallic, 0.0f, 1.0f), settings.exposure,
         (settings.rayTracing && rayTracingSupported(world, assets)) ? 1.0f : 0.0f);
-    data.viewportDebug = XMFLOAT4(static_cast<float>(state.width), static_cast<float>(state.height),
+    data.viewportDebug = XMFLOAT4(static_cast<float>(targetWidth), static_cast<float>(targetHeight),
         static_cast<float>(settings.debugView), static_cast<float>(settings.shadowMethod == ShadowMethod::Disabled ? 2 :
             settings.shadowMethod == ShadowMethod::AnalyticRay ? 1 : 0));
     state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
@@ -1548,7 +1614,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.beginDiagnosticPass("Selection masks");
 
         if (!state.outline) { error = "Selection outline is not initialized."; return false; }
-        if (!state.outline->prepare(state.width, state.height, error)) return false;
+        if (!state.outline->prepare(targetWidth, targetHeight, error)) return false;
         const auto drawSelected = [&] {
             return state.drawSelectedGeometry(settings.outlineActors, settings.outlineActorCount, world, assets, error);
         };
@@ -1716,6 +1782,7 @@ void SceneRenderer::resetGlobalIllumination() {
 }
 
 bool SceneRenderer::present(bool vsync, std::string& error) {
+    releaseRetiredSceneTargets();
     error.clear();
     if (!impl_->swapChain) { error = "Renderer is not initialized."; return false; }
     const bool result = !failed(impl_->swapChain->Present(vsync ? 1 : 0, 0), "Present", error);
@@ -1807,8 +1874,8 @@ void SceneRenderer::shutdown() {
 ID3D11Device* SceneRenderer::device() const { return impl_->device.Get(); }
 ID3D11DeviceContext* SceneRenderer::context() const { return impl_->context.Get(); }
 void* SceneRenderer::sceneTexture() const { return impl_->sceneView.Get(); }
-std::uint32_t SceneRenderer::sceneTextureWidth() const { return impl_->width; }
-std::uint32_t SceneRenderer::sceneTextureHeight() const { return impl_->height; }
+std::uint32_t SceneRenderer::sceneTextureWidth() const { return impl_->sceneWidth; }
+std::uint32_t SceneRenderer::sceneTextureHeight() const { return impl_->sceneHeight; }
 std::string SceneRenderer::adapterName() const { return impl_->adapter; }
 bool SceneRenderer::validationEnabled() const { return impl_->infoQueue != nullptr; }
 

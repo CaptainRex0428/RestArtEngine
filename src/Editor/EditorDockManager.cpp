@@ -143,8 +143,8 @@ void EditorDockManager::keepAlive() {
 
 void EditorDockManager::drawPanel(EditorPanel panel, const std::function<void()>& contents) {
     // Placement is owned by DockSpace and floating window settings. Never set
-    // positions every frame: that would prevent undocking and native reflow.
-    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+    // positions or a viewport every frame: detached panels must be able to
+    // cross the main window boundary and automatically return to a dock host.
     if (ImGui::Begin(panelName(panel), nullptr, ImGuiWindowFlags_NoCollapse)) contents();
     ImGui::End();
 }

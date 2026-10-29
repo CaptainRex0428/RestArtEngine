@@ -100,7 +100,6 @@ void DiagnosticsPanel::draw(renderer::SceneRenderer& renderer) {
     focused_ = false;
     renderer.setDiagnosticsEnabled(open_ || diagnostics::profiler().isRecording());
     if (!open_) return;
-    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGui::SetNextWindowSize({840, 680}, ImGuiCond_FirstUseEver);
     if (focusRequested_) { ImGui::SetNextWindowFocus(); focusRequested_ = false; }
     const bool visible = ImGui::Begin("Diagnostics##RestArtEngine.Diagnostics", &open_);

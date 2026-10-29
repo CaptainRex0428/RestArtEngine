@@ -83,6 +83,8 @@ struct SceneSettings {
     // 5..10: Roughness, Metallic, Specular F0, Linear depth (0..100m),
     // Direct diffuse, Direct specular. Data modes bypass exposure/tone mapping.
     int debugView = 0;
+    // Pixels in the selected render target, not desktop/window coordinates.
+    // An external editor Scene Viewport starts at (0,0) in its scene texture.
     int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
     // Editor panels composite the scene texture through their own window draw
     // list. An inactive dock tab must not fall back to fullscreen rendering.
@@ -123,6 +125,13 @@ public:
     bool initialize(HWND__* window, std::uint32_t width, std::uint32_t height,
                     std::string& error);
     bool resize(std::uint32_t width, std::uint32_t height, std::string& error);
+    // The editor's scene texture can outgrow or move outside the main swap
+    // chain. Call before borrowing sceneTexture() into a UI draw list. Failure
+    // retains the previous scene targets and never resizes the swap chain.
+    bool ensureSceneTargetSize(std::uint32_t width, std::uint32_t height, std::string& error);
+    // After all main/platform UI submissions, or between frames. Present also
+    // releases these retired targets. Never call while UI draw lists are pending.
+    void releaseRetiredSceneTargets();
     // Binds the renderer to another window, rebuilding only the swap chain and
     // window-sized targets. The device, shaders and GPU caches are reused.
     bool attachWindow(HWND__* window, std::uint32_t width, std::uint32_t height, std::string& error);
@@ -188,8 +197,9 @@ public:
     void shutdown();
     ID3D11Device* device() const;
     ID3D11DeviceContext* context() const;
-    // D3D11 SRV borrowed until resize/shutdown. Available before the UI builds
-    // its draw list; render() fills it before the UI submits that draw list.
+    // D3D11 SRV borrowed until target replacement/shutdown. Replaced scene SRVs
+    // remain alive until releaseRetiredSceneTargets()/Present, after UI submit.
+    // render() fills it before the UI submits that draw list.
     void* sceneTexture() const;
     std::uint32_t sceneTextureWidth() const;
     std::uint32_t sceneTextureHeight() const;
