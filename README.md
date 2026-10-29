@@ -28,6 +28,8 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 工程（`.raproject`）是**纯数据**：`Content/` 场景与材质、工程自己的 `Shaders/`。它不包含 C++ 代码，也不生成自己的 `.sln`；编译引擎永远只打开仓库根目录的 `RestArtEngine.sln`。
 
+引擎长期目标是同时支持 **PBR 与 NPR 两套渲染体系**：共享适用的管线基础，并保留各自的着色与 Feature 差异。当前已有 PBR 着色基础，NPR 体系及双体系组合尚未实现；完整目标与边界见 [渲染开发要求](docs/RenderingDevelopment.md#pbr-与-npr-双体系目标)。
+
 ## 目录
 
 - [特性](#特性)

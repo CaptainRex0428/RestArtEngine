@@ -196,6 +196,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 ## 渲染边界与扩展位置
 
+长期目标是支持 PBR 与 NPR 两套渲染体系：共享适用的底层资源、Shader 系统和管线阶段，同时允许独立的材质模型、Pass 组合与专属 Feature。体系选择、Forward／Deferred 路径及图形后端分别建模；当前 PBR 着色基础与编辑器描边不代表完整双体系已实现。目标、兼容约束与待设计范围统一见 [PBR 与 NPR 双体系目标](RenderingDevelopment.md#pbr-与-npr-双体系目标)。
+
 性能 Trace、帧事件/资源检查和视口数据可视化共用诊断语义，模块分工、捕获生命周期与实施边界见 [Diagnostics.md](Diagnostics.md)。Core 负责 CPU Trace，Renderer 负责真实渲染数据，Editor 负责工具界面；诊断状态不写入场景或材质资产。
 
 前向和延迟两条路径共享材质表达。延迟路径写入三个 G-buffer：Albedo / Roughness、World Normal / Metallic、World Position / Coverage，再进行光照。Lit、Unlit 和调试视图均从该基础上工作。
