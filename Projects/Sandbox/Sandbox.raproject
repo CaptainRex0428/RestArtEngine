@@ -8,5 +8,17 @@
   "engineHash": "dev-0.2.0",
   "contentRoot": "Content",
   "shaderRoot": "Shaders",
-  "defaultScene": "Content/Scenes/Default.rascene"
+  "defaultScene": "Content/Scenes/Default.rascene",
+  "rendering": {
+    "hardwareRayTracing": true,
+    "globalIllumination": {
+      "method": "pathTracing",
+      "mode": "realtime",
+      "indirectDiffuse": true,
+      "indirectSpecular": true,
+      "samplesPerFrame": 4,
+      "targetSamples": 512,
+      "maxBounces": 4
+    }
+  }
 }
