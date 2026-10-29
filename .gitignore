@@ -114,6 +114,8 @@ RestArtEngine.panels.ini
 .aider*
 .mcp.json
 AGENTS*.md
+# Public optional-workspace entry; full instructions remain in ignored local/.
+!/AGENTS.md
 CLAUDE*.md
 GEMINI.md
 SKILL.md
