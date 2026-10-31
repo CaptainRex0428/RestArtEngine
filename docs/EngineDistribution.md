@@ -2,6 +2,10 @@
 
 RestArtEngine 的运行时和工程内容是两个可移动的包。`RestArtEngine.exe` 是引擎工程管理器和编辑器程序；`.raproject` 是工程入口文件，记录工程自己的 Content、Shader、场景以及所依赖的引擎身份。工程不需要把引擎源码或引擎资产复制进去。
 
+![Project Manager](images/project-manager.png)
+
+*发布后的入口仍是同一个 exe：Project Manager 读取工程列表并按 `engineAssociation` 解析引擎；引擎目录和工程目录可以分别移动，重新绑定后列表照常可用。*
+
 ## 两种目录
 
 一个可发布的引擎目录可以是：

@@ -2,6 +2,10 @@
 
 本文件记录核心渲染开发的已确认要求、源码现状及待讨论方案。现有工程架构仍以 [Architecture.md](Architecture.md) 和 [README.md](../README.md) 为准；这里的拟议目录和接口不会自动成为已实现能力。
 
+![Forward 与 Deferred 对比](images/forward-deferred-compare.png)
+
+*同一测试场景的 Forward 与 Deferred。两条路径共享材质与光照定义，平均像素差在自测阈值内；依赖 UV 或像素导数的材质会偏离，这是管线结构决定的，不是回归。*
+
 ## 已确认范围
 
 - 最终支持 PBR（基于物理的渲染）与 NPR（非真实感／风格化渲染）两套渲染体系；共享适用的管线基础，同时保留各自的着色模型、Pass 与 Feature 差异。
@@ -64,6 +68,10 @@
 
 实时预览与持久化分开。当前材质编辑器将有效草稿作为每帧只读覆盖交给渲染器，按材质 ID 同时用于光栅、解析光追与三角形光追，不修改已提交资产。Apply 提交内存中的资产状态，Save 写当前工程磁盘，Discard 恢复最近已提交参数；切材质弹窗中的 Cancel 保留原草稿和预览。切换资产、共享材质、多视图和后端重建时，不能把预览误当成已保存数据。
 
+![材质编辑器](images/material-editor.png)
+
+*独立系统窗口中的材质编辑器：左上为 160 px GPU 球体实时预览，下方是参数草稿、Apply / Save / Discard 与每材质 Cull / ZTest / ZWrite。拖动参数时所有引用该材质的 Actor 同步预览，已提交资产与磁盘保持不变。*
+
 验收需检查界面操作到实际 GPU 画面的整条链：在有可见影响的测试场景持续调参，并验证恢复原值；涉及草稿时验证 Apply／Save／Cancel，涉及资源重建时验证 resize、切管线或切后端后的值。仅 CPU 数值变化不算通过。
 
 ### 4. 可扩展与可移植
@@ -83,6 +91,7 @@
 | 项目 | 源码现状 | 后续缺口 |
 | --- | --- | --- |
 | 场景渲染 | `SceneRenderer` 实际使用 D3D11，支持 Forward／Deferred。 | 与后端资源、命令和呈现接口尚未统一。 |
+| 管线组合 | `RenderPipeline` 声明 Pass 顺序与资源读写边，`SceneRenderer` 按声明执行并驱动诊断标签；`RenderFeatures` 提供构建可用性／设备能力／帧前置条件三层状态与阻塞原因。首轮仅抽出阴影阶段。 | 其余 Pass 仍在执行器的 `switch` 中；资源所有权、自动屏障、Render Graph 与 RHI 尚未实现，见 [RenderPipeline](RenderPipeline.md)。 |
 | PBR／NPR 体系 | 已有 metallic／roughness 材质与 PBR 着色基础；编辑器 outline 用于选择／拖放反馈。 | 完整 PBR 能力清单仍需明确；NPR 材质模型、专属 Feature 与双体系组合机制尚未实现。 |
 | 后端接口 | `IRenderBackend` 包含多 API 类型与生命周期占位；独立 DX12／DXR 1.1 通道通过共享图像接入 DX11 场景。 | 尚无完整 DX12、Vulkan、OpenGL 场景后端切换；枚举不等于可用实现。 |
 | 硬件光追 | 项目配置总开关及独立反射／阴影开关；实际 DXR RayQuery、BLAS／TLAS、共享材质与实时草稿。 | 当前仅 Windows 同适配器 DX11／DX12 组合；能力与限制见 [HardwareRayTracing](HardwareRayTracing.md)。 |
@@ -139,7 +148,7 @@ macOS 的 Vulkan 设计需要考虑可移植实现的能力差异。[Khronos Por
 
 ## 拟议职责与目录（待讨论）
 
-下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，尚未全部按此拆分目录。
+下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，尚未全部按此拆分目录。其中「基础 Pass」「管线组合」已有首轮实现（`src/Renderer/Passes/`、`src/Renderer/Pipelines/`，仅声明与阴影阶段），其余仍为设计目标。
 
 | 职责 | 拟议位置 | 边界 |
 | --- | --- | --- |

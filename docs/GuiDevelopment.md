@@ -2,6 +2,10 @@
 
 本页是 RestArtEngine GUI 的设计、实现与验收入口，覆盖 Project Manager、启动加载页和编辑器工作区。下述默认风格延续现有实现，可以随具体设计任务演进。下述质量目标与当前已实现能力分别说明。
 
+![停靠布局](images/dock-layout.png)
+
+*把 Content & Editors 停靠到右侧后的布局：面板可以分割、并标签、拖出主窗口成为系统窗口；尺寸与位置由本机 `imgui.ini` 保存。*
+
 产品和模块边界见 [README](../README.md)、[Architecture](Architecture.md)，操作行为见 [EditorGuide](EditorGuide.md)，命令和事务见 [UndoTransactions](UndoTransactions.md)。实现状态以对应源码为准，测试入口与覆盖要求见本页验收部分。
 
 ## 工程结构与现有能力

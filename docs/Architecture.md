@@ -2,6 +2,10 @@
 
 本工程面向技术美术的材质与渲染实验。当前编辑器通过 DX11 绘制 Actor 场景，使用 Dear ImGui 提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
 
+![编辑器工作区](images/editor.png)
+
+*当前实现的工作区：World Outliner、Scene + Details、Viewport settings、Content & Editors、Scene Viewport，对应下表的模块划分。*
+
 > 命名约定：产品与所有工程文件使用全称 **RestArtEngine**（`RestArtEngine.exe`、`RestArtEngine.sln`、`RestArtEngine.vcxproj`、`RestArtEngine.rc`、`RestArtEngineProject.json`、`include/RestArtEngine/`）。只有文件扩展名与格式标识保留 `RA` 缩写：`.raproject`、`.rascene`、`.ramat`、`.raeengine`、JSON `format`（`RAEngine.*`）、命名空间 `rae`、注册表目录 `%LOCALAPPDATA%\RAEngine`。
 
 ## 目录约定
@@ -15,6 +19,9 @@
 | `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、网格／灯光组件与场景序列化；不依赖 ImGui 或 DX11。 |
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、统一 OBJ／FBX 导入与资产文件读写；导入契约见 [Importing.md](Importing.md)。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
+| `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/` | 一帧的 Pass 顺序、资源读写边、组合与校验；只描述结构与依赖，不持有 GPU 资源。 |
+| `src/Renderer/Passes/` | 已抽出的渲染阶段（当前为阴影深度图）；DX11 绑定由调用方提供，资源所有权仍属渲染器。 |
+| `include/RestArtEngine/Renderer/RenderFeatures.h`、`src/Renderer/RenderFeatures.cpp` | 构建可用性／设备能力／帧前置条件三层特性状态与阻塞原因。 |
 | `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Scene / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
 | `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
@@ -201,6 +208,8 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 长期目标是支持 PBR 与 NPR 两套渲染体系：共享适用的底层资源、Shader 系统和管线阶段，同时允许独立的材质模型、Pass 组合与专属 Feature。体系选择、Forward／Deferred 路径及图形后端分别建模；当前 PBR 着色基础与编辑器描边不代表完整双体系已实现。目标、兼容约束与待设计范围统一见 [PBR 与 NPR 双体系目标](RenderingDevelopment.md#pbr-与-npr-双体系目标)。
 
+一帧的 Pass 顺序与资源依赖由 `RenderPipeline` 声明、由 `SceneRenderer` 按声明执行；声明同时驱动诊断标签、文档表格与 CPU 测试，新增 Pass／特性的落点见 [渲染管线组合层](RenderPipeline.md)。当前仍为 DX11 即时执行，尚无 Render Graph、自动屏障或 RHI 资源抽象。
+
 性能 Trace、帧事件/资源检查和视口数据可视化共用诊断语义，模块分工、捕获生命周期与实施边界见 [Diagnostics.md](Diagnostics.md)。Core 负责 CPU Trace，Renderer 负责真实渲染数据，Editor 负责工具界面；诊断状态不写入场景或材质资产。
 
 前向和延迟两条路径共享材质表达。延迟路径写入三个 G-buffer：Albedo / Roughness、World Normal / Metallic、World Position / Coverage，再进行光照。Lit、Unlit 和调试视图均从该基础上工作。
@@ -248,6 +257,9 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 | 网格导入、材质资产与资产文件格式 | `src/Assets/AssetLibrary.cpp`、`src/Assets/AssetSerialization.h` |
 | 工程格式、引擎身份、引擎注册表 | `src/Project/Project.cpp` |
 | DX11 资源、G-buffer、阴影、光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
+| 渲染管线组合、Pass 顺序与资源依赖 | `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/ScenePipeline.cpp`；声明同时驱动诊断标签、文档表格与 CPU 测试 |
+| 单个渲染阶段的实现 | `src/Renderer/Passes/`；执行分支仍在 `src/Renderer/SceneRenderer.cpp` |
+| 特性可用性、降级与阻塞原因 | `include/RestArtEngine/Renderer/RenderFeatures.h`、`src/Renderer/RenderFeatures.cpp` |
 | 材质开放函数 | `Shaders/Materials/Standard.hlsli` 的 `EvaluateMaterial()` |
 | 编辑器面板、草稿 / Apply / Save | `src/Editor/SceneEditor.cpp` |
 | 固定底栏、会话输出、引擎命令解析与补全 | `src/Editor/EditorStatusBar.cpp`、`src/Editor/EditorConsole.cpp`；命令复用现有编辑器动作，布局预留由 `EditorDockManager` 管理 |
@@ -270,6 +282,19 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 新增警告先查原因与影响，不以全局降级警告等级、`/IGNORE:4006` 或 `/FORCE:MULTIPLE` 代替修复。第三方代码确需局部豁免时限定到具体文件／告警编号并解释原因。微软的 [LNK4006 文档](https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-warning-lnk4006?view=msvc-170) 明确指出合并导入库可能导致重复符号；CMake 链接接口语义见 [target_link_libraries](https://cmake.org/cmake/help/latest/command/target_link_libraries.html)。
 
 涉及归档／链接依赖的改动，应重新生成并执行实际 Rebuild，检查最终程序也能完成链接，不能仅凭增量构建“无任务”判断警告已修复。验证时注明构建配置与覆盖范围。
+
+### 文档的四层
+
+每篇公开文档至少回答四件事，顺序按内容调整：
+
+| 层 | 回答什么 | 常见落点 |
+| --- | --- | --- |
+| 原理 | 它怎么工作、为什么这样拆 | 数据流、资源与常量契约、Pass 顺序 |
+| 使用 | 怎么打开、怎么调、失败先看哪里 | 面板入口、CLI、项目配置 |
+| 生产 | 代价多大、边界在哪、怎么验收 | 显存／样本预算、回退行为、验证入口 |
+| 迭代 | 加功能从哪改、下一步做什么 | 扩展点、缺口清单、路线 |
+
+截图是前两层的辅助证据，放在 `docs/images/`，由 README 选代表图；只放当前构建的实拍，不用示意图冒充实拍。文档与功能同一次提交更新，宁可少写，也不留下与代码不符的描述。
 
 ### 必须守住的约定
 

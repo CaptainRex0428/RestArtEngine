@@ -4,6 +4,10 @@
 
 配置页分别显示设备支持、请求值、实际状态及不可用原因。不支持的设备保留项目请求值，使用现有渲染路径；运行失败保留光栅画面，关闭再开启可重试。解析式反射移到同页的 `Compatibility preview`，是会话设置，不能代表硬件光追。
 
+![硬件光追关闭与开启](images/hrt-compare.png)
+
+*同一 Cornell Box：左侧关闭硬件光追，只有光栅化的直接光；右侧由 DX12／DXR 1.1 通道执行路径追踪，间接反弹、粗糙反射和可见发光面都来自这条通道。*
+
 ## 项目格式
 
 工程版本 1／2／3 均可省略以下对象，默认关闭硬件光追及 GI，两个独立预览效果默认开启：
@@ -83,3 +87,11 @@ RestArtEngine.exe --project Projects/Sandbox --no-hardware-rt
 
 
 多材质网格按 section 的 Slot 填入有效材质，Actor override 和只读草稿同样参与。`RayTriangle.color.w` 为 UV 查询索引的位模式（零表示无 UV），不是 alpha；CPU/HLSL 必须用位转换保持一致。四套 UV 在命中点重心插值后进入 `Surface.uv0..uv3` 与 `uvMask`，工程 `EvaluateMaterial` 入口不变。UV 资源上传、反射、根签名和历史签名随整套候选一起更新；Shader 失败仍保留上次有效管线。
+
+## 迭代与扩展
+
+新增一个硬件效果通常只动这条通道：`HardwareRayTracing.cpp` 的常量打包（b5，208 字节）、`HardwareRayTracing.hlsl` 的 `CSMain` 分支、共享图像的用途位，以及 `RenderFeatures` 的条目。GI 的算法枚举、项目配置和 UI 在这里汇合，新增算法时不要绕过 `GlobalIlluminationMethod` 直接加开关，否则诊断面板无法告诉你它为什么没生效。
+
+风险最高的是资源与同步：共享图像格式、fence 等待、命令 allocator 复用都在 `HardwareRayTracing.cpp`。改完要跑 `--hardware-rt-self-test` 和 `--gi-self-test`，并确认降级路径仍然保留光栅画面——真实故障里最常见的不是花屏，而是黑屏或挂起。加速结构目前每次几何变化整场重建，按 Mesh BLAS 实例化的优化还没做。
+
+没做的清单单独列出来：DispatchRays/SBT（当前是内联 `RayQuery`）、运动重投影、透明与 alpha-test、蒙皮、Vulkan 光追、多视图历史。这些不是配置项，每一项都要单独设计，别在提交说明里写成「已支持」。

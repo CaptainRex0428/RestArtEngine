@@ -1,5 +1,9 @@
 # 基础场景与材质编辑器
 
+![材质编辑器](images/material-editor.png)
+
+*独立材质编辑器系统窗口：左上为 GPU 球体实时预览，下方是参数草稿、Apply / Save / Discard 与每材质 Cull / ZTest / ZWrite；Shader 页签编辑工程自己的 `Standard.hlsli`。*
+
 启动时先出现无边框加载页（占主屏 28% 宽、按图片比例、居中），加载完成后面板窗口按主屏 80% 大小居中显示，带原生边框与自定义标题栏。在 Rider 打开根目录 `RestArtEngine.sln`，编译并运行 `RestArtEngine`（输出文件名为 `RestArtEngine.exe`）。无参数启动会先进入 Project Manager；选择工程后再进入编辑器。本页解释当前基础编辑器的数据关系、保存方式，以及引擎内编辑 HLSL 后 Apply 的工作流。界面使用 Dear ImGui；功能代码位于 `src/Editor/`。
 
 工程管理器列出 `Projects/` 下的所有示例工程（`Sandbox`、`RayTracing_Simple`、`PathTracing_CornellBox`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。

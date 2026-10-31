@@ -2,6 +2,10 @@
 
 RestArtEngine 的诊断设计覆盖性能、帧执行与画面数据三个方向。它们共享帧身份和渲染语义，界面统一从 `Debug` 进入。
 
+![Profiler 与 Pass 声明](images/diagnostics.png)
+
+*`Debug → Diagnostics` 的 Profiler 页：CPU Trace 控制与最近 120 帧 wall time、Live renderer 统计（帧号、提交时间、draw 数、提交三角形），以及当前主场景帧的 Pass 声明表与生效特性计数。关闭窗口后不再持续复制渲染资源。*
+
 首版已接入 CPU Trace、DX11 GPU Pass 计时、Frame Inspector 和下述实时视口模式。本文另行标记后续设计；当前真实场景后端为 Windows / DX11，DX12、Vulkan、OpenGL 尚未接入场景渲染。
 
 ## 三种工具的职责

@@ -8,6 +8,10 @@
 >
 > 缩略图：保存资产时用 CPU 光栅化生成 64×64 RGBA8（网格取最大两个轴向正交投影，材质为着色球），作为 `thumbnail` 数据块写入清单；Content 面板直接读取绘制，缺失时回退线框图标。场景缩略图不写进场景 JSON：通过带 renderer 的保存路径（如 `Save All`）用 GPU 渲染 128px 写到同目录 `<scene>.rthumb`（magic `RTHB`，已 gitignore），缺失时回退 Actor 布局的 CPU 示意图。内置网格随引擎存放在 `Content/Meshes/*.rasset`；编辑器启动不再生成项目 `Meshes/Builtin`，旧文件和旧 ID 仍可读取。容器读写库在 `src/Assets/AssetFile.cpp`。
 
+![Content 浏览器](images/content-browser.png)
+
+*Content 的网格视图：Engine 的六个基础网格直接显示容器里的 64² 缩略图与类型标签，浏览时不解码几何数据块。*
+
 ## 目标
 
 - **自包含**：几何、材质参数、缩略图与元数据放在同一个文件里，可以整体复制、移动、提交版本库，不依赖外部 OBJ 与场景内嵌副本。

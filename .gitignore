@@ -98,6 +98,7 @@ RestArtEngine.panels.ini
 !/docs/GuiDevelopment.md
 !/docs/ProjectManagement.md
 !/docs/RenderingDevelopment.md
+!/docs/RenderPipeline.md
 !/docs/Lighting.md
 !/docs/HardwareRayTracing.md
 !/docs/GlobalIllumination.md
@@ -108,6 +109,10 @@ RestArtEngine.panels.ini
 /docs/vendor/*
 !/docs/vendor/ImGuizmo.md
 !/docs/vendor/imgui.md
+
+# README screenshots (captured from the engine, referenced by README.md)
+!/docs/images/
+!/docs/images/*.png
 
 # Local tool configuration (at any depth)
 .agents/

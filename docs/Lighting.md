@@ -2,6 +2,10 @@
 
 灯光是带 `LightComponent` 的 Actor，与静态网格 Actor 共用稳定 ID、名称、可见性和 Transform。Scene 数据不依赖编辑器或图形 API；GPU 打包位于 `Renderer/Lighting`，共享采样位于 `Shaders/Private/Lighting.hlsli`。
 
+![矩形顶灯与路径追踪](images/pathtracing-cornell.png)
+
+*PathTracing_CornellBox 的矩形顶灯是唯一光源。普通光栅用四点面积近似，Progressive PathTracing 用面积／BRDF 采样与 MIS，因此这里能看到可见发光面本身，以及金属球上对顶灯的锐利反射。*
+
 ## 创建与编辑
 
 在 Outliner 的 `+ Light` 菜单创建灯光；窄或矮面板中入口收进 `+ Add / Actions → Light`。选中后在 Details 调整参数。灯光可在 Outliner 或视口标记上选择，支持移动／旋转 Gizmo、F 聚焦、复制、删除和撤销重做。颜色、强度等属性实时更新，不需要保存或重新编译 Shader；保存场景才写入磁盘。
@@ -39,3 +43,11 @@ Sky 是现有程序化环境的颜色与能量控制，不包含 HDRI 导入、�
 GPU 契约为独立 `LightingConstants`（b7），包含计数与模式、Sky 累加值和 32 个 96 字节光源，总计 3104 字节。Shader 热编译校验布局，普通参数通过常量更新。硬件 GI 历史键包含完整灯光数据；改变颜色、强度、方向、位置或可见性会失效累积，不需要重建不变的网格几何。
 
 当前运行后端是 Windows D3D11 及其 DX12/DXR 通道；平台无关场景数据不表示 Vulkan、OpenGL、Linux 或 macOS 已实现。验证入口为 `--lighting-self-test`、`--gi-self-test` 与 `--editor-self-test`，均应使用隔离工程。
+
+## 扩展与迭代
+
+新增灯型要从枚举一路改到 Shader：`Scene/Light.h` 加类型与字段，`World.cpp` 的 v4 序列化读写，`Renderer/Lighting.cpp` 的 96 字节 `GpuLight` 打包与 3104 字节 `LightingConstants`，`Lighting.hlsli` 的结构镜像，`Scene.hlsl` 的光栅估计器，`PathTracing.hlsli` 的 NEE/MIS 分支，编辑器的创建菜单和 Details 子面板，最后是本页表格与 `--lighting-self-test`。字段增加会改变 b7 大小，必须同步 `static_assert`、HLSL 布局和反射校验，否则候选管线会直接编译失败。
+
+比新增灯型更常见的改动是替换光栅估计器。矩形光现在是四点积分，不是 LTC；换成 LTC 要同时改 `Lighting.hlsli`、路径追踪的面积采样和本页的取舍说明，否则两条路径的柔度会对不上。局部光的独立阴影贴图是更大的缺口，得先给管线加每灯资源，再处理 Forward/Deferred 与 CSM 的交互，不是加个分支就能收尾。
+
+迭代时守住两条：灯光变化不能让网格几何重建，只让 GI 历史失效；新增字段必须进 `HistoryKey`，否则画面会继续用旧光照的样本。这两条比功能本身更容易被忽略。

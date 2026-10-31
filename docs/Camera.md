@@ -2,6 +2,10 @@
 
 视口、场景相机和工具预览共用平台无关的相机求值。Camera Actor 沿局部 `-Z` 观察，`+Y` 向上；Actor 的缩放不改变镜头。当前运行后端为 Windows DX11 与可选 DX12/DXR，其他平台和完整 RHI 后端尚未接通。
 
+![四分屏视图](images/quad-view.png)
+
+*Sandbox 的四分屏：Perspective + Top / Front / Right，每格独立保留相机与曝光；激活格承载 DXR / GI 历史，其余格标注 `Raster`。*
+
 ## 使用
 
 - Outliner 的 `+ Add` 菜单创建相机；从当前视图创建会复制当前位置、朝向与镜头。选中相机在 Details 中编辑透视/正交、垂直 FOV、正交高度、近远裁剪和宽高比。
@@ -62,3 +66,11 @@ Camera Actor、默认相机引用或扩展镜头/姿态书签使用 `.rascene` *
 ## 验证入口
 
 `CameraMathTests` 验证投影、射线、旋转和数值边界；`CameraPersistenceTests` 验证往返、旧版本和失败原子性。`--camera-self-test --capture-dir <目录>` 执行真实 GPU 投影、裁剪、预览、景深焦平面/光圈、四路输出及 GI 历史检查；`--editor-self-test` 覆盖 Camera 创建、镜头控件、查看/操纵、撤销、正交拾取、预览、四格输入/最大化和保存重开。测试应使用隔离工程。
+
+## 扩展与迭代
+
+相机数据在 `Camera.h` 里是纯数学：`Pose`、`Lens`、`View`、`Ray`。新增镜头字段从 `evaluate()` 和 `screenRay()` 开始，再到 `SceneConstants`（b0，176 字节）与 HLSL 镜像，最后补 `static_assert` 和反射校验。视口相关的功能走 `SceneEditorViewports.inl`：四格的相机、镜头、曝光和 `viewId` 都在那里分配，新增视图要先决定它是否拥有 GI 历史——当前只有激活格有。
+
+景深扩展要分清两条实现。光栅端改 `DepthOfField.hlsli` 与 b8 常量（32 字节），路径追踪端改 `PathTracing.hlsli` 的孔径采样；只改一边不能算支持景深。
+
+还没做的：每视图独立的 DXR 历史、相机动画与轨道、镜头畸变、逐显示器字体 DPI。做多历史之前先解决内存和失效键的组织方式，否则每次切格都会重置累积，渐进模式永远停在开头。

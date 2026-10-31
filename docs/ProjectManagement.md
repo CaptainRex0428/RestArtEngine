@@ -2,6 +2,10 @@
 
 RestArtEngine 的可执行引擎和用户工程是两个独立目录。引擎根目录包含 `RestArtEngine.exe`、`Shaders/Private/`、默认材质模板和 `Engine.raeengine`；工程目录包含 `.raproject`、`Content/`、工程 Shader 和场景。工程不会把用户资产写回引擎目录，因此同一份引擎可以被多个工程复用，也可以把引擎单独发布。`RestArtEngine.exe` 同时是 Project Manager 和编辑器，没有单独的项目管理程序，也没有单独的运行时库。
 
+![Project Manager](images/project-manager.png)
+
+*Project Manager：打开已有工程、从引擎工程模板创建，或直接从示例工程列表进入。窗口固定 1080×720 并居中，和加载页、编辑器窗口使用同一套定位规则。*
+
 启动器窗口保持 1080×720 的固定大小，在主屏正中间打开（`primaryMonitorRect` + `centredWindowRect`），和加载页、编辑器窗口的居中规则一致。
 
 ## 引擎身份

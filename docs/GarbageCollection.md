@@ -2,6 +2,10 @@
 
 资源 GC 按可配置周期回收闲置派生缓存和已登记的过期临时截图。C++ 对象仍按 RAII 生命周期管理；这不是扫描堆中任意指针的追踪式对象 GC，也不会删除 Actor、CPU 资产、材质草稿或撤销历史。
 
+![GC 设置窗口](images/gc-settings.png)
+
+*`UI → Garbage collection...`：检查周期、闲置时间和临时截图保留时间以草稿形式编辑，`Apply & save` 才写盘；`Collect now` 手动触发一次，结果里的 CPU 内存与具体类别对应回收内容。*
+
 ## 配置与操作
 
 编辑器 `UI → Garbage collection...` 打开设置窗口。编辑值先保留为草稿，`Apply & save` 验证并保存后生效；保存失败恢复旧运行设置并保留草稿。`Discard draft` 放弃设置草稿，关闭窗口不提交。

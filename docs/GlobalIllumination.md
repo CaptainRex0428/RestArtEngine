@@ -10,6 +10,10 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
 
+![GI 关闭与开启对比](images/gi-compare.png)
+
+*同一 Cornell Box、同一相机与曝光：左为关闭 GI 的光栅结果，右为路径追踪。间接反弹、金属球的粗糙反射、以及矩形发光面本身的可见性都在右边出现；关闭时主画面不会绘制那块发光面。*
+
 ## 配置入口
 
 打开 `Project → Project Settings... → Rendering`（F3），将 `GI method` 设为 `Path tracing`，会同时启用硬件光追。再通过 `GI mode` 选择更新模式。关闭硬件开关保留 GI 偏好。普通数值、材质草稿、场景和相机变化自动更新，无需 Apply 或保存；`Save project settings`／`Save All` 将请求写入 `.raproject`。
@@ -73,6 +77,10 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 进度显示已提交样本数与目标。提高目标可继续已有历史；将目标降到当前计数以下会重新开始。提高每帧采样量或反弹数会增加交互延迟，不能承诺固定帧率或固定时间收敛。
 
+![Cornell Box 渐进路径追踪](images/pathtracing-cornell.png)
+
+*PathTracing_CornellBox：渐进模式累积 3840 样本（240 帧 × 16 spp）。矩形顶灯同时是直接光估计器和相机可见的发光面；红 / 绿侧墙的颜色溢出来自多次表面反弹，金属球反射包含完整光传输。*
+
 ### Realtime
 
 该模式每帧持续计算配置的样本批次，输出**只包含间接光的线性 HDR 缓冲**。Forward 和 Deferred 在各自的光照阶段读取该缓冲，并与当前光栅直接光组合后统一做曝光及显示转换。主表面直接光、其阴影和背景继续由当前光栅设置负责；间接路径的次级直接光仍执行遮挡测试，避免反弹光穿过遮挡物。
@@ -80,6 +88,10 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 `History samples` 限制历史累积权重。达到窗口上限后样本序列仍继续前进，历史通过有界权重持续更新，不进入“已收敛并停止”的状态。相机或场景变化使历史整体失效；当前没有运动重投影，移动时不能继续复用旧视角的样本。
 
 实时解析使用 5×5 空间滤波，按法线、表面平面距离、albedo 和粗糙度抑制跨几何／材质边缘混合。粗糙度小于 0.12 的近镜面接收表面跳过空间模糊，以保留反射清晰度。它可以降低噪声，但不保证消除所有噪点，也不等同于具有运动重投影的时域降噪器。
+
+![Sandbox 实时间接光](images/sandbox.png)
+
+*Sandbox：实时模式只输出间接光，Forward／Deferred 在主表面直接光之后合成。金属球的间接镜面与地面互染来自同一份间接缓冲；实时模式不做运动重投影，静止后仍可能保留少量噪点。*
 
 ## 历史与资源
 
@@ -116,6 +128,14 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 [PathTracing_CornellBox](../Projects/PathTracing_CornellBox/README.md) 使用可选的场景 lighting 配置关闭方向光／环境光，并启用一个向下发光的矩形。Progressive PathTracing 的主相机和反射射线按最近距离看见发光面，表面直接光结合随机面积采样与独立 BRDF 采样，通过 MIS 避免重复计光。遮挡限定到灯的位置，遵循硬件及全局阴影开关；背面不发光。普通续接路径命中同灯时终止，直接光已由采样估计器计算。灯参数或环境倍率变化会重置历史。
 
-当前只支持渐进式 Path Tracing；其他模式会提示限制。解析发光面不是通用发光材质或透明折射。lighting.environmentIntensity 调整环境能量，background: black 仍只控制相机背景。光源采样不改变既有间接贡献开关对首段 BRDF 的语义。
+该示例只验证渐进式 Path Tracing；换到实时模式时，矩形发光面本身不进入光栅主画面。解析发光面不是通用发光材质或透明折射。lighting.environmentIntensity 调整环境能量，background: black 仍只控制相机背景。光源采样不改变既有间接贡献开关对首段 BRDF 的语义。
 
 场景可选 camera 记录初始轨道相机、焦点与曝光；启动、打开／重新加载场景时应用。Scene 的 Store current view 显式更新书签，再由 Save Scene 写入；导航不自动改动书签。旧场景省略这些字段时保持原行为。
+
+## 扩展与迭代
+
+改 GI 从枚举和配置开始：`GlobalIlluminationMethod`、`GlobalIlluminationSettings` 的范围钳制、`Project.cpp` 的校验、Project Settings 的控件、`RenderFeatures` 的判定，最后才是 `HardwareRayTracing.cpp` 的 dispatch 分支。新增贡献类型要同时进场景常量、HLSL 和 `HistoryKey`，否则改参数不会触发重算，画面会停在上一次的样本上。
+
+采样侧的扩展集中在 `PathTracing.hlsli`：新的光源类型、环境重要性采样、更稳的 MIS 权重、时域降噪都动这里。改完用 `--gi-self-test` 的颜色溢出、收敛和历史重置用例验证，并确认实时模式的 5×5 滤波没有把边缘抹花——它按法线、平面距离、albedo 和粗糙度抑制跨边缘混合，加字段就要一起改。
+
+路线上的缺口按依赖排：先做运动重投影与时间降噪，再谈环境重要性采样、透明与发光材质、其他 GI 算法，最后才是 Vulkan 光追和每视图独立历史。当前枚举只有 `Disabled` 和 `Path tracing` 两项，没有第三种算法可选，不要用不存在的选项做功能承诺。
