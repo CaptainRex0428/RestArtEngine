@@ -4,6 +4,8 @@
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Renderer/RenderFeatures.h>
+#include <RestArtEngine/Renderer/RenderPipeline.h>
 #include <RestArtEngine/Camera/Camera.h>
 #include <cstdio>
 #include <cstdint>
@@ -30,8 +32,6 @@ struct RendererCacheStats {
     std::uint64_t rayGpuBytesEstimate = 0;
 };
 
-enum class RenderPath { Forward, Deferred };
-
 // Each tool owns its preview image; rendering another slot never replaces it.
 enum class PreviewSlot { MaterialEditor, AssetDetails, SceneThumbnail, Camera, Viewport0, Viewport1, Viewport2, Viewport3 };
 
@@ -42,21 +42,9 @@ inline bool depthOfFieldEligible(const camera::Lens& lens) {
     return lens.depthOfField.focusDistance > focalLength + .0001f;
 }
 
-// Direct-light shadowing strategy. Raster variants share the depth resource;
-// GTAO and ContactShadow additionally use the Deferred G-buffer and fall back
-// to the raster map in Forward rendering. AnalyticRay traces built-in
-// primitives plus the common mesh-triangle scene.
-enum class ShadowMethod {
-    ShadowMap,
-    AnalyticRay,
-    Disabled,
-    ShadowMapHard,
-    ShadowMapPCF9,
-    ShadowMapPCSS,
-    ShadowMapCSM2,
-    GTAO,
-    ContactShadow,
-};
+// RenderPath and ShadowMethod describe pipeline organization and feature
+// selection; both live in RenderPipeline.h so the declaration layer stays free
+// of SceneRenderer dependencies.
 
 struct SceneSettings {
     RenderPath path = RenderPath::Deferred;
@@ -246,6 +234,10 @@ public:
     void setDiagnosticsEnabled(bool enabled);
     [[nodiscard]] bool diagnosticsEnabled() const;
     [[nodiscard]] const RenderDiagnosticsFrame& diagnosticsFrame() const;
+    // Ordered pass declaration and three-layer feature policy for the latest
+    // main-scene frame. Tool previews never replace either snapshot.
+    [[nodiscard]] const RenderPipeline& activePipeline() const;
+    [[nodiscard]] const RenderFeatureMatrix& renderFeatures() const;
     // Always collected for the main scene, independently of Profiler/capture.
     // GPU counts are asynchronous and never include offscreen tool previews.
     [[nodiscard]] const SceneGeometryStatistics& geometryStatistics() const;

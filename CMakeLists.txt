@@ -54,6 +54,9 @@ add_executable(RestArtEngine
     src/Renderer/SceneRenderer.cpp
     src/Renderer/Lighting.cpp
     src/Renderer/SelectionOutline.cpp
+    src/Renderer/Pipelines/ScenePipeline.cpp
+    src/Renderer/RenderFeatures.cpp
+    src/Renderer/Passes/ShadowPass.cpp
     src/Renderer/D3D12/HardwareRayTracing.cpp
     src/Assets/AssetLibrary.cpp
     src/Assets/MeshQuery.cpp
@@ -178,6 +181,14 @@ if(BUILD_TESTING)
         target_compile_options(LightingPackingTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME LightingPackingTests COMMAND LightingPackingTests)
+    add_executable(RenderPipelineTests tests/RenderPipelineTests.cpp
+        src/Renderer/Pipelines/ScenePipeline.cpp src/Renderer/RenderFeatures.cpp)
+    target_include_directories(RenderPipelineTests PRIVATE include)
+    target_compile_definitions(RenderPipelineTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(RenderPipelineTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME RenderPipelineTests COMMAND RenderPipelineTests)
     add_executable(EditorConsoleTests tests/EditorConsoleTests.cpp src/Editor/EditorConsole.cpp)
     target_include_directories(EditorConsoleTests PRIVATE include)
     if(MSVC)

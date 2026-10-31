@@ -218,6 +218,53 @@ void DiagnosticsPanel::drawProfiler(renderer::SceneRenderer& renderer) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Main raster geometry output before depth/occlusion tests.\nClipping can split triangles, so output may exceed input.\nGPU samples arrive after the scene frame.");
     if (!geometry.statusMessage.empty()) ImGui::TextWrapped("%s", geometry.statusMessage.c_str());
+
+    // Declared composition for the latest main-scene frame. This is the same
+    // list the renderer executed, not a hand-maintained description.
+    ImGui::SeparatorText("Render pipeline");
+    const auto& pipeline = renderer.activePipeline();
+    ImGui::TextWrapped("%s composition: %zu declared passes (latest main-scene frame).",
+        renderer::toString(pipeline.path), pipeline.passes.size());
+    if (!pipeline.passes.empty() &&
+        ImGui::BeginTable("Pipeline passes", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_Resizable)) {
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 190);
+        ImGui::TableSetupColumn("Reads", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Writes", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto& pass : pipeline.passes) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(std::string(pass.name).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(renderer::describePipelineResources(pass.reads).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(renderer::describePipelineResources(pass.writes).c_str());
+        }
+        ImGui::EndTable();
+    }
+    const auto& features = renderer.renderFeatures();
+    ImGui::TextWrapped("%zu features contribute pixels. Requests are reported next to the effective state; "
+        "a capability check never rewrites the request.",
+        features.effectiveCount());
+    if (ImGui::BeginTable("Render features", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, {0, 150})) {
+        ImGui::TableSetupColumn("Feature", ImGuiTableColumnFlags_WidthFixed, 190);
+        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 140);
+        ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+        for (const auto& status : features.features) {
+            if (status.state == renderer::FeatureState::Off) continue;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(renderer::toString(status.feature));
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(renderer::toString(status.state));
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(status.reason.c_str());
+            if (!status.reason.empty() && ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", status.reason.c_str());
+        }
+        ImGui::EndTable();
+    }
     timingTable(frame.passes, false);
     switch (frame.gpuStatus) {
     case renderer::GpuTimingStatus::Ready:

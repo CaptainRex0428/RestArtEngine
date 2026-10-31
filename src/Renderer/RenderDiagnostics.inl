@@ -7,7 +7,7 @@
     Clock::time_point diagnosticStart{}, passStart{};
     std::unique_ptr<rae::diagnostics::TraceScope> diagnosticPassTrace;
     std::size_t activePass = static_cast<std::size_t>(-1);
-    static constexpr std::size_t maxDiagnosticPasses = 8;
+    static constexpr std::size_t maxDiagnosticPasses = 12;
     struct TimingSlot {
         ComPtr<ID3D11Query> disjoint;
         std::array<ComPtr<ID3D11Query>, 2 + maxDiagnosticPasses * 2> timestamps;
@@ -123,15 +123,16 @@
         activePass = static_cast<std::size_t>(-1);
     }
 
-    void beginDiagnosticPass(const char* name) {
+    void beginDiagnosticPass(std::string_view name) {
         if (!collectingDiagnostics) return;
         endDiagnosticPass();
         if (diagnosticFrame.passes.size() == maxDiagnosticPasses) return;
         activePass = diagnosticFrame.passes.size();
-        diagnosticFrame.passes.push_back({name});
+        diagnosticFrame.passes.push_back({std::string(name)});
         passStart = Clock::now();
         if (rae::diagnostics::profiler().isRecording())
-            diagnosticPassTrace = std::make_unique<rae::diagnostics::TraceScope>(name, "Renderer CPU");
+            diagnosticPassTrace = std::make_unique<rae::diagnostics::TraceScope>(
+                std::string(name).c_str(), "Renderer CPU");
         if (activeTiming) context->End(activeTiming->timestamps[2 + activePass * 2].Get());
     }
 

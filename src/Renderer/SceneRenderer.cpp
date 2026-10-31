@@ -13,8 +13,11 @@
 #include "RestArtEngine/Renderer/SceneRenderer.h"
 #include "RestArtEngine/Renderer/SelectionOutline.h"
 #include "RestArtEngine/Renderer/Lighting.h"
+#include "RestArtEngine/Renderer/RenderFeatures.h"
+#include "RestArtEngine/Renderer/RenderPipeline.h"
 #include "D3D12/HardwareRayTracing.h"
 #include "MeshAttributes.h"
+#include "Passes/ShadowPass.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
 #include "RestArtEngine/Core/TraceProfiler.h"
@@ -405,6 +408,10 @@ struct SceneRenderer::Impl {
     bool hardwareRuntimeFailed = false, hardwareRequested = false;
     bool hardwareDepthWasCompatible = true;
     std::string hardwareStatus = "Hardware ray tracing has not been initialized.";
+    // Latest main-scene composition and feature policy. Tool previews render
+    // their own frames but never replace this snapshot.
+    RenderPipeline pipeline;
+    RenderFeatureMatrix features;
     GlobalIlluminationStatus giStatus;
     std::uint64_t giHistoryEpoch = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
@@ -1650,38 +1657,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     ID3D11ShaderResourceView* emptyViews[5]{};
     state.context->PSSetShaderResources(0, 5, emptyViews);
-    if (settings.shadowMethod != ShadowMethod::AnalyticRay && settings.shadowMethod != ShadowMethod::Disabled &&
-        (lighting.info[1] < .5f || lighting.info[2] >= 0)) {
-        // Render all visible geometry from the light into the depth-only map.
-        // Clearing slot 3 first avoids a D3D11 SRV/DSV hazard when switching
-        // between frames that use deferred, forward, and shadow-map passes.
-        const D3D11_VIEWPORT shadowViewport{0, 0, static_cast<float>(Impl::shadowMapSize), static_cast<float>(Impl::shadowMapSize), 0, 1};
-        state.context->RSSetViewports(1, &shadowViewport);
-        SceneConstants shadowScene = data;
-        const UINT cascadeCount = useCsm ? Impl::shadowCascadeCount : 1;
-        for (UINT cascade = 0; cascade < cascadeCount; ++cascade) {
-            state.beginDiagnosticPass(cascade == 0 ? "Shadow cascade 0" : "Shadow cascade 1");
-            ID3D11DepthStencilView* cascadeDepth = state.shadowDepthSlices[cascade].Get();
-            state.context->OMSetRenderTargets(0, nullptr, cascadeDepth);
-            state.context->ClearDepthStencilView(cascadeDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
-            shadowScene.viewProjection = cascade == 0 ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
-            state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &shadowScene, 0, 0);
-            if (!state.drawGeometry(nullptr, world, assets, error, materialOverride,
-                    settings.frustumCulling ? &shadowScene.viewProjection : nullptr)) return false;
-        }
-        // Explicitly release the shadow DSV before binding the same resource as
-        // a pixel shader SRV; relying on D3D11's automatic hazard resolution
-        // would silently unbind the SRV on some drivers.
-        state.context->OMSetRenderTargets(0, nullptr, nullptr);
-        state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
-    }
-    // Transport runs before raster shading. Realtime GI publishes an indirect
-    // image consumed by either raster path; progressive/reference and legacy
-    // hardware modes publish a final image copied after raster depth creation.
-    const bool realtimeGiRequested = settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
-        settings.globalIllumination.mode == GlobalIlluminationMode::Realtime;
-    bool hardwareFrameReady = false;
-    ID3D11ShaderResourceView* indirectView = nullptr;
+    // A visible material with a raster-only depth state keeps hardware primary
+    // visibility and GI inconsistent with the raster receiver. The request is
+    // retained and the reason is reported; the raster path still renders.
     bool hardwareDepthCompatible = true;
     const assets::MaterialAsset* incompatibleDepthMaterial = nullptr;
     for (const auto& actor : world.actors) {
@@ -1706,81 +1684,56 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 state.giStatus.reason = state.hardwareStatus;
         }
     }
-    if (diagnosticMainScene && hardwareDepthCompatible && settings.hardwareRayTracing && state.hardwarePipelineReady &&
-        state.hardwareRayTracing && state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed) {
-        state.beginDiagnosticPass(realtimeGiRequested ? "DXR realtime GI transport / resolve" : "DXR hardware scene");
-        d3d12::Frame frame;
-        frame.lighting = lighting;
-        std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
-        frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
-        // Material footprint calculations need the actual viewport extent.
-        frame.sceneConstants[32] = static_cast<float>(viewportWidth);
-        frame.sceneConstants[33] = static_cast<float>(viewportHeight);
-        XMFLOAT4X4 inverseViewProjection;
-        XMStoreFloat4x4(&inverseViewProjection, XMMatrixInverse(nullptr, view * projection));
-        std::memcpy(frame.inverseViewProjection.data(), &inverseViewProjection, sizeof(inverseViewProjection));
-        frame.width = static_cast<std::uint32_t>(viewportWidth);
-        frame.height = static_cast<std::uint32_t>(viewportHeight);
-        frame.reflections = settings.hardwareRayTracingReflections;
-        frame.shadows = settings.hardwareRayTracingShadows && settings.shadowMethod != ShadowMethod::Disabled;
-        frame.globalIllumination = settings.globalIllumination;
-        if (depthOfFieldEligible(cameraView.lens) && settings.debugView == 0 &&
-            settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
-            settings.globalIllumination.mode == GlobalIlluminationMode::Progressive) {
-            const auto& dof = cameraView.lens.depthOfField;
-            const float focalLength = dof.sensorHeightMm*.001f/(2*data.cameraLensParams.w);
-            frame.thinLens = {dof.focusDistance,focalLength/(2*dof.fStop),1,0};
-        }
-        const auto& environment = world.environment;
-        // Authored light Actors own lighting when present, even while hidden.
-        // Do not also upload the legacy scene emitter in that mode.
-        const bool usesLightActors = std::any_of(world.actors.begin(), world.actors.end(),
-            [](const scene::Actor& actor) { return actor.light.has_value(); });
-        if (!usesLightActors && environment.overrideLighting) {
-            const auto& light = environment.areaLight;
-            frame.areaLight = {light.center[0], light.center[1], light.center[2], light.enabled ? 1.0f : 0.0f,
-                light.halfAxisU[0], light.halfAxisU[1], light.halfAxisU[2], environment.environmentIntensity,
-                light.halfAxisV[0], light.halfAxisV[1], light.halfAxisV[2], 0,
-                light.radiance[0], light.radiance[1], light.radiance[2], 0};
-        }
-        frame.historyEpoch = state.giHistoryEpoch;
-        frame.viewId = settings.viewId;
-        state.context->OMSetRenderTargets(0, nullptr, nullptr);
-        state.context->PSSetShaderResources(0, 5, emptyViews);
-        std::string hardwareError;
-        if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
-            hardwareFrameReady = true;
-            if (realtimeGiRequested && settings.debugView == 0)
-                indirectView = state.hardwareRayTracing->indirectLighting();
-            state.hardwareActive = true;
-            state.hardwareStatus = state.hardwareRayTracing->status();
-            state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
-        } else {
-            state.hardwareRuntimeFailed = true;
-            state.hardwareStatus = "Hardware ray tracing failed; raster retained. " + hardwareError;
-            state.giStatus.reason = state.hardwareStatus;
-        }
+    // Resolve per-frame capabilities, then compose the pass list declaratively.
+    // Everything below executes what the declaration contains; no pass is
+    // reached through a hidden branch outside this list.
+    const bool realtimeGiRequested = settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
+        settings.globalIllumination.mode == GlobalIlluminationMode::Realtime;
+    const bool rasterShadowMap = settings.shadowMethod != ShadowMethod::AnalyticRay &&
+        settings.shadowMethod != ShadowMethod::Disabled &&
+        (lighting.info[1] < .5f || lighting.info[2] >= 0);
+    const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible &&
+        settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
+        state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
+    const bool realtimeIndirect = hardwareTransport && realtimeGiRequested && settings.debugView == 0;
+    const bool depthOfField = depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
+    const bool selectionOutline = settings.editorViewport && settings.outlineActors &&
+        settings.outlineActorCount > 0;
+    PipelineBuildInputs pipelineInputs;
+    pipelineInputs.path = settings.path;
+    pipelineInputs.rasterShadowMap = rasterShadowMap;
+    pipelineInputs.rayTriangleScene = wantsRayScene;
+    pipelineInputs.hardwareTransport = hardwareTransport;
+    pipelineInputs.realtimeIndirect = realtimeIndirect;
+    pipelineInputs.depthOfField = depthOfField;
+    pipelineInputs.selectionOutline = selectionOutline;
+    pipelineInputs.frameCapture = diagnosticMainScene && state.captureRequested;
+    auto pipeline = buildScenePipeline(pipelineInputs);
+    const auto pipelineValidation = validatePipeline(pipeline);
+    if (!pipelineValidation.valid) {
+        error = "Render pipeline declaration is inconsistent: " + pipelineValidation.error;
+        return false;
     }
-    GlobalIlluminationConstants giData{};
-    giData.viewport = XMFLOAT4(indirectView ? 1.0f : 0.0f,
-        static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0.0f);
-    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
-    ID3D11Buffer* giBuffer = state.giConstants.Get();
-    state.context->PSSetConstantBuffers(6, 1, &giBuffer);
-    state.context->PSSetShaderResources(9, 1, &indirectView);
-    const D3D11_VIEWPORT sceneViewport{static_cast<float>(viewportX), static_cast<float>(viewportY), static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0, 1};
-    state.context->RSSetViewports(1, &sceneViewport);
-    ID3D11ShaderResourceView* shadowResources[] = { nullptr, nullptr, nullptr, state.shadowView.Get(), state.rayTriangleView.Get() };
-    state.context->PSSetShaderResources(0, 5, shadowResources);
-    ID3D11ShaderResourceView* uvResources[] = {state.rayUvView.Get(), state.rayUvIndexView.Get()};
-    state.context->PSSetShaderResources(10, 2, uvResources);
-    state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    if (diagnosticMainScene) state.pipeline = pipeline;
+
+    const D3D11_VIEWPORT sceneViewport{static_cast<float>(viewportX), static_cast<float>(viewportY),
+        static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0, 1};
     ID3D11RenderTargetView* backbuffer = (settings.editorViewport || settings.offscreenTarget)
         ? state.sceneTarget.Get() : state.backbuffer.Get();
     const bool blackClear = world.blackBackground || fitAuthoredAspect;
-    const float backgroundClear[4] = {blackClear ? 0.0f : 0.025f, blackClear ? 0.0f : 0.035f, blackClear ? 0.0f : 0.055f, 1.0f};
-    state.context->ClearRenderTargetView(backbuffer, backgroundClear);
-    if (diagnosticMainScene) state.prepareGeometryStatistics(hardwareFrameReady && !realtimeGiRequested);
+    const float backgroundClear[4] = {blackClear ? 0.0f : 0.025f, blackClear ? 0.0f : 0.035f,
+        blackClear ? 0.0f : 0.055f, 1.0f};
+    // Realtime GI publishes a resolved indirect image consumed by either raster
+    // path. The transport pass overwrites this binding when it produced one.
+    GlobalIlluminationConstants giData{};
+    giData.viewport = XMFLOAT4(0.0f, static_cast<float>(viewportWidth),
+        static_cast<float>(viewportHeight), 0.0f);
+    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
+    ID3D11Buffer* giBuffer = state.giConstants.Get();
+    state.context->PSSetConstantBuffers(6, 1, &giBuffer);
+    bool hardwareFrameReady = false;
+    bool thinLensImage = false;
+    ID3D11ShaderResourceView* indirectView = nullptr;
     const auto drawMainGeometry = [&](ID3D11PixelShader* shader) {
         if (diagnosticMainScene) state.beginGeometrySample();
         struct SampleScope {
@@ -1791,83 +1744,245 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         return state.drawGeometry(shader, world, assets, error, materialOverride,
             settings.frustumCulling ? &data.viewProjection : nullptr);
     };
-    if (settings.path == RenderPath::Deferred) {
-        state.beginDiagnosticPass("GBuffer");
-        ID3D11RenderTargetView* targets[3]{};
-        const float clear[4]{};
-        for (std::size_t i = 0; i < 3; ++i) {
-            targets[i] = state.gbufferTargets[i].Get();
-            state.context->ClearRenderTargetView(targets[i], clear);
-        }
-        state.context->OMSetRenderTargets(3, targets, state.depth.Get());
-        if (!drawMainGeometry(state.gbufferPS.Get())) return false;
-        state.beginDiagnosticPass("Deferred lighting / debug");
-        state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
-        ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(), state.gbufferViews[1].Get(), state.gbufferViews[2].Get(), state.shadowView.Get(), state.rayTriangleView.Get()};
-        state.context->PSSetShaderResources(0, 5, views);
-        state.drawFullscreen(state.deferredPS.Get());
-        state.context->PSSetShaderResources(0, 5, emptyViews);
-    } else {
-        state.beginDiagnosticPass("Forward background");
-        state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
-        state.drawFullscreen(state.backgroundPS.Get());
-        state.beginDiagnosticPass("Forward geometry / debug");
-        if (!drawMainGeometry(state.forwardPS.Get())) return false;
-    }
-    // Release the shared SRV before any next DX12 write, including tool previews.
-    ID3D11ShaderResourceView* emptyIndirect = nullptr;
-    state.context->PSSetShaderResources(9, 1, &emptyIndirect);
-    ID3D11ShaderResourceView* emptyUv[] = {nullptr, nullptr};
-    state.context->PSSetShaderResources(10, 2, emptyUv);
-    if (hardwareFrameReady && !realtimeGiRequested) {
-        state.beginDiagnosticPass("Hardware image resolve");
-        state.context->OMSetRenderTargets(0, nullptr, nullptr);
-        ComPtr<ID3D11Resource> destination;
-        backbuffer->GetResource(&destination);
-        state.context->CopySubresourceRegion(destination.Get(), 0,
-            static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
-            state.hardwareRayTracing->output(), 0, nullptr);
-        state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
-    }
-    const bool thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
-        settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing && !realtimeGiRequested;
-    if (depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1 && !thinLensImage) {
-        state.beginDiagnosticPass("Screen-space depth of field");
-        if (!state.renderDepthOfField(backbuffer,sceneViewport,cameraView.lens,error)) return false;
-    }
-    // Editor-only selection outline. The mask re-draws the selected silhouettes
-    // against the scene depth (occluded parts are skipped), then the composite
-    // dilates that mask over the scene colour. Runtime callers leave the outline
-    // fields empty, so this block never runs outside the editor.
-    if (settings.editorViewport && settings.outlineActors && settings.outlineActorCount > 0) {
-        state.beginDiagnosticPass("Selection masks");
+    // Raster passes own their input binding: the shadow map must not be bound as
+    // an SRV while the shadow pass still writes it as a depth target.
+    const auto beginRasterPasses = [&] {
+        ID3D11ShaderResourceView* shadowResources[] = {nullptr, nullptr, nullptr,
+            state.shadowView.Get(), state.rayTriangleView.Get()};
+        state.context->PSSetShaderResources(0, 5, shadowResources);
+        ID3D11ShaderResourceView* uvResources[] = {state.rayUvView.Get(), state.rayUvIndexView.Get()};
+        state.context->PSSetShaderResources(10, 2, uvResources);
+        state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        state.context->ClearRenderTargetView(backbuffer, backgroundClear);
+        if (diagnosticMainScene) state.prepareGeometryStatistics(hardwareFrameReady && !realtimeGiRequested);
+        state.context->RSSetViewports(1, &sceneViewport);
+    };
+    const auto releaseRasterInputs = [&] {
+        ID3D11ShaderResourceView* noIndirectLighting = nullptr;
+        state.context->PSSetShaderResources(9, 1, &noIndirectLighting);
+        ID3D11ShaderResourceView* noUv[] = {nullptr, nullptr};
+        state.context->PSSetShaderResources(10, 2, noUv);
+    };
 
-        if (!state.outline) { error = "Selection outline is not initialized."; return false; }
-        if (!state.outline->prepare(targetWidth, targetHeight, error)) return false;
-        const auto drawSelected = [&] {
-            return state.drawSelectedGeometry(settings.outlineActors, settings.outlineActorCount, world, assets, error);
-        };
-        if (!state.outline->drawMasks(state.context.Get(), state.depth.Get(), sceneViewport,
-                state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
-                state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
-        state.beginDiagnosticPass("Selection composite");
-        state.outline->composite(state.context.Get(), backbuffer, state.depthView.Get(), sceneViewport,
-            state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
-            settings.outlineColor, settings.outlineThickness, settings.outlineFrontObjects);
-        state.recordDraw(0, 0, 0, 0, 3);
-    }
-    if (diagnosticMainScene) {
-        state.finishDiagnostics();
-        if (state.captureRequested) {
-            // Copy after the final scene pass, before ImGui compositing. Failure
-            // retains the previous immutable snapshot and does not abort rendering.
+    for (const auto& pass : pipeline.passes) {
+        switch (pass.kind) {
+        case RenderPassKind::ShadowMap: {
+            state.beginDiagnosticPass(pass.name);
+            passes::ShadowPassContext shadowPass;
+            shadowPass.context = state.context.Get();
+            shadowPass.shadowConstants = state.shadowConstants.Get();
+            const std::uint32_t cascadeCount = useCsm ? Impl::shadowCascadeCount : 1;
+            ID3D11DepthStencilView* cascadeTargets[Impl::shadowCascadeCount]{
+                state.shadowDepthSlices[0].Get(), state.shadowDepthSlices[1].Get()};
+            shadowPass.cascadeTargets = cascadeTargets;
+            shadowPass.cascadeCount = cascadeCount;
+            shadowPass.mapSize = Impl::shadowMapSize;
+            shadowPass.beginCascade = [&](std::uint32_t cascade) {
+                SceneConstants shadowScene = data;
+                shadowScene.viewProjection = cascade == 0
+                    ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
+                state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &shadowScene, 0, 0);
+            };
+            shadowPass.draw = [&](std::uint32_t cascade, std::string& drawError) {
+                const XMFLOAT4X4& clip = cascade == 0
+                    ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
+                return state.drawGeometry(nullptr, world, assets, drawError, materialOverride,
+                    settings.frustumCulling ? &clip : nullptr);
+            };
+            shadowPass.restoreSceneConstants = [&] {
+                state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
+            };
+            if (!passes::executeShadowPass(shadowPass, error)) return false;
+            break;
+        }
+        case RenderPassKind::HardwareTransport: {
+            state.beginDiagnosticPass(realtimeGiRequested
+                ? "DXR realtime GI transport / resolve" : "DXR hardware scene");
+            d3d12::Frame frame;
+            frame.lighting = lighting;
+            std::memcpy(frame.sceneConstants.data(), &data, sizeof(data));
+            frame.sceneConstants[31] = settings.hardwareRayTracingReflections ? 1.0f : 0.0f;
+            // Material footprint calculations need the actual viewport extent.
+            frame.sceneConstants[32] = static_cast<float>(viewportWidth);
+            frame.sceneConstants[33] = static_cast<float>(viewportHeight);
+            XMFLOAT4X4 inverseViewProjection;
+            XMStoreFloat4x4(&inverseViewProjection, XMMatrixInverse(nullptr, view * projection));
+            std::memcpy(frame.inverseViewProjection.data(), &inverseViewProjection, sizeof(inverseViewProjection));
+            frame.width = static_cast<std::uint32_t>(viewportWidth);
+            frame.height = static_cast<std::uint32_t>(viewportHeight);
+            frame.reflections = settings.hardwareRayTracingReflections;
+            frame.shadows = settings.hardwareRayTracingShadows && settings.shadowMethod != ShadowMethod::Disabled;
+            frame.globalIllumination = settings.globalIllumination;
+            if (depthOfFieldEligible(cameraView.lens) && settings.debugView == 0 &&
+                settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
+                settings.globalIllumination.mode == GlobalIlluminationMode::Progressive) {
+                const auto& dof = cameraView.lens.depthOfField;
+                const float focalLength = dof.sensorHeightMm*.001f/(2*data.cameraLensParams.w);
+                frame.thinLens = {dof.focusDistance,focalLength/(2*dof.fStop),1,0};
+            }
+            const auto& environment = world.environment;
+            // Authored light Actors own lighting when present, even while hidden.
+            // Do not also upload the legacy scene emitter in that mode.
+            const bool usesLightActors = std::any_of(world.actors.begin(), world.actors.end(),
+                [](const scene::Actor& actor) { return actor.light.has_value(); });
+            if (!usesLightActors && environment.overrideLighting) {
+                const auto& light = environment.areaLight;
+                frame.areaLight = {light.center[0], light.center[1], light.center[2], light.enabled ? 1.0f : 0.0f,
+                    light.halfAxisU[0], light.halfAxisU[1], light.halfAxisU[2], environment.environmentIntensity,
+                    light.halfAxisV[0], light.halfAxisV[1], light.halfAxisV[2], 0,
+                    light.radiance[0], light.radiance[1], light.radiance[2], 0};
+            }
+            frame.historyEpoch = state.giHistoryEpoch;
+            frame.viewId = settings.viewId;
+            state.context->OMSetRenderTargets(0, nullptr, nullptr);
+            state.context->PSSetShaderResources(0, 5, emptyViews);
+            std::string hardwareError;
+            if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
+                hardwareFrameReady = true;
+                thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
+                    settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
+                    !realtimeGiRequested;
+                if (realtimeIndirect) indirectView = state.hardwareRayTracing->indirectLighting();
+                state.hardwareActive = true;
+                state.hardwareStatus = state.hardwareRayTracing->status();
+                state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
+                if (indirectView) {
+                    giData.viewport = XMFLOAT4(1.0f, static_cast<float>(viewportWidth),
+                        static_cast<float>(viewportHeight), 0.0f);
+                    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
+                    state.context->PSSetShaderResources(9, 1, &indirectView);
+                }
+            } else {
+                state.hardwareRuntimeFailed = true;
+                state.hardwareStatus = "Hardware ray tracing failed; raster retained. " + hardwareError;
+                state.giStatus.reason = state.hardwareStatus;
+            }
+            break;
+        }
+        case RenderPassKind::GBuffer: {
+            state.beginDiagnosticPass(pass.name);
+            beginRasterPasses();
+            ID3D11RenderTargetView* targets[3]{};
+            const float clear[4]{};
+            for (std::size_t index = 0; index < 3; ++index) {
+                targets[index] = state.gbufferTargets[index].Get();
+                state.context->ClearRenderTargetView(targets[index], clear);
+            }
+            state.context->OMSetRenderTargets(3, targets, state.depth.Get());
+            if (!drawMainGeometry(state.gbufferPS.Get())) return false;
+            break;
+        }
+        case RenderPassKind::DeferredLighting: {
+            state.beginDiagnosticPass(pass.name);
+            state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+            ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(),
+                state.gbufferViews[1].Get(), state.gbufferViews[2].Get(),
+                state.shadowView.Get(), state.rayTriangleView.Get()};
+            state.context->PSSetShaderResources(0, 5, views);
+            state.drawFullscreen(state.deferredPS.Get());
+            state.context->PSSetShaderResources(0, 5, emptyViews);
+            releaseRasterInputs();
+            break;
+        }
+        case RenderPassKind::ForwardBackground: {
+            state.beginDiagnosticPass(pass.name);
+            beginRasterPasses();
+            state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
+            state.drawFullscreen(state.backgroundPS.Get());
+            break;
+        }
+        case RenderPassKind::ForwardGeometry: {
+            state.beginDiagnosticPass(pass.name);
+            if (!drawMainGeometry(state.forwardPS.Get())) return false;
+            releaseRasterInputs();
+            break;
+        }
+        case RenderPassKind::HardwareResolve: {
+            // The pass is declared from the transport attempt; a failed attempt
+            // keeps the raster image and reports the reason separately.
+            if (!hardwareFrameReady || realtimeGiRequested) break;
+            state.beginDiagnosticPass(pass.name);
+            state.context->OMSetRenderTargets(0, nullptr, nullptr);
+            ComPtr<ID3D11Resource> destination;
+            backbuffer->GetResource(&destination);
+            state.context->CopySubresourceRegion(destination.Get(), 0,
+                static_cast<UINT>(viewportX), static_cast<UINT>(viewportY), 0,
+                state.hardwareRayTracing->output(), 0, nullptr);
+            state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+            break;
+        }
+        case RenderPassKind::DepthOfField: {
+            // Progressive hardware frames already resolved thin-lens depth of
+            // field inside the path; the declared pass short-circuits.
+            if (thinLensImage) break;
+            state.beginDiagnosticPass(pass.name);
+            if (!state.renderDepthOfField(backbuffer, sceneViewport, cameraView.lens, error)) return false;
+            break;
+        }
+        case RenderPassKind::SelectionMask: {
+            state.beginDiagnosticPass(pass.name);
+            if (!state.outline) { error = "Selection outline is not initialized."; return false; }
+            if (!state.outline->prepare(targetWidth, targetHeight, error)) return false;
+            const auto drawSelected = [&] {
+                return state.drawSelectedGeometry(settings.outlineActors, settings.outlineActorCount,
+                    world, assets, error);
+            };
+            if (!state.outline->drawMasks(state.context.Get(), state.depth.Get(), sceneViewport,
+                    state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
+                    state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
+            break;
+        }
+        case RenderPassKind::SelectionComposite: {
+            state.beginDiagnosticPass(pass.name);
+            if (!state.outline) { error = "Selection outline is not initialized."; return false; }
+            state.outline->composite(state.context.Get(), backbuffer, state.depthView.Get(), sceneViewport,
+                state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
+                settings.outlineColor, settings.outlineThickness, settings.outlineFrontObjects);
+            state.recordDraw(0, 0, 0, 0, 3);
+            break;
+        }
+        case RenderPassKind::FrameCapture: {
+            // Close the timed pass list before the snapshot so the capture keeps
+            // the CPU submit total of the rendered passes. Failure retains the
+            // previous immutable snapshot and does not abort rendering.
+            if (diagnosticMainScene) state.finishDiagnostics();
             state.context->OMSetRenderTargets(0, nullptr, nullptr);
             std::string captureError;
             if (!state.copyFrameCapture(settings, captureError))
                 state.capture.status = "Capture failed: " + captureError + (state.capture.valid ? " Previous capture retained." : "");
             state.captureRequested = false;
             state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+            break;
         }
+        }
+    }
+    if (diagnosticMainScene) {
+        state.finishDiagnostics();
+        // Record the three-layer feature policy for this frame. Requests are
+        // copied from settings; capabilities come from the device, the material
+        // scan and the transport attempt above. Neither layer rewrites the other.
+        FeatureRequests featureRequests;
+        featureRequests.path = settings.path;
+        featureRequests.shadowMethod = settings.shadowMethod;
+        featureRequests.rayTracing = settings.rayTracing;
+        featureRequests.hardwareRayTracing = settings.hardwareRayTracing;
+        featureRequests.hardwareRayTracingReflections = settings.hardwareRayTracingReflections;
+        featureRequests.hardwareRayTracingShadows = settings.hardwareRayTracingShadows;
+        featureRequests.globalIllumination = settings.globalIllumination.method;
+        featureRequests.globalIlluminationMode = settings.globalIllumination.mode;
+        featureRequests.depthOfField = depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
+        featureRequests.selectionOutline = selectionOutline;
+        FeatureCapabilities featureCapabilities;
+        featureCapabilities.shaderPipelineReady = state.revision != 0;
+        featureCapabilities.hardwareRayTracingBuilt = state.hardwareRayTracing != nullptr;
+        featureCapabilities.hardwareRayTracingDevice =
+            state.hardwareRayTracing && state.hardwareRayTracing->supported();
+        featureCapabilities.hardwarePipelineReady = state.hardwarePipelineReady;
+        featureCapabilities.hardwareDepthCompatible = hardwareDepthCompatible;
+        featureCapabilities.hardwareFrameFailed = state.hardwareRuntimeFailed;
+        featureCapabilities.editorSelection = selectionOutline;
+        featureCapabilities.thinLensDepthOfField = thinLensImage;
+        state.features = evaluateRenderFeatures(featureRequests, featureCapabilities);
     }
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
     if (settings.editorViewport) {
@@ -1889,6 +2004,8 @@ std::filesystem::path SceneRenderer::materialShaderPath() const { return impl_->
 std::string SceneRenderer::shaderSource() const { return impl_->materialSource; }
 std::uint64_t SceneRenderer::shaderRevision() const { return impl_->revision; }
 const SceneGeometryStatistics& SceneRenderer::geometryStatistics() const { return impl_->geometryStatistics; }
+const RenderPipeline& SceneRenderer::activePipeline() const { return impl_->pipeline; }
+const RenderFeatureMatrix& SceneRenderer::renderFeatures() const { return impl_->features; }
 
 bool SceneRenderer::applyShaderSource(const std::string& source, std::string& diagnostics) {
     rae::diagnostics::TraceScope trace("Shader Compile / Pipeline Build", "Shader");
