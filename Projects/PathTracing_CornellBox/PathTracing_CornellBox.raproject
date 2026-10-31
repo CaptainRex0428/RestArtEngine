@@ -10,14 +10,17 @@
   "rendering": {
     "globalIllumination": {
       "indirectDiffuse": true,
+      "indirectDiffuseIntensity": 0.9900000095367432,
       "indirectSpecular": true,
-      "maxBounces": 8,
+      "maxBounces": 12,
       "method": "pathTracing",
       "mode": "progressive",
-      "samplesPerFrame": 4,
-      "targetSamples": 1024
+      "samplesPerFrame": 16,
+      "targetSamples": 65536
     },
-    "hardwareRayTracing": true
+    "hardwareRayTracing": true,
+    "hardwareRayTracingReflections": true,
+    "hardwareRayTracingShadows": true
   },
   "shaderRoot": "Shaders",
   "version": 3
