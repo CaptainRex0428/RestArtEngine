@@ -44,7 +44,7 @@ Outliner 的 `+ Light` 提供 Directional、Sky、Rect、Spot 和 Point。选中
 | `actor.addCube` / `actor.addSphere` / `actor.duplicate` | 使用现有 Actor 操作及撤销事务 |
 | `edit.undo` / `edit.redo` | 使用编辑器撤销栈 |
 | `scene.save` / `material.save` / `save.all` | 保存场景／当前已应用材质／全部修改 |
-| `debug.profiler` / `debug.frameInspector` | 打开诊断工具 |
+| `debug.profiler` / `debug.frameInspector` / `debug.runtime` | 打开性能、帧检查或运行诊断工具 |
 | `gc.settings` / `gc.collect` | GC 设置／请求帧末回收 |
 | `trace.start` / `trace.stop` | 开始／停止 CPU Trace，导出在 Diagnostics 中进行 |
 | `content` / `project.settings` / `layout.restore` | 资产浏览器／项目设置／恢复布局 |
@@ -112,7 +112,15 @@ Content 的 Sources 区分 **Content** 和 **Engine**。`View > Show Engine` 控
 
 `Debug > Profiler...` 打开 Diagnostics：`Record CPU trace` 开始新的有界录制，`Stop CPU trace` 保留已录数据，`Clear trace` 清空事件；`Export trace JSON...` 选择文件保存。帧曲线是主循环 wall time，CPU 提交和 GPU Pass 耗时分别显示。GPU 结果延迟返回并显示其原 Frame ID；Pending / Unavailable 不表示零耗时。
 
+展开 `CPU timeline and scope aggregates` 查看线程轨道，选择 Scope 检查线程／帧／时间与同名聚合。它是已插桩代码的计时，不是 CPU 采样器或源码断点调试器。
+
 `Debug > Capture next scene frame` 或 Frame Inspector 内的同名按钮捕获下一有效主场景帧。选择冻结资源、RGB/R/G/B/A 通道，点击图片选择坐标，再按 `Read pixel` 读取该帧的原始数值；该操作可以等待 GPU，不影响实时场景选择或 Undo。Deferred 含三张真实 GBuffer，Forward 只列 SceneColor 与 Depth。`Clear capture` 释放捕获；`Export metadata JSON...` 仅导出事件和资源描述，不包含图像，也不能重放。
+
+在 `Capture settings` 选择最终输出或一个实际 Pass，并配置 Before/After 和资源预算。Before 仅包含本帧此前已初始化的附件，阴影级联保留各自 layer。选择 Draw 行查看实际记录的 PSO、Viewport、Actor／材质／网格、绑定及常量字节；图片仍属于标出的 Pass 边界，不随 Draw 选择重建历史。原生阶段或预算限制导致的缺失状态会明确标记。
+
+`Save frame package...` 通过文件选框保存 `.raframe`，包含原始纹理、事件、常量、两份 Shader 源码及可用的 CPU／GPU 诊断信息；`Open frame package...` 在当前后端浏览离线内容，不要求原项目或相同 API。也可启动时指定 `--inspect-capture <file.raframe>`。Shader 文本不是完整展开 include、字节码或单步状态。
+
+`Debug > Runtime Debug...` 或 `debug.runtime` 打开 Runtime，查看实际后端、验证状态、进程内存与可筛选的结构化消息、原生图形消息。缓存字节是估算，RHI 创建计数是累计值；两者都不是显存驻留量。详见 [Diagnostics.md](Diagnostics.md)。
 
 工具栏 View 下拉新增 Roughness、Metallic、Specular F0、Linear depth、Direct diffuse / specular，Viewport settings 显示各模式的来源和显示范围。材质数据模式不受美术曝光影响，F0 有显示 gamma；直射贡献使用当前曝光和色调映射。完整数据契约与后续能力见 [Diagnostics.md](Diagnostics.md)。
 

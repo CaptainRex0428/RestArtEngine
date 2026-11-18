@@ -1,6 +1,8 @@
 # RestArtEngine 目录与基础架构
 
-本工程面向技术美术的材质与渲染实验。当前编辑器通过 DX11 绘制 Actor 场景，使用 Dear ImGui 提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
+本工程面向技术美术的材质与渲染实验。编辑器通过 D3D11 或实验性的独立 D3D12 后端绘制 Actor 场景，使用对应 Dear ImGui 后端提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
+
+真实启动流程支持[后端选择与回退策略](RenderBackends.md)：严格 D3D11、D3D11＋D3D12/DXR 正式混合模式，以及实验性的独立 D3D12 光栅；Auto 保留严格 D3D11。原生 D3D12 成功时不创建 D3D11 device；设备／目标初始化失败时按配置回退或报错，Shader／资产错误不作为通用回退理由。已实现范围与尚未迁移的 Feature 统一见后端文档，选择器和旧生命周期占位仍不构成功能证据。
 
 ![编辑器工作区](images/editor.png)
 
@@ -15,15 +17,18 @@
 | 目录 | 职责与放置规则 |
 | --- | --- |
 | `include/RestArtEngine/Core/`、`src/Core/` | 引擎生命周期等公共基础设施。 |
+| `Core/TraceProfiler.*`、`Core/RuntimeDiagnostics.*` | 有界 CPU 多线程插桩、统一帧／线程身份、结构化消息和进程内存；不依赖编辑器。 |
 | `include/RestArtEngine/Project/`、`src/Project/` | `.raproject` 工程描述解析、引擎与工程资源路径解析验证。 |
 | `include/RestArtEngine/Scene/`、`src/Scene/` | `World`、`Actor`、`Transform`、网格／灯光组件与场景序列化；不依赖 ImGui 或 DX11。 |
 | `include/RestArtEngine/Assets/`、`src/Assets/` | `AssetLibrary`、CPU 网格、材质参数、统一 OBJ／FBX 导入与资产文件读写；导入契约见 [Importing.md](Importing.md)。 |
 | `include/RestArtEngine/Renderer/`、`src/Renderer/` | 渲染接口、GPU 资源、前向与延迟渲染、Shader 编译与 GPU 管线替换。 |
+| `include/RestArtEngine/Renderer/Rhi.h`、`src/Renderer/D3D11/`、`src/Renderer/D3D12/D3D12Rhi.*` | 实际资源、Shader、图形管线、附件 Pass、绑定与绘制契约；D3D11 与实验性原生 D3D12 实现；窗口／UI 等原生互操作留在后端边界。 |
 | `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/` | 一帧的 Pass 顺序、资源读写边、组合与校验；只描述结构与依赖，不持有 GPU 资源。 |
-| `src/Renderer/Passes/` | 已抽出的渲染阶段（当前为阴影深度图）；DX11 绑定由调用方提供，资源所有权仍属渲染器。 |
+| `src/Renderer/Passes/` | 已抽出的渲染阶段（当前为阴影深度图）；阴影通过 RHI 命令与实际深度数组句柄执行，资源所有权仍属渲染器。 |
 | `include/RestArtEngine/Renderer/RenderFeatures.h`、`src/Renderer/RenderFeatures.cpp` | 构建可用性／设备能力／帧前置条件三层特性状态与阻塞原因。 |
+| `Renderer/RenderDiagnostics.h`、`FrameCaptureArchive.*`、`FrameCaptureMetadata.*` | 渲染事件、冻结资源与 `.raframe` 离线包的自有数据契约及校验；采集在 Renderer，显示在 DiagnosticsPanel。 |
 | `include/RestArtEngine/Editor/`、`src/Editor/` | 编辑器会话、选中对象、参数和源码草稿、Outliner / Scene / Details / Content 面板；`EditorDockManager` 管理面板身份、默认停靠布局和恢复入口；`ViewportInteraction` 负责视口拾取与变换手柄，通过公共接口修改场景和渲染器。 |
-| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
+| `include/RestArtEngine/ImGui/`、`src/ImGui/` | ImGui 上下文和 Win32 / DX11 / DX12 适配器；含 `EditorTheme` 双主题配色与本机偏好读写。 |
 | `Shaders/Private/Scene.hlsl` | 渲染器维护的几何、前向、G-buffer、延迟光照与背景着色代码。修改时必须保持 CPU / HLSL 数据布局一致。 |
 | `Shaders/Materials/Standard.hlsli` | 引擎提供的默认材质源码模板，编辑器不会把工程修改写入此模板。 |
 | `Content/Materials/DefaultMaterial.rasset` | 引擎发布的共享默认材质。作为只读 Engine Content 挂载，项目场景通过固定 ID 引用；修改时先复制成项目资产。 |
@@ -150,11 +155,11 @@ DockSpace 根标识为 `RestArtEngine.DockSpace.v1`。旧版自由窗口配置�
 
 默认左上为 Outliner，左下的 Scene / Details 共用同一个 dock 节点，底部 Content 的 Meshes 保留资源列表与导入／创建入口。Scene 编辑场景级背景、光照和阴影；Details 编辑主选中 Actor 的名称、可见性、变换与资产分配，并以同一 Actor ID 实时解析实例身份、可见性、当前 Mesh 几何与来源，以及该实例各材质 Slot 的有效 Material 引用，不从 Content 的 `selectedMesh_` 取目标，不遍历同 Mesh 实例汇总材质。多选明确主实例，无选中或已删除实例显示空状态，资源失效显示缺失提示；Actor 覆盖优先于网格 Slot 默认绑定，再回退到兼容的单材质引用。场景／Outliner 选择事件请求显示 Details，Content 选择／导入只更新资源浏览状态；焦点请求按事件消费一次，手动切页后不逐帧抢回。实例属性页归入 Actor 输入作用域，Scene / Details 保留既有窗口身份和原生 Docking 布局。
 
-场景在编辑器模式下渲染到 DX11 纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口。`ViewportInteraction` 按本帧真实内容矩形请求场景目标尺寸，在取得纹理后绘制图像，并设置 `SceneSettings` 的纹理局部矩形。主窗口内保留主客户区偏移，外部系统视口从纹理 `(0,0)` 渲染并完整铺满内容区域；鼠标射线、拖放投影、Gizmo 和相机平移显式在桌面图像矩形与纹理局部矩形之间映射。`SceneRenderer::ensureSceneTargetSize` 独立重建 scene color／depth／GBuffer，失败保留旧完整资源；旧纹理保留至本帧所有 UI 平台提交之后，常规 Present 或无主 Present 路径显式调用 `releaseRetiredSceneTargets` 释放。阴影资源和主 swapchain 不因浮窗尺寸改变而重建。渲染器不依赖 Dock 节点或编辑器面板，无 UI 渲染路径继续输出到交换链。
+场景在编辑器模式下渲染到当前后端的离屏纹理，通过 Scene Viewport 的 ImGui 图像绘制合成到窗口；D3D11 使用 SRV，原生 D3D12 使用该后端的描述符。`ViewportInteraction` 按本帧真实内容矩形请求场景目标尺寸，在取得纹理后绘制图像，并设置 `SceneSettings` 的纹理局部矩形。主窗口内保留主客户区偏移，外部系统视口从纹理 `(0,0)` 渲染并完整铺满内容区域；鼠标射线、拖放投影、Gizmo 和相机平移显式在桌面图像矩形与纹理局部矩形之间映射。`SceneRenderer::ensureSceneTargetSize` 独立重建 scene color／depth／GBuffer，失败保留旧完整资源；旧纹理保留至本帧所有 UI 平台提交之后，常规 Present 或无主 Present 路径显式调用 `releaseRetiredSceneTargets` 释放，D3D12 还须等待 GPU 使用结束。阴影资源和主 swapchain 不因浮窗尺寸改变而重建。渲染器不依赖 Dock 节点或编辑器面板，无 UI 渲染路径继续输出到交换链。
 
 材质参数和共享 Shader 从 Content 内部标签迁至按需打开的系统材质窗口，由 `SceneEditor::drawMaterialWindow` 绘制同一份编辑会话。Details 的 Actor 材质入口和当前材质引用统一打开／聚焦该窗口。`ImGuiWindowClass` 使用 `NoAutoMerge`、无父 viewport 和禁止停靠，保持独立 HWND、系统标题栏与任务栏；窗口关闭保留会话草稿和预览，应用退出继续使用全局未保存确认。主窗口最小化时保持工作区提交和 Dock 树存活，Windows 随 owner 隐藏的普通工具窗恢复后继续使用；独立材质窗口可保持可见，隐藏的场景浮窗不持续渲染。F1／F11 隐藏主 UI 时普通工作区浮窗一并隐藏，保留 ImGui 布局并在恢复时重建；材质界面继续独立提交，`EditorDockManager::keepAlive` 保留原 Dock 树。
 
-`ImGuiLayer` 显式选择是否启用官方 Win32/DX11 多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他平台／图形后端或逐显示器字体缩放。
+`ImGuiLayer` 按实际设备选择官方 Win32 与 DX11／DX12 渲染后端，并显式选择是否启用多 viewport；Project Manager 和原图形／GC 自测保留单窗口模式。各系统窗口的 swapchain、RTV、缩放和呈现由后端管理，帧末先提交主 DrawData，再更新／呈现平台窗口；最小化主窗口时可跳过主 DrawData，但离屏与平台窗口工作仍须正确提交和同步。适配层包装次窗口创建及原生过程，使跨帧消息使用正确 context，并把 WM_CLOSE 延迟为 ImGui 关闭请求。销毁平台窗口先于关闭后端和释放设备引用，不改动 vendor。主应用级快捷键限制在主 HWND 焦点，材质窗口的焦点、弹窗和文本编辑屏蔽场景命令。此实现不等于已接通其他操作系统或逐显示器字体缩放。
 
 GUI 职责、交互和验收约定见 [GuiDevelopment.md](GuiDevelopment.md)。停靠体系使用 ImGui，没有将 Godot 的 GUI 运行时引入引擎。
 
@@ -162,7 +167,7 @@ GUI 职责、交互和验收约定见 [GuiDevelopment.md](GuiDevelopment.md)。�
 
 `WindowChrome` 位于 ImGui / Win32 适配层，由每个窗口的 `WindowState` 持有，`ImGuiLayer` 借用并在帧开始时绘制。它通过 `WM_NCCALCSIZE` 去掉系统标题栏绘制，保留 `WS_OVERLAPPEDWINDOW`；标题、按钮与分隔线使用 ImGui 主题，DWM 边框色同步当前主题。`WM_NCHITTEST` 区分拖动区、系统菜单、八向缩放和三个标题按钮，按钮发送原生系统命令，关闭沿用 `WM_CLOSE` → 编辑器未保存提示。主窗口样式、系统菜单和 `HTMAXBUTTON` 的保留遵循微软的[自定义窗口框架](https://learn.microsoft.com/en-us/windows/win32/dwm/customframe)与[吸附布局接入](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/ui/apply-snap-layout-menu)说明。
 
-标题栏左上角复用 `assets/icons/RAEngine.png`：通过 `RestArtEngine.rc` 嵌入程序，由 `ImGuiLayer` 解码并持有 DX11 纹理，在关闭 UI 时释放，不依赖启动目录；图片区域保留原生系统菜单命中。
+标题栏左上角复用 `assets/icons/RAEngine.png`：通过 `RestArtEngine.rc` 嵌入程序，由 `ImGuiLayer` 解码并上传为当前后端的纹理，在 GPU 使用结束后随 UI 关闭释放，不依赖启动目录；图片区域保留原生系统菜单命中。
 
 自绘窗口的 `WM_NCACTIVATE` 在非最小化时直接返回 `TRUE`，允许激活状态切换并由客户端继续负责标题绘制；最小化时保留默认处理，遵循微软的 [WM_NCACTIVATE 返回值与最小化约定](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-ncactivate)。调用 `DefWindowProc(..., -1)` 仍会在模态保存框打开时覆盖出经典浅色系统标题栏；仅拦截 `WM_NCPAINT` 不足以避免该路径。该处理位于共用 `WindowChrome`，保留 `WM_ACTIVATE`、系统模态 owner 禁用／恢复和原生保存框归属，不改窗口样式或对话框主题。
 
@@ -201,7 +206,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 | 视口变换手柄与网格拾取 | 视口选择及移动 / 旋转 / 缩放工具 | 支持多选，Gizmo 以主 Actor 为枢轴对整组应用同一世界增量；编辑事务覆盖批量增删与变换；使用 Y 轴向上的引擎坐标。 |
 | `MeshAsset` | Static Mesh 资产 | 内置几何与 OBJ／FBX 静态网格；无骨骼动画 / Nanite / LOD 工具链。 |
 | `MaterialAsset` 参数编辑 | Material Instance 的参数调节 | 共享标准 Shader，尚无节点图、材质继承或纹理采样参数。 |
-| Shader 编辑器 Apply | 修改后编译并更新预览 | 编译共享 HLSL，当前为 DX11 Shader Model 5。 |
+| Shader 编辑器 Apply | 修改后编译并更新预览 | 共享光栅 HLSL 编译为 Shader Model 5 字节码，由当前 D3D11／D3D12 后端创建候选管线。 |
 | Save | 将编辑成果保存到磁盘 | Apply 与 Save 分离，不存在自动 Cook 或派生数据缓存。 |
 
 这里借鉴 UE 的对象与编辑流程，文件格式和代码实现均为 RestArtEngine 自己的接口。
@@ -210,19 +215,19 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 长期目标是支持 PBR 与 NPR 两套渲染体系：共享适用的底层资源、Shader 系统和管线阶段，同时允许独立的材质模型、Pass 组合与专属 Feature。体系选择、Forward／Deferred 路径及图形后端分别建模；当前 PBR 着色基础与编辑器描边不代表完整双体系已实现。目标、兼容约束与待设计范围统一见 [PBR 与 NPR 双体系目标](RenderingDevelopment.md#pbr-与-npr-双体系目标)。
 
-一帧的 Pass 顺序与资源依赖由 `RenderPipeline` 声明、由 `SceneRenderer` 按声明执行；声明同时驱动诊断标签、文档表格与 CPU 测试，新增 Pass／特性的落点见 [渲染管线组合层](RenderPipeline.md)。当前仍为 DX11 即时执行，尚无 Render Graph、自动屏障或 RHI 资源抽象。
+一帧的 Pass 顺序与资源依赖由 `RenderPipeline` 声明、由 `SceneRenderer` 按声明执行；声明同时驱动诊断标签、文档表格与 CPU 测试，新增 Pass／特性的落点见 [渲染管线组合层](RenderPipeline.md)。主场景几何、阴影及 Forward/Deferred 已通过 D3D11／实验性 D3D12 的实际 RHI 资源／命令执行，见[后端执行范围](RenderBackends.md#实际-rhi-执行范围)。执行仍是固定 Pass 顺序；D3D12 后端依据真实用途记录资源转换屏障与 fence 同步，但尚无完整 Render Graph 编译、瞬态别名和多队列调度。后端的资源状态管理不等于通用图调度。
 
 性能 Trace、帧事件/资源检查和视口数据可视化共用诊断语义，模块分工、捕获生命周期与实施边界见 [Diagnostics.md](Diagnostics.md)。Core 负责 CPU Trace，Renderer 负责真实渲染数据，Editor 负责工具界面；诊断状态不写入场景或材质资产。
 
 前向和延迟两条路径共享材质表达。延迟路径写入三个 G-buffer：Albedo / Roughness、World Normal / Metallic、World Position / Coverage，再进行光照。Lit、Unlit 和调试视图均从该基础上工作。
 
-光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在现有 D3D11 深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享同一套资源管理和切换入口。
+光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在阴影深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享 RHI 绘制和切换入口。
 
-渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染工具预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，通过带 renderer 的保存路径写到同目录 `<scene>.rthumb`（普通 Save Scene／Ctrl+S 不刷新），Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用 D3D11 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标，`detachWindow` 在旧 HWND 销毁前释放它们。自测仍使用固定 1440×900 单窗口以保证截图可比。
+渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染工具预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，通过带 renderer 的保存路径写到同目录 `<scene>.rthumb`（普通 Save Scene／Ctrl+S 不刷新），Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；编辑器窗口以 `WS_OVERLAPPEDWINDOW` 创建在主屏 80% 大小并居中，带原生边框与自定义标题栏。两者共用当前后端的 D3D11 或 D3D12 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标；加载图片、UI 及 swapchain 在旧 HWND 销毁前按 GPU 生命周期顺序释放。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
 Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置网格从引擎 `Content/Meshes/` 只读挂载，不再向项目生成 `Meshes/Builtin/`；旧图元 ID 保留内存兼容。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
-当前编辑器和光栅场景使用 DX11，独立 DX12／DXR 1.1 通道已通过共享图像接入场景。OpenGL、DX12、Vulkan、Null 的通用 RHI 仍为骨架，不能切换完整场景后端。原生 DXR 资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，Scene / Assets 不依赖具体图形 API；细节见 [HardwareRayTracing](HardwareRayTracing.md)。
+`Rhi.h` 的资源／图形命令已有 D3D11 与实验性原生 D3D12 实现；实际启动切换由 SceneRenderer 管理，不经过 `RenderBackend.h` 的旧生命周期骨架。D3D12 的窗口、UI、共享光栅场景、预览、截图、Inspector 资源捕获和 GPU Pass 时间戳已经接入；解析光追、DOF、Outline、原生 DXR／GI 与 GPU 裁剪计数尚未迁移，具体矩阵见 [RenderBackends](RenderBackends.md)。混合模式仍通过共享图像把 DX12／DXR 1.1 结果交给 D3D11，资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，与原生光栅后端分开；细节见 [HardwareRayTracing](HardwareRayTracing.md)。Scene / Assets 不依赖具体图形 API；Vulkan／OpenGL、完整后端热切和设备丢失恢复尚未实现。
 
 解析式兼容模式使用 GPU Shader 求交：内置 Sphere / Plane / Cube 使用精确解析路径，其余网格使用 `StructuredBuffer<RayTriangle>` 遍历。硬件模式将全部可见网格纳入 GPU BLAS／TLAS，提供逐帧预览及渐进／实时路径采样，保留材质草稿与双面语义。`GlobalIlluminationSettings`／`Status` 分开表达算法、更新模式、间接贡献与实际能力。渐进模式累积完整路径追踪画面；实时模式持续输出线性 HDR 间接光，由 Forward／Deferred 的光照 Shader 与各自直接光合成。间接漫反射／GGX 镜面贡献独立控制，曝光在显示阶段处理。配置入口为 `Project → Project Settings... → Rendering`，请求值存于 `.raproject` 的可选 `rendering` 对象；历史失效及预算见 [GlobalIllumination](GlobalIllumination.md)。实时模式有边缘感知空间滤波，尚无运动重投影、发光／透明材质及其他后端 GI。
 
@@ -258,7 +263,8 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 | 场景 / Actor / 场景序列化 | `include/RestArtEngine/Scene/World.h`、`src/Scene/World.cpp` |
 | 网格导入、材质资产与资产文件格式 | `src/Assets/AssetLibrary.cpp`、`src/Assets/AssetSerialization.h` |
 | 工程格式、引擎身份、引擎注册表 | `src/Project/Project.cpp` |
-| DX11 资源、G-buffer、阴影、光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
+| 主后端生命周期、共享 G-buffer／阴影／光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
+| 实际资源／管线与绘制 RHI | `include/RestArtEngine/Renderer/Rhi.h`、`src/Renderer/D3D11/`、`src/Renderer/D3D12/D3D12Rhi.*` |
 | 渲染管线组合、Pass 顺序与资源依赖 | `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/ScenePipeline.cpp`；声明同时驱动诊断标签、文档表格与 CPU 测试 |
 | 单个渲染阶段的实现 | `src/Renderer/Passes/`；执行分支仍在 `src/Renderer/SceneRenderer.cpp` |
 | 特性可用性、降级与阻塞原因 | `include/RestArtEngine/Renderer/RenderFeatures.h`、`src/Renderer/RenderFeatures.cpp` |
@@ -315,7 +321,7 @@ cmake --build --preset windows-debug
 .\scripts\Validate-Render.ps1
 ```
 
-`--editor-self-test` 与 `Validate-Render.ps1` 需要 D3D11 设备（硬件设备不可用时回退 WARP，速度较慢）。
+完整编辑器专项回归仍以现有 D3D11 功能覆盖为基线（硬件设备不可用时可回退 WARP，速度较慢）。原生 D3D12 首阶段另使用 `scripts/Test-BackendStartup.ps1` 与显式 `--backend d3d12 --no-backend-fallback` 验证；D3D11 通过结果不能代替 D3D12 执行证据，参见 [后端验证范围](RenderBackends.md#实现边界)。
 
 窗口外框回归：`powershell -ExecutionPolicy Bypass -File scripts/Test-WindowChrome.ps1`（可通过 `-Executable` 指定构建）。脚本复制 Sandbox 到独立输出目录，隔离布局、主题与场景修改，仅控制自己启动的测试进程；验证场景编辑器与 Project Manager 的标题 / 边角 / 系统菜单命中、最小化、最大化工作区、还原、双击标题以及干净关闭的明确零退出码。场景编辑器另测 F11 / Esc、缩放、实际 F9 截图，以及脏场景点击关闭后保留进程和场景文件。脏关闭用例最后只终止测试进程，不保存测试编辑。
 

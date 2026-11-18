@@ -8,9 +8,9 @@ Commit: `4806a1924ff6181180bf5e4b8b79ab4394118875` (git submodule, detached HEAD
 
 License: MIT. The original license is retained in `vendor/imgui/LICENSE.txt` and included by the CMake install rules.
 
-This is the docking variant of the existing 1.91.9b dependency. It provides `ImGuiConfigFlags_DockingEnable`, `DockSpace`, dock tabs, splitters and docking layout persistence. The core sources and Win32/DX11 backends remain upstream sources without RestArtEngine patches.
+This is the docking variant of the existing 1.91.9b dependency. It provides `ImGuiConfigFlags_DockingEnable`, `DockSpace`, dock tabs, splitters and docking layout persistence. The core sources and Win32/DX11/DX12 backends remain upstream sources without RestArtEngine patches.
 
-The editor enables docking in its ImGui context. Native OS multi-viewport windows are a separate feature and require explicit platform/renderer integration; enabling docking alone does not enable them. The Win32/DX11 editor explicitly enables platform viewports for its separate material workspace, while its six dock panels remain in the main viewport. Scene (scene-wide parameters) and Details (selected Actor properties and instance information) share a tab group by default. Project Manager and render-only validation retain the single-window default; see `docs/Architecture.md` for lifecycle and coordinate contracts.
+The editor enables docking in its ImGui context. Native OS multi-viewport windows are a separate feature and require explicit platform/renderer integration; enabling docking alone does not enable them. The Windows editor uses the selected DX11 or experimental DX12 renderer and explicitly enables platform viewports for its separate material workspace and detachable dock panels. Scene (scene-wide parameters) and Details (selected Actor properties and instance information) share a tab group by default. Project Manager and render-only validation retain the single-window default; see `docs/Architecture.md` for lifecycle and coordinate contracts.
 
 The internal `DockBuilder` API is version-sensitive. Keep default-layout construction isolated in the editor docking manager and verify it when updating ImGui.
 

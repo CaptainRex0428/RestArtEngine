@@ -5,13 +5,13 @@
 <h1 align="center">RestArtEngine</h1>
 
 <p align="center">
-  面向技术美术的 C++20 / DirectX 11 场景渲染引擎与编辑器<br>
-  A C++20 / DirectX 11 scene rendering engine and editor for technical artists
+  面向技术美术的 C++20 场景引擎与编辑器，支持 DirectX 11 与实验性 DirectX 12<br>
+  A C++20 scene engine and editor for technical artists, with DirectX 11 and experimental DirectX 12
 </p>
 
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
-  <img alt="graphics" src="https://img.shields.io/badge/graphics-DirectX%2011%20%2B%20DXR%201.1-107C10">
+  <img alt="graphics" src="https://img.shields.io/badge/graphics-DX11%20%7C%20DX12%20experimental%20%7C%20DXR%201.1-107C10">
   <img alt="language" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
   <img alt="build" src="https://img.shields.io/badge/build-CMake%203.24%2B%20%7C%20MSVC%20v143-064F8C">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
@@ -28,12 +28,14 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 工程（`.raproject`）是**纯数据**：`Content/` 场景与材质、工程自己的 `Shaders/`。它不包含 C++ 代码，也不生成自己的 `.sln`；编译引擎永远只打开仓库根目录的 `RestArtEngine.sln`。
 
+主后端可在 Project Settings 或通过 `--backend` 配置，详见[后端选择与回退](docs/RenderBackends.md)。`d3d11`／`auto` 使用严格 D3D11；`d3d11Dxr` 是 D3D11 光栅＋D3D12/DXR 的正式混合模式，缺少配置的旧工程保留该行为；`d3d12` 真正使用实验性的独立 D3D12 设备绘制场景与编辑器，不创建 D3D11 device。只有设备／目标启动失败时，才按回退策略改用严格 D3D11 或报告错误。原生 D3D12 的功能缺口见同页矩阵，后端选择与光追开关独立。
+
 渲染侧并行存在三条光线路径，用途不同、互不等价：
 
 | 路径 | 后端 | 用途 |
 | --- | --- | --- |
 | 解析式 GPU 光追 | DX11 像素着色器 | 内置图元精确求交 + 三角形缓冲，做一次弹射反射与解析阴影，**不是 DXR** |
-| 硬件光追通道 | DX12 / DXR 1.1（同适配器） | 场景反射、所有投影灯阴影、路径追踪 GI 的求交底座 |
+| 硬件光追通道 | 混合模式的 DX12 / DXR 1.1（同适配器） | 场景反射、所有投影灯阴影、路径追踪 GI 的求交底座；原生 D3D12 尚未接入此功能 |
 | 路径追踪 GI | 复用 DXR 通道的 compute | 渐进累积或实时间接光；Forward / Deferred 消费其间接光 |
 
 引擎长期目标是同时支持 **PBR 与 NPR 两套渲染体系**：共享适用的管线基础，并保留各自的着色与 Feature 差异。当前已有 PBR 着色基础，NPR 体系及双体系组合尚未实现；完整目标与边界见 [渲染开发要求](docs/RenderingDevelopment.md#pbr-与-npr-双体系目标)。
@@ -101,7 +103,7 @@ RestArtEngine 是一个**单可执行文件**的 Windows 引擎：编译 `RestAr
 
 剔除只做到视锥这一层：主视图和每个阴影级联各自测包围盒，DXR 场景不剔——屏幕外的物体仍可能贡献阴影、反射或间接光。规模验收要求视锥内一千万三角形、硬件光追和实时 GI 同时开着，`--render-scale-test` 会导出 JSON、BMP 和 CPU Trace。
 
-诊断分三层。CPU Trace 记录提交、上传、读回的嵌套事件，可导出 Chrome Trace JSON；GPU Pass 计时用异步 query，不阻塞渲染；Frame Inspector 冻结一帧的真实资源和事件，能按通道看图、读单像素，也能导出元数据。管线声明和特性状态也在这里显示，细节见 [渲染管线组合层](docs/RenderPipeline.md)。
+诊断工具由引擎原生实现。CPU Trace 提供多线程时间线、Scope 汇总和 Chrome Trace JSON；D3D11 / D3D12 的 GPU Pass 时间来自异步时间戳。Frame Inspector 可冻结最终输出或选定 Pass 前后附件，检查 Draw 的 PSO、资源绑定、逐次常量及 Shader 源码，按通道看图、读原始像素，并保存包含资源的 `.raframe` 离线包。Runtime 提供结构化消息、图形验证消息和进程内存。数据口径与限制见 [诊断工具](docs/Diagnostics.md)，管线声明见 [渲染管线组合层](docs/RenderPipeline.md)。
 
 一帧的 Pass 顺序和资源依赖由 `RenderPipeline` 声明，执行、诊断和测试读的是同一份数据——这是引擎里少数不允许「三处各写一遍」的地方。
 
@@ -150,8 +152,9 @@ Content 浏览器分 Project/Engine 两个来源，支持面包屑、前后退�
 - CMake **3.24+**（仅 CMake 构建方式需要）
 - Premake **5.0**（仅 Premake 生成 solution 方式需要；`premake5.exe` 随仓库在 `scripts/premake/`）
 - Git（第三方依赖是 submodule，首次需 `git submodule update --init`）
-- 支持 D3D11 Feature Level 11.0 的显卡；硬件设备创建失败时自动回退 WARP 软件渲染（性能较低）
-- 硬件光追与路径追踪 GI 额外需要 DXR 1.1、Shader Model 6.5、同适配器 DX12 与 `dxcompiler.dll` / `dxil.dll`；不满足时保留光栅画面并报告原因
+- D3D11 路径需要 Feature Level 11.0；硬件设备创建失败时可回退 WARP 软件渲染（性能较低）
+- 实验性原生 D3D12 需要可用的 D3D12 设备／驱动，最低 Feature Level 11.0；硬件优先，无可用硬件设备时尝试 D3D12 WARP。D3D12 初始化仍失败时，再按主后端回退设置处理
+- 混合模式的硬件光追与路径追踪 GI 额外需要 DXR 1.1、Shader Model 6.5、同适配器 DX12 与 `dxcompiler.dll` / `dxil.dll`；不满足时保留光栅画面并报告原因
 
 ## 构建
 
@@ -351,7 +354,7 @@ Forward : 背景 + 几何 → 绘制时直接着色
         无 UI：直接绘制到交换链 → Present
 ```
 
-`RenderPipeline` 把上面的顺序声明成 Pass 列表（读 / 写资源位），`SceneRenderer` 按列表执行；诊断面板显示同一份声明与「本帧实际执行」的差别。当前执行层仍是 DX11 即时上下文：没有 Render Graph、自动屏障或 RHI 资源抽象。
+`RenderPipeline` 把上面的顺序声明成 Pass 列表（读 / 写资源位），`SceneRenderer` 按固定顺序执行；诊断面板显示同一份声明与「本帧实际执行」的差别。主场景几何、阴影、Forward/Deferred 通过 D3D11／实验性 D3D12 的实际 RHI 执行资源创建、附件绑定和 Draw。D3D12 后端会记录实际资源状态转换与屏障，但没有完整 Render Graph 编译、瞬态别名或多队列调度。Inspector 捕获和 Pass 时间戳已覆盖两后端；DXR、DOF、Outline 仍有差异，范围见[后端说明](docs/RenderBackends.md#实际-rhi-执行范围)。
 
 - 常量缓冲契约（CPU / HLSL 双向锁定，候选管线创建时用 `D3DReflect` 校验）：
 
@@ -424,18 +427,19 @@ Forward : 背景 + 几何 → 绘制时直接着色
 | `src/Assets/` | 资产容器与注册表、内置 Mesh、OBJ / FBX 导入、材质参数、缩略图、重导入与删除保护 |
 | `include/RestArtEngine/Camera/Camera.h` | Pose / Lens / View / Ray、透视与正交投影、屏幕射线；头文件实现，不依赖 DX11 或编辑器 |
 | `src/Project/Project.cpp` | `.raproject` / `Engine.raeengine`、兼容性检查、引擎注册表 |
-| `src/Renderer/SceneRenderer.cpp` | DX11 设备、交换链、G-buffer、阴影、光照、GI / DXR 接线、截图 |
+| `src/Renderer/SceneRenderer.cpp` | 实际主后端选择与生命周期、共享场景 Pass、G-buffer、阴影、光照、混合 GI / DXR 接线与截图 |
+| `include/RestArtEngine/Renderer/Rhi.h`、`src/Renderer/D3D11/`、`src/Renderer/D3D12/D3D12Rhi.*` | API 无关资源／绘制契约、D3D11 实现与实验性原生 D3D12 实现 |
 | `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/` | 一帧的 Pass 顺序、资源依赖与校验 |
 | `src/Renderer/Passes/` | 抽出的渲染阶段（当前为阴影深度图） |
 | `include/RestArtEngine/Renderer/RenderFeatures.h` | 特性三层状态与阻塞原因 |
-| `src/Renderer/D3D12/HardwareRayTracing.cpp` | 独立 DX12 / DXR 1.1 通道、BLAS / TLAS、路径追踪 dispatch |
+| `src/Renderer/D3D12/HardwareRayTracing.cpp` | 混合模式 DX12 / DXR 1.1 通道、BLAS / TLAS、路径追踪 dispatch；与原生 D3D12 光栅后端分开 |
 | `src/Editor/SceneEditor.cpp` | Outliner / Scene / Details / Content、材质与 Shader 草稿 |
 | `src/Editor/EditorStatusBar.cpp`、`EditorConsole.cpp` | 固定状态栏、命令解析与补全、Output Log |
-| `src/Editor/DiagnosticsPanel.cpp` | Profiler / Trace、GPU Pass 计时、Frame Inspector |
+| `src/Editor/DiagnosticsPanel.cpp` | Profiler / Trace、GPU Pass 计时、Frame Inspector、Runtime 日志与内存 |
 | `src/Editor/ViewportInteraction.cpp` | 视口拾取、变换手柄、相机导航（环绕 / 平移 / 聚焦 / Pilot） |
 | `src/Editor/EditorDockManager.cpp` | 面板身份、默认 Dock 树与布局恢复 |
-| `src/Editor/LoadingScreen.cpp` | 启动加载界面：背景图解码 + 底部相对定位的进度层 |
-| `src/ImGui/ImGuiLayer.cpp`、`EditorTheme.cpp`、`WindowChrome.cpp` | ImGui 上下文与 Win32 / DX11 适配、双主题、自定义标题栏 |
+| `src/Editor/LoadingScreen.cpp`、`LoadingScreenRenderer.cpp` | 背景图共用解码与当前后端上传、底部相对定位进度层、Renderer 适配 |
+| `src/ImGui/ImGuiLayer.cpp`、`EditorTheme.cpp`、`WindowChrome.cpp` | ImGui 上下文与 Win32 / DX11 / DX12 适配、双主题、自定义标题栏 |
 | `app/MinimalApp.cpp` | 引擎可执行入口：Win32 窗口、消息循环、Project Manager、编辑器启动、加载界面 |
 | `app/EditorSmoke.cpp` 等 `*Smoke.cpp` | GPU 自测：真实 UI 输入注入、GI、硬件光追、灯光、相机、网格属性等 |
 | `scripts/` | 引擎验证脚本：`Validate-Render.ps1`、`Test-Window.ps1`、`Test-WindowChrome.ps1`、`Test-Capture.ps1` |
@@ -453,7 +457,7 @@ Forward : 背景 + 几何 → 绘制时直接着色
 
 验证先于文档。改动至少跑对应专项自测，涉及管线或特性时补 CPU 测试；测试一律用隔离工程，不要拿真实工程当靶子。截图和文档与功能同一次提交更新，宁可写得少，也不要留下与代码不符的描述。
 
-路线图按缺口排，不按愿望排：近期是 NPR 体系（材质入口、专属 Pass 与 Feature 矩阵）、资产侧的纹理与切线、局部光栅阴影、GI 的时间降噪与重投影；中期是完整后端抽象（DX12/Vulkan/OpenGL）和多 GI 历史。每条的具体缺口都在对应文档的「边界」里，动手前先读那一节。
+尚待扩展的能力包括原生 D3D12 的完整 Feature／诊断覆盖与异步提交优化、NPR 体系、纹理与切线、局部光栅阴影、GI 时间降噪与重投影、Vulkan／OpenGL 及多 GI 历史。各项的当前边界以对应技术文档为准，不把实验后端的最小场景闭环当作完整能力覆盖。
 
 目录归属、常见改动落点、必须守住的常量缓冲 / 资源 / 事务性约定，以及提交前的验证命令，汇总在 **[架构文档 · 开发指引](docs/Architecture.md#开发指引)**。
 
@@ -512,6 +516,8 @@ Capture 外框回归使用 `scripts/Test-Capture.ps1`：从桌面合成画面读
 | `--capture-dir <path>` | 批量运行 / 自测的截图输出目录（BMP） |
 | `--capture-temp` | 末帧写入受管临时缓存（需 `--frames`，排除 `--capture-dir` 与自测） |
 | `--trace-output <path>` | 记录应用帧到 Chrome Trace JSON |
+| `--inspect-capture <file.raframe>` | 在 Frame Inspector 打开离线资源快照，来源后端与当前后端可以不同 |
+| `--inspector-self-test` / `--inspector-ui-self-test` | 检查选定后端的资源捕获、离线包与诊断界面；使用隔离测试工程 |
 | `--self-test` | 渲染自测 |
 | `--editor-self-test` | 编辑器全流程自测 |
 | `--hardware-rt-self-test` | 硬件光追自测 |
@@ -531,7 +537,7 @@ Capture 外框回归使用 `scripts/Test-Capture.ps1`：从桌面合成画面读
 
 ## 当前边界
 
-- 编辑器与光栅场景使用 **DirectX 11**，硬件光追使用同适配器 DX12／DXR 1.1 通道；`RenderBackend` 中的 OpenGL / DX12 / Vulkan / Null 仍是生命周期骨架，尚不支持完整场景后端切换。当前没有 Render Graph、自动屏障或 RHI 资源抽象，管线仍按 DX11 即时上下文执行。
+- 编辑器可在启动时选择 D3D11、D3D11＋DXR 混合模式或实验性原生 D3D12；Auto 仍选择严格 D3D11。原生 D3D12 已接入主设备、场景、UI、预览、截图、Inspector 资源捕获与 GPU Pass 时间戳；尚无 DXR／GI、解析光追、DOF、Outline 和 GPU 裁剪计数，完整矩阵见[后端说明](docs/RenderBackends.md)。旧 `RenderBackend` 生命周期骨架不参与实际场景绘制；D3D12 已执行资源屏障，完整 Render Graph、后端热切与设备丢失恢复尚未实现。
 - 场景颜色是 RGBA8；没有 HDR 交换链、MSAA、Bloom / SSAO 等通用后处理栈。GTAO 与 Contact Shadow 是延迟光照内部的着色项，景深是唯一的独立显示阶段 Pass。
 - 光栅路径只有首个投影方向光使用阴影贴图；其余方向光与局部光需要解析光追或硬件光追才能投影。矩形光是四点积分，不是 LTC。
 - 路径追踪 GI 只存在于 DXR 通道：没有软件回退，预览与缩略图永不显示 GI；没有降噪器、运动重投影或其他 GI 算法。实时模式是持续更新而非固定帧率；渐进模式需要足够样本，噪点不属于缺陷。
@@ -547,7 +553,7 @@ Capture 外框回归使用 `scripts/Test-Capture.ps1`：从桌面合成画面读
 - 视锥剔除已实现，遮挡剔除未实现；DXR 场景在几何或实例变换变化时重建世界空间数据。
 - 四分屏只有活动格承载 DXR / GI 历史；非活动格是光栅预览，可能滞后一帧；相机预览为光栅且最长边 1024 px。
 - 场景缩略图（`.rthumb`）只在保存场景时刷新，普通材质 / 网格修改不会触发重绘。
-- 移植性：目前只有 Windows 实际可用；Linux / macOS、统一 RHI 与编辑器跨平台适配仍在设计范围内。
+- 移植性：目前只有 Windows 实际可用；已有 RHI 资源／绘制切片不代表完整跨 API 能力，Linux / macOS、Vulkan / OpenGL 与编辑器跨平台适配尚未完成。
 
 ## 第三方依赖与许可
 

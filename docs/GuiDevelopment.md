@@ -14,7 +14,7 @@
 
 | 范围 | 源码入口 | 已有实现与边界 |
 | --- | --- | --- |
-| GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11；未接通跨平台 GUI 后端。 |
+| GUI 适配 | [ImGuiLayer.cpp](../src/ImGui/ImGuiLayer.cpp)、[依赖版本](vendor/imgui.md) | Dear ImGui `v1.91.9b-docking`，Win32 / DX11 / 实验性原生 DX12；未接通跨平台 GUI 后端。 |
 | 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
 | 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮、外部系统浮窗及布局恢复；材质编辑器保持独立窗口。 |
 | 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数与当前场景切换）、Details（Actor 实例属性）、Viewport settings、Content & Editors（`AssetRegistry` 驱动的文件夹树、列表/网格资产区、`Asset Details` 窗）、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 不再嵌套 Meshes 页签，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
@@ -30,7 +30,7 @@ Scene / Assets 不依赖 ImGui、ImGuizmo 或 DX11；Renderer 提供场景纹理
 
 材质参数与工程共享 Shader 两页位于按需打开的系统独立 `MaterialWorkspace`，Scene 与 Details 中当前 Actor 实例的材质引用复用同一入口；Content 面板保留完整资产浏览（材质、网格、场景），材质编辑仍在独立窗口。Mesh 资产保存几何、命名材质 Slot 与可选 UV 流；Details 的材质入口按当前实例的 Slot 覆盖、网格默认绑定和兼容回退解析，不汇总同 Mesh 的其他实例。
 
-编辑器通过锁定版 Win32/DX11 后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。普通工作区面板与工具窗自动外移／回嵌，不逐帧绑定主 viewport；DockSpace 宿主和主工具栏继续位于主窗口。普通系统浮窗由主窗口拥有，随主窗口最小化隐藏、恢复后显示；独立材质窗口保留无父窗口的策略。最小化路径继续提交仍需处理的平台窗口并维持 Dock 树，隐藏的场景浮窗不持续渲染。普通面板保留既有无关闭按钮的语义，可关闭工具窗沿各自状态关闭。场景目标尺寸与主 swapchain 分开，图像桌面矩形与纹理局部矩形显式映射，不能按主窗口边界裁掉外部视口。完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)。
+编辑器通过锁定版 Win32 平台与所选 DX11／DX12 图形后端接入系统 viewport，材质窗口不自动并回主窗口，也不加入工作区默认 Dock 树；关闭保留本次会话草稿和实时预览，应用退出统一确认。普通工作区面板与工具窗自动外移／回嵌，不逐帧绑定主 viewport；DockSpace 宿主和主工具栏继续位于主窗口。普通系统浮窗由主窗口拥有，随主窗口最小化隐藏、恢复后显示；独立材质窗口保留无父窗口的策略。最小化路径继续提交仍需处理的平台窗口并维持 Dock 树，隐藏的场景浮窗不持续渲染。普通面板保留既有无关闭按钮的语义，可关闭工具窗沿各自状态关闭。场景目标尺寸与主 swapchain 分开，图像桌面矩形与纹理局部矩形显式映射，不能按主窗口边界裁掉外部视口。完整跨屏字体 DPI、其他平台／后端不由此自动获得支持。操作说明见 [EditorGuide](EditorGuide.md)，架构契约见 [Architecture](Architecture.md)。
 
 ## Scene / Details 信息分工
 
@@ -75,7 +75,7 @@ List／Tiles 共用 `AssetRegistry::query` 的目录、名称／路径搜索、�
 
 ## 默认设计方向与视觉规则
 
-Diagnostics 是按需打开的可关闭、可停靠工具窗，复用既有主题与 DockSpace，不重置原六面板布局。Profiler 与 Frame Inspector 共用工具窗；冻结图像的取像素不消费 Live 视口输入。Diagnostics 获得焦点时抑制场景快捷键（包括鼠标悬停 Live 视口时的 F/W/E/R/Space），关闭录制和捕获不写入工程资产；工具行为见 [Diagnostics.md](Diagnostics.md)。
+Diagnostics 是按需打开的可关闭、可停靠工具窗，复用既有主题与 DockSpace，不重置原六面板布局。Profiler、Frame Inspector 与 Runtime 共用工具窗：多线程时间线／Scope、Draw 状态／Pass 资源／离线包和结构化日志／进程内存分别显示。窄工具窗按钮换行、内容可滚动，表格保留横向滚动。冻结图像的取像素不消费 Live 视口输入。Diagnostics 获得焦点时抑制场景快捷键（包括鼠标悬停 Live 视口时的 F/W/E/R/Space），关闭录制和捕获不写入工程资产；工具行为见 [Diagnostics.md](Diagnostics.md)。
 
 面向技术美术的桌面工具：以场景视口和高频编辑为中心，使用稳定的停靠面板、清晰分组、紧凑但可读的属性控件。借鉴 Godot 的职责和交互，不引入其 GUI 运行时，也不把其他引擎的品牌图标当本项目资源。Project Manager 和加载页可使用不同的信息密度，仍应保持主题、术语和反馈一致。
 

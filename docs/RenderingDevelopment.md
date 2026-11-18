@@ -90,17 +90,18 @@
 
 | 项目 | 源码现状 | 后续缺口 |
 | --- | --- | --- |
-| 场景渲染 | `SceneRenderer` 实际使用 D3D11，支持 Forward／Deferred。 | 与后端资源、命令和呈现接口尚未统一。 |
-| 管线组合 | `RenderPipeline` 声明 Pass 顺序与资源读写边，`SceneRenderer` 按声明执行并驱动诊断标签；`RenderFeatures` 提供构建可用性／设备能力／帧前置条件三层状态与阻塞原因。首轮仅抽出阴影阶段。 | 其余 Pass 仍在执行器的 `switch` 中；资源所有权、自动屏障、Render Graph 与 RHI 尚未实现，见 [RenderPipeline](RenderPipeline.md)。 |
+| 场景渲染 | D3D11 与实验性原生 D3D12 通过 RHI 执行 Forward／Deferred；主窗口、UI、加载和预览使用所选后端。 | 原生 D3D12 的未迁移特性见[能力表](RenderBackends.md#原生-d3d12-首阶段范围)。 |
+| 管线组合 | `RenderPipeline` 声明 Pass 顺序与资源读写边，`SceneRenderer` 按声明执行并驱动诊断标签；`RenderFeatures` 提供构建可用性／设备能力／帧前置条件三层状态与阻塞原因。首轮仅抽出阴影阶段。 | 其余 Pass 仍在执行器的 `switch` 中。主场景已有实际 RHI 附件／加载与采样声明，资源由渲染器持有；完整生命周期声明、自动屏障与 Render Graph 未实现，见 [RenderPipeline](RenderPipeline.md)。 |
+| 原生诊断 | 两后端的 Pass 资源快照／GPU 时间戳、详细 RHI Draw 状态与逐次常量、离线 `.raframe`，CPU 多线程时间线及 Runtime 日志／内存，见 [Diagnostics](Diagnostics.md)。 | Native 调用的完整绑定历史、任意 Draw 图片、命令回放／Pixel History／Shader 单步、CPU 源码断点与采样分析未实现；GPU 时间不包含全部队列与 UI。 |
 | PBR／NPR 体系 | 已有 metallic／roughness 材质与 PBR 着色基础；编辑器 outline 用于选择／拖放反馈。 | 完整 PBR 能力清单仍需明确；NPR 材质模型、专属 Feature 与双体系组合机制尚未实现。 |
-| 后端接口 | `IRenderBackend` 包含多 API 类型与生命周期占位；独立 DX12／DXR 1.1 通道通过共享图像接入 DX11 场景。 | 尚无完整 DX12、Vulkan、OpenGL 场景后端切换；枚举不等于可用实现。 |
+| 后端接口 | `IRenderBackend` 仍为生命周期占位；真实 App 已接入[启动选择／回退](RenderBackends.md)，严格 D3D11 不初始化 DX12，混合模式保留 DXR 共享通道，原生 D3D12 独立创建设备。 | `Rhi.h` 的 D3D11／D3D12 实现承接主场景资源与绘制；原生 D3D12 特性覆盖仍有限。Vulkan／OpenGL 未实现；生命周期与范围见[后端说明](RenderBackends.md#实际-rhi-执行范围)。 |
 | 硬件光追 | 项目配置总开关及独立反射／阴影开关；实际 DXR RayQuery、BLAS／TLAS、共享材质与实时草稿。 | 当前仅 Windows 同适配器 DX11／DX12 组合；能力与限制见 [HardwareRayTracing](HardwareRayTracing.md)。 |
 | 全局光照 | 共用算法／模式／贡献请求与状态契约；DXR 路径采样支持渐进累积和实时间接光，Forward／Deferred 消费共享 HDR，漫反射与镜面贡献独立可配。 | 当前仅 PathTracing 算法及 Disabled；实时模式有空间滤波，无运动重投影，其他算法和后端尚未实现。 |
-| Shader 热编译 | 候选编译 2 个 VS、6 个 PS 和可用的硬件计算管线，失败保留活动版本。光栅专属材质允许在硬件关闭时更新并明确禁用不兼容硬件管线。 | 文件监听、异步编译与编译缓存尚未实现。 |
+| Shader 热编译 | 候选编译 2 个 VS、7 个 PS 与支持的材质图形管线，混合模式同时准备可用的硬件管线；失败保留活动版本。光栅专属材质允许在硬件关闭时更新并明确禁用不兼容硬件管线。 | 文件监听、异步编译与编译缓存尚未实现。 |
 | 选中描边 | 独立遮罩与合成通道，深度区分可见实线和遮挡虚线，前方物体描边可选。 | 最终遮挡形态、多选及缩放需定向画面验证；无选中时跳过 pass 和 mask 分配，但初始化仍创建 Shader 和状态。 |
 | 工具预览 | 材质球、网格和场景复用离屏渲染；材质窗口、资产详情、场景缩略图各持有独立纹理和读回入口。 | 工具取景距离上限 80，不保证任意尺度场景完整入镜。 |
 | 实时参数 | 光栅及硬件光追的光照／曝光、Actor 变换与材质有效草稿按帧更新，Apply／Save 保持提交与持久化边界。 | Vulkan／OpenGL 接入时须维护相同语义。 |
-| 可移植性 | CMake 非 Windows 会拒绝配置；原生窗口、DX11、DirectXMath 和 ImGui DX11 适配存在耦合。 | Linux／macOS、共享渲染接口及编辑器 GPU 适配需要迁移。 |
+| 可移植性 | CMake 非 Windows 会拒绝配置；原生窗口、DirectXMath 和 ImGui Win32／DX11／DX12 适配仍依赖 Windows。 | Linux／macOS 及其他后端仍需迁移；现有 RHI 不能作为这些平台已支持的证据。 |
 
 现有验证入口是 `--editor-self-test` 与 `scripts/Validate-Render.ps1`。后者默认寻找 Premake 输出；验证 CMake 构建时显式传入 `-Executable`，避免测到旧二进制。脚本可通过 `-Project` 指定隔离测试工程，避免启动加载在真实工程生成派生资产。
 
@@ -148,13 +149,13 @@ macOS 的 Vulkan 设计需要考虑可移植实现的能力差异。[Khronos Por
 
 ## 拟议职责与目录（待讨论）
 
-下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，尚未全部按此拆分目录。其中「基础 Pass」「管线组合」已有首轮实现（`src/Renderer/Passes/`、`src/Renderer/Pipelines/`，仅声明与阴影阶段），其余仍为设计目标。
+下表定义设计落点，名称和文件拆分尚未定稿；按实际重构逐步引入，尚未全部按此拆分目录。其中「基础 Pass」「管线组合」已有实现（`src/Renderer/Passes/`、`src/Renderer/Pipelines/`）；`Rhi.h` 与 `src/Renderer/D3D11/` 已提供主场景的实际资源／绘制切片，尚未覆盖全部生命周期。其余拆分仍为设计目标。
 
 | 职责 | 拟议位置 | 边界 |
 | --- | --- | --- |
 | 平台适配 | `include/RestArtEngine/Platform/`、`src/Platform/` | 窗口、surface、输入、文件监听及平台生命周期；窗口库选型未定。 |
-| RHI 契约 | `include/RestArtEngine/Renderer/RHI/` | 自有资源／管线描述、命令、资源读写／同步、能力查询、呈现契约。 |
-| API 实现 | `src/Renderer/Backends/{DX11,DX12,Vulkan,OpenGL}/` | 设备、资源、命令提交、同步、交换链／context 与原生句柄。 |
+| RHI 契约 | 已有 `include/RestArtEngine/Renderer/Rhi.h`，后续按职责扩展 | 自有资源／管线描述、命令、资源读写／同步、能力查询、呈现契约。 |
+| API 实现 | 已有 `src/Renderer/D3D11/` 与独立 DXR `D3D12/`；其他后端目录待实现时确定 | 设备、资源、命令提交、同步、交换链／context 与原生句柄。 |
 | Shader 系统 | `include/RestArtEngine/Renderer/Shader/`、`src/Renderer/Shader/` | 源码与 include 依赖、编译变体、统一反射、绑定映射、诊断、候选发布。 |
 | 基础 Pass | `src/Renderer/Passes/`、`Shaders/Private/Passes/` | 声明输入输出并完成一个渲染阶段，不持有编辑器状态。 |
 | 管线组合 | `src/Renderer/Pipelines/` | 组合 Forward／Deferred 等 Pass，声明执行与资源依赖。 |

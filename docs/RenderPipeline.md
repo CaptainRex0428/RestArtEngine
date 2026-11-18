@@ -15,7 +15,7 @@
 | [`include/RestArtEngine/Renderer/RenderFeatures.h`](../include/RestArtEngine/Renderer/RenderFeatures.h) | 特性的三层状态模型与矩阵 |
 | [`src/Renderer/RenderFeatures.cpp`](../src/Renderer/RenderFeatures.cpp) | 每条特性的判定规则与阻塞原因 |
 | [`src/Renderer/Passes/ShadowPass.h`](../src/Renderer/Passes/ShadowPass.h) | 第一个被抽出的 Pass：阴影深度图 |
-| [`src/Renderer/SceneRenderer.cpp`](../src/Renderer/SceneRenderer.cpp) | DX11 执行器：按声明顺序执行、发布诊断与特性矩阵 |
+| [`src/Renderer/SceneRenderer.cpp`](../src/Renderer/SceneRenderer.cpp) | 场景执行器：按声明顺序调用 RHI 与尚未迁移的 native 阶段，发布诊断与特性矩阵 |
 | [`tests/RenderPipelineTests.cpp`](../tests/RenderPipelineTests.cpp) | 组合顺序、资源边与特性判定的 CPU 回归 |
 
 ---
@@ -44,7 +44,7 @@
 | --- | --- | --- | --- |
 | 渲染体系 | PBR / NPR（NPR 尚未实现） | 用什么着色模型家族 | 目标见 [RenderingDevelopment.md](RenderingDevelopment.md#pbr-与-npr-双体系目标) |
 | 管线组织 | `RenderPath::Forward` / `Deferred` | 一帧拆成哪些阶段、在哪阶段着色 | `RenderPipeline.h` |
-| 图形后端 | DX11 / DX12 / Vulkan / OpenGL | 用哪个 API 提交 | `RenderBackend.h`（目前仅 DX11 真实可用） |
+| 图形后端 | DX11 / DX12 / Vulkan / OpenGL | 用哪个 API 提交 | `BackendSelection.h`、`Rhi.h`（DX11 与实验性原生 DX12 已接入；其余未实现，[能力范围](RenderBackends.md)） |
 | 可选特性 | 阴影方案、解析光追、DXR、GI、DOF、描边 | 这一帧启用了哪些能力 | `RenderFeatures.h` |
 
 **不要**把「Deferred」等同于「PBR」，也不要把「阴影方案」当成后端能力。管线组织只决定阶段形状；特性只决定在形状里插入什么。PBR/NPR 将来是在「着色函数与材质契约」这一层分化，Forward 和 Deferred 都可以服务任一体系。
@@ -70,7 +70,7 @@
 
 几个刻意的取舍：
 
-- **常量缓冲和采样器不算边**。`b0`–`b8` 是每帧统一上传的绑定，不构成「谁生产给谁消费」的关系；把它们画进图里只会让图变成绑定清单。
+- **常量缓冲和采样器不算边**。`b0`–`b8` 在帧准备及逐对象绘制时更新，不列入这张粗粒度图像依赖表；实际 RHI 命令仍记录上传与绑定，不代表它们没有生命周期或同步要求；把它们画进图里只会让图变成绑定清单。
 - **`RayTriangleScene` 是外部输入**。它在 Pass 列表开始前由 `prepareRayTriangles()` 准备好，校验器把它当作帧输入（`pipelineFrameInputs`），而不是要求某个 Pass 生产它。
 - **场景几何本身不是资源**。所有绘制类 Pass 都隐含读取世界与资产；把它抽象成资源没有信息量。
 - **一个资源可以有多个写者**（`SceneColor` 会被光照写、被硬件回读覆盖、被 DOF 改写），但**任何读取都必须发生在至少一个写者之后**。这正是校验器检查的核心。
@@ -172,17 +172,19 @@
    finishDiagnostics()、特性矩阵快照、编辑器回读、设备移除检查
 ```
 
-执行器仍然是 DX11 即时上下文，Pass 之间靠显式状态绑定衔接；这一层**没有** Render Graph、没有自动屏障、没有瞬态资源别名。声明解决的是「顺序与依赖可见」，不是「自动调度」。真正的 RHI 抽象（`include/RestArtEngine/Renderer/RHI/`）尚未实现，现在的 `IRenderBackend` 只是生命周期骨架。
+主场景阴影、Forward/Deferred 已通过 `Rhi.h` 与实际 D3D11 实现执行。逻辑 `RenderPipeline` 保持资源位与顺序校验；执行器将其映射为 `rhi::RenderPassDesc` 的实际颜色／深度附件、层、Load/Clear/Store 和采样纹理句柄，后端验证并实际绑定、清屏与绘制。Forward 几何以 Load 保留背景和深度，不将同一颜色附件同时绑定为 SRV。详见[执行范围](RenderBackends.md#实际-rhi-执行范围)。
+
+这仍是固定顺序即时执行；没有 Render Graph、自动屏障、瞬态别名或自动调度。逻辑声明与具体绑定仍由执行器映射，未统一覆盖上传、copy、UI采样和呈现。原生 `IRenderBackend` 生命周期骨架与实际资源／命令 RHI 是不同接口。
 
 ### 6.1 为什么阴影 Pass 单独抽成了模块
 
 `src/Renderer/Passes/ShadowPass.cpp` 是第一个从 `render()` 里搬出来的阶段。它展示了 Pass 模块最小应有的样子：
 
-- **输入**：设备上下文、已上传的 `b3`、每层深度的 DSV、层数、图尺寸；
-- **行为**：设置 2048² 视口 → 逐层绑定 DSV、清深度、写该层光照常量、绘制可见几何 → 解绑 DSV → 恢复相机常量；
+- **输入**：RHI 命令接口、已上传的 `b3` 缓冲句柄、实际深度数组句柄、层数、图尺寸；
+- **行为**：逐层开启 depth Clear/Store Pass → 设置 2048² 视口、写该层光照常量、RHI 绘制可见几何 → 结束 Pass → 恢复相机常量；失败同样结束自有 Pass 并恢复常量；
 - **输出**：深度数组内容（由渲染器持有）。
 
-它通过 `std::function` 回调拿到「写本层常量」和「绘制几何」，因此不反向依赖 `SceneRenderer::Impl`。**资源所有权仍留在渲染器**：这一版只抽出阶段逻辑，不搬资源生命周期；等 RHI 的资源描述稳定后再把纹理、DSV、常量缓冲的归属移进 Pass，避免现在为抽象而抽象。
+它通过 `std::function` 回调拿到「写本层常量」和「绘制几何」，因此不反向依赖 `SceneRenderer::Impl`。**持久资源所有权仍留在渲染器**，Pass 通过有类型的 RAII 句柄借用；公共 Pass 接口没有 D3D11 context 或 DSV。纹理内部视图由后端创建，不能把 D3D11 对象传给未来其他后端的共享 Pass。
 
 ### 6.2 诊断标签来自声明
 

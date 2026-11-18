@@ -10,6 +10,8 @@
 
 ## 项目格式
 
+主后端选择与光追请求分开，见 [主渲染后端选择](RenderBackends.md)。缺少 `backendPreference` 的工程保持原有混合路径；明确选择 `d3d11`、当前 `auto` 或从未实现的 `d3d12` 回退后，不初始化 DXR bridge，保留硬件／GI 请求并显示后端限制。`--no-hardware-rt` 仅关闭 Feature 执行；要完全不初始化 D3D12，使用 `--backend d3d11`。
+
 工程版本 1／2／3 均可省略以下对象，默认关闭硬件光追及 GI，两个独立预览效果默认开启：
 
 ```json
