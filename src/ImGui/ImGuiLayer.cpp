@@ -1,6 +1,8 @@
 #include <RestArtEngine/ImGui/ImGuiLayer.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
 #include <RestArtEngine/ImGui/WindowChrome.h>
+#include <RestArtEngine/Renderer/SceneRenderer.h>
+#include "../Renderer/D3D12/D3D12Rhi.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -13,12 +15,14 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_dx11.h>
+#include <imgui_impl_dx12.h>
 #include <imgui_impl_win32.h>
 #include <cmath>
 #include <iostream>
 #include <string>
 #include <array>
 #include <cfloat>
+#include <span>
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "shell32.lib")
@@ -82,6 +86,11 @@ struct PlatformWindowBinding {
 std::unordered_map<HWND, PlatformWindowBinding> platformWindowBindings;
 bool backendContextBindingWarningReported = false;
 
+struct RestoreContext {
+    ImGuiContext* previous;
+    ~RestoreContext() { ImGui::SetCurrentContext(previous); }
+};
+
 // The upstream platform callback can run between frames when the engine has
 // restored another (or no) current context. Bind the context stored by Win32's
 // backend for the entire native dispatch, including its default procedure.
@@ -136,9 +145,10 @@ LRESULT CALLBACK platformWindowProc(HWND window, UINT message, WPARAM wparam, LP
     return result;
 }
 
-// Decode the original logo embedded in the executable, independent of cwd and
-// project assets. The layer owns the resulting SRV for its DX11 backend lifetime.
-HRESULT loadLogo(ID3D11Device* device, ID3D11ShaderResourceView** output) {
+// Decode the same original image for either backend, independent of cwd/assets.
+constexpr UINT logoSide = 128;
+using LogoPixels = std::array<BYTE, logoSide * logoSide * 4>;
+HRESULT decodeLogo(LogoPixels& pixels) {
     const auto module = GetModuleHandleW(nullptr);
     const auto resource = FindResourceW(module, L"RAENGINE_LOGO", RT_RCDATA);
     if (!resource) return HRESULT_FROM_WIN32(GetLastError());
@@ -168,45 +178,77 @@ HRESULT loadLogo(ID3D11Device* device, ID3D11ShaderResourceView** output) {
     if (FAILED(hr = decoder->GetFrame(0, &frame))) return hr;
     ComPtr<IWICBitmapScaler> scaler;
     if (FAILED(hr = factory->CreateBitmapScaler(&scaler))) return hr;
-    constexpr UINT side = 128; // Plenty of detail for the small caption at high DPI.
-    if (FAILED(hr = scaler->Initialize(frame.Get(), side, side, WICBitmapInterpolationModeFant))) return hr;
+    if (FAILED(hr = scaler->Initialize(frame.Get(), logoSide, logoSide, WICBitmapInterpolationModeFant))) return hr;
     ComPtr<IWICFormatConverter> converter;
     if (FAILED(hr = factory->CreateFormatConverter(&converter))) return hr;
     if (FAILED(hr = converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppRGBA,
         WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) return hr;
-    std::array<BYTE, side * side * 4> pixels{};
-    if (FAILED(hr = converter->CopyPixels(nullptr, side * 4,
-        static_cast<UINT>(pixels.size()), pixels.data()))) return hr;
+    return converter->CopyPixels(nullptr, logoSide * 4,
+        static_cast<UINT>(pixels.size()), pixels.data());
+}
+
+HRESULT loadLogo(ID3D11Device* device, const LogoPixels& pixels, ID3D11ShaderResourceView** output) {
+    using Microsoft::WRL::ComPtr;
     D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = desc.Height = side;
+    desc.Width = desc.Height = logoSide;
     desc.MipLevels = desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_IMMUTABLE;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    const D3D11_SUBRESOURCE_DATA data{pixels.data(), side * 4, 0};
+    const D3D11_SUBRESOURCE_DATA data{pixels.data(), logoSide * 4, 0};
     ComPtr<ID3D11Texture2D> texture;
-    if (FAILED(hr = device->CreateTexture2D(&desc, &data, &texture))) return hr;
+    const auto hr = device->CreateTexture2D(&desc, &data, &texture);
+    if (FAILED(hr)) return hr;
     return device->CreateShaderResourceView(texture.Get(), nullptr, output);
 }
 
 } // namespace
+
+struct ImGuiLayer::D3D12State {
+    std::shared_ptr<renderer::d3d12::D3D12RhiDevice> device;
+    renderer::rhi::TextureHandle logo;
+    std::uint64_t logoId = 0;
+};
 
 ImGuiLayer::~ImGuiLayer() { shutdown(); }
 
 bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceContext* deviceContext,
                             bool enablePlatformWindows) {
     shutdown();
-    if (!window || !device || !deviceContext) { std::cerr << "ImGui: missing window/device/context\n"; return false; }
-    const auto hwnd = static_cast<HWND>(window);
-    if (!IsWindow(hwnd) || GetPropW(hwnd, contextProperty)) { std::cerr << "ImGui: invalid or already attached window\n"; return false; }
-    IMGUI_CHECKVERSION();
-    auto* previous = ImGui::GetCurrentContext();
-    context_ = ImGui::CreateContext();
-    if (!context_) {
-        ImGui::SetCurrentContext(previous);
+    return initializeBackends(window, device, deviceContext, enablePlatformWindows);
+}
+
+bool ImGuiLayer::initialize(void* window, renderer::SceneRenderer& sceneRenderer,
+                            bool enablePlatformWindows) {
+    shutdown();
+    auto device = std::dynamic_pointer_cast<renderer::d3d12::D3D12RhiDevice>(
+        sceneRenderer.graphicsDevice());
+    if (!device)
+        return initializeBackends(window, sceneRenderer.device(), sceneRenderer.context(), enablePlatformWindows);
+    d3d12_ = std::make_shared<D3D12State>();
+    d3d12_->device = std::move(device);
+    return initializeBackends(window, nullptr, nullptr, enablePlatformWindows);
+}
+
+bool ImGuiLayer::initializeBackends(void* window, ID3D11Device* device,
+    ID3D11DeviceContext* deviceContext, bool enablePlatformWindows) {
+    if (!window || (!d3d12_ && (!device || !deviceContext))) {
+        std::cerr << "ImGui: missing window/device/context\n";
+        d3d12_.reset();
         return false;
     }
+    const auto hwnd = static_cast<HWND>(window);
+    if (!IsWindow(hwnd) || GetPropW(hwnd, contextProperty)) {
+        std::cerr << "ImGui: invalid or already attached window\n";
+        d3d12_.reset();
+        return false;
+    }
+    IMGUI_CHECKVERSION();
+    auto* previous = ImGui::GetCurrentContext();
+    RestoreContext restore{previous};
+    context_ = ImGui::CreateContext();
+    if (!context_) { d3d12_.reset(); return false; }
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(context_));
     window_ = window;
     frameCount_ = 0;
@@ -235,8 +277,37 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
         }
     }
     applyTheme(currentTheme());
-    platformInitialized_ = ImGui_ImplWin32_Init(window);
-    if (platformInitialized_) rendererInitialized_ = ImGui_ImplDX11_Init(device, deviceContext);
+    try {
+        platformInitialized_ = ImGui_ImplWin32_Init(window);
+        if (platformInitialized_ && d3d12_) {
+            ImGui_ImplDX12_InitInfo info;
+            info.Device = d3d12_->device->device();
+            info.CommandQueue = d3d12_->device->queue();
+            info.NumFramesInFlight = 2;
+            info.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            info.DSVFormat = DXGI_FORMAT_UNKNOWN;
+            info.UserData = d3d12_.get();
+            info.SrvDescriptorHeap = d3d12_->device->srvHeap();
+            info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* init,
+                D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
+                auto& state = *static_cast<D3D12State*>(init->UserData);
+                const auto handles = state.device->allocateUiDescriptor();
+                *cpu = handles.first;
+                *gpu = handles.second;
+            };
+            info.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo* init,
+                D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE) {
+                // Shutdown is noexcept; a device loss must not escape this callback.
+                try {
+                    if (cpu.ptr) static_cast<D3D12State*>(init->UserData)->device->freeUiDescriptor(cpu);
+                } catch (const std::exception& error) {
+                std::cerr << "ImGui: descriptor release failed: " << error.what() << '\n';
+            }
+        };
+        rendererInitialized_ = ImGui_ImplDX12_Init(&info);
+    } else if (platformInitialized_) {
+        rendererInitialized_ = ImGui_ImplDX11_Init(device, deviceContext);
+    }
     initialized_ = platformInitialized_ && rendererInitialized_;
     if (initialized_ && !SetPropW(hwnd, contextProperty, this)) {
         std::cerr << "ImGui: cannot attach window context, Win32 error " << GetLastError() << '\n';
@@ -250,10 +321,26 @@ bool ImGuiLayer::initialize(void* window, ID3D11Device* device, ID3D11DeviceCont
     if (!platformInitialized_ || !rendererInitialized_)
         std::cerr << "ImGui: backend initialization failed (platform=" << platformInitialized_
             << ", renderer=" << rendererInitialized_ << ")\n";
-    if (initialized_ && FAILED(loadLogo(device, &logo_)))
-        std::cerr << "ImGui: cannot load embedded engine logo\n";
+    if (initialized_) {
+        LogoPixels pixels{};
+        if (FAILED(decodeLogo(pixels))) {
+            std::cerr << "ImGui: cannot decode embedded engine logo\n";
+        } else if (d3d12_) {
+            d3d12_->logo = d3d12_->device->uploadRgba8(logoSide, logoSide,
+                std::as_bytes(std::span<const BYTE>(pixels)), "Engine caption logo");
+            d3d12_->logoId = d3d12_->device->uiTextureId(d3d12_->logo);
+            d3d12_->device->submitAndWait();
+        } else if (FAILED(loadLogo(device, pixels, &logo_))) {
+            std::cerr << "ImGui: cannot upload embedded engine logo\n";
+        }
+    }
+    } catch (const std::exception& error) {
+        std::cerr << "ImGui: backend initialization failed: " << error.what() << '\n';
+        // Init can fail after installing backend data (descriptor allocation).
+        rendererInitialized_ = ImGui::GetIO().BackendRendererUserData != nullptr;
+        initialized_ = false;
+    }
     if (!initialized_) shutdown();
-    ImGui::SetCurrentContext(previous);
     return initialized_;
 }
 
@@ -267,10 +354,21 @@ void ImGuiLayer::shutdown() noexcept {
         if (previous == owned) previous = nullptr;
         ImGui::SetCurrentContext(owned);
         if (frameActive_) ImGui::EndFrame();
+        if (d3d12_) {
+            try { d3d12_->device->waitIdle(); }
+            catch (const std::exception& error) {
+                std::cerr << "ImGui: waiting for D3D12 shutdown failed: " << error.what() << '\n';
+            }
+        }
         // Native windows and their swap chains borrow the backend/device. They
         // must be gone before either backend releases its device references.
-        if (platformInitialized_ && rendererInitialized_) ImGui::DestroyPlatformWindows();
-        if (rendererInitialized_) ImGui_ImplDX11_Shutdown();
+        // DX12 owns data even on the main viewport with platform windows off.
+        // Its Shutdown clears that data before destroying platform windows.
+        if (platformInitialized_ && rendererInitialized_ && !d3d12_) ImGui::DestroyPlatformWindows();
+        if (rendererInitialized_) {
+            if (d3d12_) ImGui_ImplDX12_Shutdown();
+            else ImGui_ImplDX11_Shutdown();
+        }
         if (platformInitialized_) ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext(owned);
         ImGui::SetCurrentContext(previous);
@@ -280,6 +378,8 @@ void ImGuiLayer::shutdown() noexcept {
     createPlatformWindow_ = nullptr;
     context_ = nullptr;
     if (logo_) { logo_->Release(); logo_ = nullptr; }
+    // Descriptor callbacks and secondary queues no longer reference this state.
+    d3d12_.reset();
     previousFrameContext_ = nullptr;
     window_ = nullptr;
     chrome_ = nullptr;
@@ -292,28 +392,56 @@ void ImGuiLayer::shutdown() noexcept {
     tableTempLastUsed_.clear();
 }
 
-void ImGuiLayer::beginFrame(float deltaSeconds) noexcept {
+void ImGuiLayer::beginFrame(float deltaSeconds) {
     if (!initialized_ || frameActive_) return;
     previousFrameContext_ = ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(context_));
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::GetIO().DeltaTime = std::isfinite(deltaSeconds) && deltaSeconds > 0
-        ? deltaSeconds : (1.0F / 60.0F);
-    ImGui::NewFrame();
-    if (chrome_) chrome_->draw(window_, logo_);
-    frameActive_ = true;
+    try {
+        if (d3d12_) ImGui_ImplDX12_NewFrame();
+        else ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::GetIO().DeltaTime = std::isfinite(deltaSeconds) && deltaSeconds > 0
+            ? deltaSeconds : (1.0F / 60.0F);
+        ImGui::NewFrame();
+        frameActive_ = true;
+        const auto logo = d3d12_
+            ? reinterpret_cast<void*>(static_cast<std::uintptr_t>(d3d12_->logoId)) : logo_;
+        if (chrome_) chrome_->draw(window_, logo);
+    } catch (...) {
+        if (frameActive_) ImGui::EndFrame();
+        frameActive_ = false;
+        ImGui::SetCurrentContext(static_cast<ImGuiContext*>(previousFrameContext_));
+        previousFrameContext_ = nullptr;
+        throw;
+    }
 }
 
-void ImGuiLayer::endFrame(bool renderMain) noexcept {
+void ImGuiLayer::endFrame(bool renderMain) {
     if (!initialized_ || !frameActive_) return;
+    RestoreContext restore{static_cast<ImGuiContext*>(previousFrameContext_)};
+    previousFrameContext_ = nullptr;
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(context_));
     ImGui::Render();
-    if (renderMain) ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    frameActive_ = false;
+    if (d3d12_) {
+        // Secondary viewport queues also sample freshly rendered previews when
+        // the main window is minimized and its draw submission is skipped.
+        d3d12_->device->prepareUi();
+        if (renderMain) {
+            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), d3d12_->device->commandList());
+        }
+        // This vendored backend creates separate queues for secondary HWNDs.
+        // Complete scene/preview writes before those queues sample their SRVs.
+        // Main swap-chain present remains the SceneRenderer's responsibility.
+        d3d12_->device->submitAndWait();
+    } else if (renderMain) {
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    }
     if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
     }
+    if (d3d12_) d3d12_->device->finishUiFrame();
     const auto now = std::chrono::steady_clock::now();
     const auto& owned = *static_cast<ImGuiContext*>(context_);
     for (const auto* window : owned.Windows) {
@@ -333,9 +461,6 @@ void ImGuiLayer::endFrame(bool renderMain) noexcept {
         if (temp.LastTimeActive == static_cast<float>(owned.Time)) entry->second = now;
     }
     ++frameCount_;
-    frameActive_ = false;
-    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(previousFrameContext_));
-    previousFrameContext_ = nullptr;
 }
 
 bool ImGuiLayer::hasVisiblePlatformWindows() const noexcept {
@@ -423,7 +548,7 @@ rae::GarbageCollectionMemoryStats ImGuiLayer::collectGarbage(double maxIdleSecon
     ImGui::SetCurrentContext(owned);
     auto* atlas = owned->IO.Fonts;
     // Upload precedes the first completed UI frame. Retain input font data and
-    // glyph/UV metadata so a future DX11 device-object rebuild can regenerate it.
+    // glyph/UV metadata so a future backend device-object rebuild can regenerate it.
     if (frameCount_ > 0 && atlas && !atlas->Locked && atlas->TexID != 0) {
         result.cpuBytesReleased += atlasBytes(*atlas);
         result.objectsReleased += (atlas->TexPixelsAlpha8 ? 1u : 0u) + (atlas->TexPixelsRGBA32 ? 1u : 0u);

@@ -243,6 +243,17 @@ void hardwareFeatureLayers() {
     require(noBuild.at(RenderFeature::HardwareRayTracing).state == FeatureState::UnavailableInBuild,
         "Build availability is checked before the device.");
 
+    auto strictBackend = capableDevice();
+    strictBackend.hardwareRayTracingBackendAllowed = false;
+    strictBackend.hardwareRayTracingDevice = false;
+    const auto blockedBackend = evaluateRenderFeatures(requests, strictBackend);
+    require(blockedBackend.at(RenderFeature::HardwareRayTracing).state == FeatureState::UnsupportedByDevice,
+        "Strict D3D11 blocks the backend layer, not the compiled module.");
+    require(blockedBackend.at(RenderFeature::HardwareRayTracing).reason.find("strict D3D11") != std::string::npos,
+        "Backend blocking must not be misreported as missing DXR hardware.");
+    require(blockedBackend.at(RenderFeature::PathTracingGI).reason.find("strict D3D11") != std::string::npos,
+        "GI must explain the backend constraint while retaining the request.");
+
     auto depth = capableDevice();
     depth.hardwareDepthCompatible = false;
     const auto incompatible = evaluateRenderFeatures(requests, depth);
@@ -297,6 +308,91 @@ void postAndEditorFeatures() {
         "The summary must list non-off features with their state.");
 }
 
+void nativeBackendFeatureAvailability() {
+    auto requests = featureRequests();
+    requests.rayTracing = true;
+    requests.depthOfField = true;
+    requests.selectionOutline = true;
+    requests.hardwareRayTracing = true;
+    requests.globalIllumination = GlobalIlluminationMethod::PathTracing;
+    requests.globalIlluminationMode = GlobalIlluminationMode::Realtime;
+    requests.shadowMethod = ShadowMethod::ShadowMapPCSS;
+    auto native = capableDevice();
+    native.nativeD3D12 = true;
+    native.analyticRayTracingAvailable = false;
+    native.depthOfFieldAvailable = false;
+    native.selectionOutlineAvailable = false;
+    native.editorSelection = true;
+    native.hardwareRayTracingBackendAllowed = false;
+    const auto matrix = evaluateRenderFeatures(requests, native);
+    for (const auto feature : {RenderFeature::AnalyticRayTracing, RenderFeature::DepthOfField,
+            RenderFeature::SelectionOutline}) {
+        require(matrix.at(feature).state == FeatureState::UnavailableInBuild,
+            "A feature not ported to the active native backend cannot be reported as running.");
+        require(matrix.at(feature).reason.find("active backend") != std::string::npos &&
+            matrix.at(feature).reason.find("retained") != std::string::npos,
+            "Missing backend implementations must explain that the request is retained.");
+    }
+    require(matrix.at(RenderFeature::HardwareRayTracing).state == FeatureState::UnavailableInBuild,
+        "The missing native DXR implementation is a build limitation, not missing D3D12 hardware.");
+    for (const auto feature : {RenderFeature::HardwareRayTracing, RenderFeature::PathTracingGI,
+            RenderFeature::RealtimeGI}) {
+        require(matrix.at(feature).reason.find("Native D3D12") != std::string::npos &&
+            matrix.at(feature).reason.find("strict D3D11") == std::string::npos,
+            "Native D3D12 feature diagnostics must not claim that strict D3D11 was selected.");
+    }
+    require(matrix.at(RenderFeature::PathTracingGI).state == FeatureState::BlockedByDependency &&
+        matrix.at(RenderFeature::RealtimeGI).state == FeatureState::BlockedByDependency,
+        "Requested GI remains visible but blocked on the absent native DXR implementation.");
+    require(matrix.isActive(RenderFeature::DeferredPath) && matrix.isActive(RenderFeature::ShadowMapPCSS),
+        "Native backend limitations do not disable its shared raster path or shadows.");
+    for (const auto method : {ShadowMethod::GTAO, ShadowMethod::ContactShadow}) {
+        auto screen = requests;
+        screen.shadowMethod = method;
+        const auto supported = evaluateRenderFeatures(screen, native);
+        require(supported.isActive(RenderFeature::ShadowMapPCF) && supported.isActive(
+            method == ShadowMethod::GTAO ? RenderFeature::AmbientOcclusionGTAO : RenderFeature::ContactShadows),
+            "Shared Deferred GTAO and contact shadows remain available in native D3D12.");
+    }
+
+    auto builtOut = native;
+    builtOut.hardwareRayTracingBuilt = false;
+    const auto noNativeDxr = evaluateRenderFeatures(requests, builtOut);
+    require(noNativeDxr.at(RenderFeature::HardwareRayTracing).state == FeatureState::UnavailableInBuild &&
+        noNativeDxr.at(RenderFeature::HardwareRayTracing).reason.find("Native D3D12") != std::string::npos,
+        "Missing native DXR must not say that D3D12 itself is absent from the build.");
+
+    // The same retained requests become usable when returning to a backend
+    // that implements them; capability evaluation must never clear preferences.
+    auto compatible = capableDevice();
+    compatible.editorSelection = true;
+    const auto restored = evaluateRenderFeatures(requests, compatible);
+    for (const auto feature : {RenderFeature::AnalyticRayTracing, RenderFeature::DepthOfField,
+            RenderFeature::SelectionOutline, RenderFeature::HardwareRayTracing, RenderFeature::RealtimeGI})
+        require(restored.isActive(feature), "Switching to a capable backend restores the retained feature request.");
+
+    auto unavailableThinLens = native;
+    unavailableThinLens.thinLensDepthOfField = true;
+    require(evaluateRenderFeatures(requests, unavailableThinLens).at(RenderFeature::DepthOfField).state ==
+        FeatureState::UnavailableInBuild,
+        "Missing backend DOF cannot be hidden by a stale thin-lens capability.");
+    unavailableThinLens.editorSelection = false;
+    require(evaluateRenderFeatures(requests, unavailableThinLens).at(RenderFeature::SelectionOutline).state ==
+        FeatureState::UnavailableInBuild,
+        "The missing outline implementation is reported before frame-specific editor prerequisites.");
+
+    auto shadowOnly = featureRequests();
+    shadowOnly.shadowMethod = ShadowMethod::AnalyticRay;
+    require(evaluateRenderFeatures(shadowOnly, native).at(RenderFeature::AnalyticRayTracing).state ==
+        FeatureState::UnavailableInBuild,
+        "Analytic shadows also check implementation availability without the reflection request.");
+    const auto off = evaluateRenderFeatures(featureRequests(), native);
+    for (const auto feature : {RenderFeature::AnalyticRayTracing, RenderFeature::DepthOfField,
+            RenderFeature::SelectionOutline, RenderFeature::HardwareRayTracing})
+        require(off.at(feature).state == FeatureState::Off,
+            "An unavailable implementation does not turn an unrequested feature into an error.");
+}
+
 } // namespace
 
 int main() {
@@ -311,6 +407,7 @@ int main() {
         pathAndShadowFeatures();
         hardwareFeatureLayers();
         postAndEditorFeatures();
+        nativeBackendFeatureAvailability();
         std::cout << "RenderPipelineTests: " << checks << " checks passed.\n";
         return 0;
     } catch (const std::exception& failure) {

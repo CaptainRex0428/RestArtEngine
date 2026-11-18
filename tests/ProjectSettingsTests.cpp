@@ -83,6 +83,9 @@ void defaultsAndRoundTrip() {
         ProjectPaths project;
         require(loadProject(fixture.manifest, project, error), "Legacy project loads: " + error);
         require(project.rendering == RenderingSettings{}, "Missing rendering fields retain compatible defaults.");
+        require(project.rendering.backendPreference == renderer::MainRenderBackend::D3D11Dxr &&
+            project.rendering.allowFallbackToD3D11,
+            "Projects without a backend choice retain the D3D11 + DXR mode and default fallback policy.");
     }
     auto value = fixture.original;
     value["rendering"] = {{"customRenderer", {{"retained", true}}}};
@@ -159,6 +162,114 @@ void validationAndTransactions() {
     const auto unsupported = bytes(fixture.manifest);
     require(!saveProjectRenderingSettings(fixture.manifest, RenderingSettings{}, error), "Unsupported version rejects save.");
     require(bytes(fixture.manifest) == unsupported, "Unknown project versions are not downgraded.");
+}
+
+void backendSelectionRoundTrip() {
+    Fixture fixture;
+    std::string error;
+    auto value = fixture.original;
+    value["rendering"] = {
+        {"allowFallbackToD3D11", false},
+        {"hardwareRayTracing", true},
+        {"globalIllumination", {{"method", "pathTracing"}, {"extension", {{"retained", 29}}}}},
+        {"customRenderer", {{"retained", true}}}
+    };
+    fixture.write(value);
+    ProjectPaths loaded;
+    require(loadProject(fixture.manifest, loaded, error), error);
+    require(loaded.rendering.backendPreference == renderer::MainRenderBackend::D3D11Dxr &&
+        !loaded.rendering.allowFallbackToD3D11 && loaded.rendering.hardwareRayTracing &&
+        loaded.rendering.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing,
+        "A missing backend choice retains hybrid requests even when the fallback field is present.");
+
+    struct Choice { renderer::MainRenderBackend backend; const char* key; };
+    for (const auto& choice : {
+            Choice{renderer::MainRenderBackend::D3D11Dxr, "d3d11Dxr"},
+            Choice{renderer::MainRenderBackend::Auto, "auto"},
+            Choice{renderer::MainRenderBackend::D3D11, "d3d11"},
+            Choice{renderer::MainRenderBackend::D3D12, "d3d12"}}) {
+        for (bool fallback : {false, true}) {
+            auto requested = loaded.rendering;
+            requested.backendPreference = choice.backend;
+            requested.allowFallbackToD3D11 = fallback;
+            requested.hardwareRayTracingReflections = false;
+            requested.hardwareRayTracingShadows = true;
+            requested.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+            requested.globalIllumination.targetSamples = 123;
+            require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
+            const auto saved = Json::parse(bytes(fixture.manifest));
+            const auto& rendering = saved.at("rendering");
+            require(rendering.at("backendPreference") == choice.key &&
+                rendering.at("allowFallbackToD3D11") == fallback,
+                "Backend selection and fallback policy use their stable schema values.");
+            require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
+                "All backend requests round-trip without capabilities rewriting RT or GI intent.");
+            require(saved.at("customExtension") == fixture.original.at("customExtension") &&
+                rendering.at("customRenderer") == value.at("rendering").at("customRenderer") &&
+                rendering.at("globalIllumination").at("extension") ==
+                    value.at("rendering").at("globalIllumination").at("extension"),
+                "Saving a backend choice preserves unknown project, rendering and nested GI fields.");
+            require(fixture.temporaryCount() == 0, "Backend saves leave no temporary manifest.");
+        }
+    }
+
+    value["rendering"]["backendPreference"] = "legacyHybrid";
+    fixture.write(value);
+    require(loadProject(fixture.manifest, loaded, error) &&
+        loaded.rendering.backendPreference == renderer::MainRenderBackend::D3D11Dxr,
+        "The initial legacyHybrid spelling still loads as the explicit D3D11 + DXR mode.");
+    const auto compatibilityRequest = loaded.rendering;
+    require(saveProjectRenderingSettings(fixture.manifest, compatibilityRequest, error), error);
+    require(Json::parse(bytes(fixture.manifest)).at("rendering").at("backendPreference") == "d3d11Dxr",
+        "Saving a compatibility spelling normalizes it to the stable D3D11 + DXR schema value.");
+    require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == compatibilityRequest,
+        "Normalizing the compatibility spelling preserves fallback, RT and GI requests.");
+    require(fixture.temporaryCount() == 0, "Compatibility saves leave no temporary manifest.");
+}
+
+void backendSelectionValidation() {
+    Fixture fixture;
+    std::string error;
+    const auto reject = [&](const char* field, const Json& invalid) {
+        auto value = fixture.original;
+        value["rendering"] = {{field, invalid}};
+        fixture.write(value);
+        const auto before = bytes(fixture.manifest);
+        ProjectPaths retained;
+        retained.name = "Retain backend project";
+        retained.rendering.backendPreference = renderer::MainRenderBackend::D3D12;
+        retained.rendering.allowFallbackToD3D11 = false;
+        retained.rendering.hardwareRayTracing = true;
+        retained.rendering.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+        const auto priorSettings = retained.rendering;
+        require(!loadProject(fixture.manifest, retained, error),
+            "Malformed backend settings reject project loading.");
+        require(error.find(field) != std::string::npos && retained.name == "Retain backend project" &&
+            retained.rendering == priorSettings,
+            "Backend parse errors identify the field and preserve previously loaded settings.");
+        require(!saveProjectRenderingSettings(fixture.manifest, RenderingSettings{}, error),
+            "Saving cannot silently replace malformed existing backend settings.");
+        require(bytes(fixture.manifest) == before && fixture.temporaryCount() == 0,
+            "Rejected backend metadata remains byte-for-byte intact without temporary files.");
+    };
+    for (const auto& invalid : {Json(nullptr), Json(false), Json(true), Json(11), Json::array(),
+            Json::object(), Json(""), Json("Auto"), Json("dx11"), Json("D3D12"), Json("D3D11Dxr"),
+            Json("legacy"), Json("unknown")})
+        reject("backendPreference", invalid);
+    for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("false"), Json::array(), Json::object()})
+        reject("allowFallbackToD3D11", invalid);
+
+    fixture.write(fixture.original);
+    const auto before = bytes(fixture.manifest);
+    for (const int invalid : {-1, 99}) {
+        RenderingSettings requested;
+        requested.backendPreference = static_cast<renderer::MainRenderBackend>(invalid);
+        require(!saveProjectRenderingSettings(fixture.manifest, requested, error) &&
+            error.find("backendPreference") != std::string::npos,
+            "Unknown in-memory backend enum values cannot be saved.");
+        require(bytes(fixture.manifest) == before && fixture.temporaryCount() == 0,
+            "Rejected in-memory backend values cannot damage the project.");
+    }
 }
 
 void globalIlluminationRoundTrip() {
@@ -336,6 +447,8 @@ int main() {
     try {
         defaultsAndRoundTrip();
         validationAndTransactions();
+        backendSelectionRoundTrip();
+        backendSelectionValidation();
         globalIlluminationRoundTrip();
         globalIlluminationValidation();
         replacementFailure();

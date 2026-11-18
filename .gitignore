@@ -99,6 +99,7 @@ RestArtEngine.panels.ini
 !/docs/ProjectManagement.md
 !/docs/RenderingDevelopment.md
 !/docs/RenderPipeline.md
+!/docs/RenderBackends.md
 !/docs/Lighting.md
 !/docs/HardwareRayTracing.md
 !/docs/GlobalIllumination.md
@@ -160,6 +161,8 @@ Desktop.ini
 
 # Temporary files
 *.tmp
+# User-selected Frame Inspector snapshots contain generated binary resource data.
+*.raframe
 
 # Generated built-in primitive assets (recreated when a project opens).
 Projects/*/Content/Meshes/Builtin/

@@ -2,10 +2,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 struct ID3D11Device;
 struct ID3D11ShaderResourceView;
+
+namespace rae::renderer { class SceneRenderer; }
+namespace rae::renderer::rhi { class Device; class Texture; }
 
 namespace rae::editor {
 
@@ -22,8 +26,10 @@ public:
 
     // `image` is normally <engineRoot>/assets/load/load.png.
     bool initialize(ID3D11Device* device, const std::filesystem::path& image, std::string& error);
+    // Uploads to the active native backend without creating another API device.
+    bool initialize(renderer::SceneRenderer& renderer, const std::filesystem::path& image, std::string& error);
     void release() noexcept;
-    [[nodiscard]] bool ready() const noexcept { return texture_ != nullptr; }
+    [[nodiscard]] bool ready() const noexcept { return textureId_ != 0; }
     // Artwork aspect (width / height); 16:9 until the image is decoded.
     [[nodiscard]] float aspect() const noexcept {
         return width_ && height_ ? static_cast<float>(width_) / static_cast<float>(height_) : 16.0f / 9.0f;
@@ -34,7 +40,12 @@ public:
     void draw(float progress, const char* text, const char* detail = nullptr) const;
 
 private:
+    bool initializeGraphicsDevice(std::shared_ptr<renderer::rhi::Device> device,
+        const std::filesystem::path& image, std::string& error);
     ID3D11ShaderResourceView* texture_ = nullptr;
+    std::shared_ptr<renderer::rhi::Device> textureDevice_;
+    std::shared_ptr<renderer::rhi::Texture> nativeTexture_;
+    std::uint64_t textureId_ = 0;
     std::uint32_t width_ = 0, height_ = 0;
 };
 

@@ -16,11 +16,17 @@
 #include "RestArtEngine/Renderer/RenderFeatures.h"
 #include "RestArtEngine/Renderer/RenderPipeline.h"
 #include "D3D12/HardwareRayTracing.h"
+#include "D3D11/D3D11Rhi.h"
+#include "D3D12/D3D12Rhi.h"
 #include "MeshAttributes.h"
 #include "Passes/ShadowPass.h"
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Scene/World.h"
 #include "RestArtEngine/Core/TraceProfiler.h"
+#include "RestArtEngine/Core/RuntimeDiagnostics.h"
+#include "RestArtEngine/Renderer/FrameCaptureArchive.h"
+#include "RestArtEngine/Renderer/FrameCaptureMetadata.h"
+#include "RhiInspection.h"
 #include <d3d11shader.h>
 #include <DirectXPackedVector.h>
 #include <nlohmann/json.hpp>
@@ -39,6 +45,8 @@
 #include <unordered_set>
 #include <limits>
 #include <new>
+#include <map>
+#include <tuple>
 
 namespace rae::renderer {
 namespace {
@@ -52,6 +60,30 @@ bool failed(HRESULT hr, const char* operation, std::string& error) {
            << static_cast<unsigned long>(hr) << ").";
     error = stream.str();
     return true;
+}
+
+bool writeBitmap(std::FILE* file, std::uint32_t width, std::uint32_t height,
+                 std::span<const unsigned char> pixels, std::string& error) {
+    BITMAPFILEHEADER header{};
+    BITMAPINFOHEADER info{};
+    header.bfType = 0x4d42;
+    header.bfOffBits = sizeof(header) + sizeof(info);
+    header.bfSize = header.bfOffBits + static_cast<DWORD>(pixels.size());
+    info.biSize = sizeof(info);
+    info.biWidth = static_cast<LONG>(width);
+    info.biHeight = -static_cast<LONG>(height);
+    info.biPlanes = 1; info.biBitCount = 32; info.biCompression = BI_RGB;
+    info.biSizeImage = static_cast<DWORD>(pixels.size());
+    if (std::fwrite(&header, sizeof(header), 1, file) != 1 ||
+        std::fwrite(&info, sizeof(info), 1, file) != 1 ||
+        std::fwrite(pixels.data(), 1, pixels.size(), file) != pixels.size()) {
+        error = "Could not write complete screenshot."; return false;
+    }
+    return true;
+}
+
+std::span<const std::byte> gpuBytes(const void* data, std::size_t size) {
+    return {static_cast<const std::byte*>(data), size};
 }
 
 struct Vertex { XMFLOAT3 position; XMFLOAT3 normal; };
@@ -398,8 +430,26 @@ std::vector<RaySceneInput> makeRaySceneInputs(const scene::World& world, const a
 
 struct SceneRenderer::Impl {
     using Clock = std::chrono::steady_clock;
+    MainBackendSelection backendSelection;
+    bool backendReady = false;
+    bool d3d12InitializationAttempted = false;
+    std::string backendInitializationFailure;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
+    std::shared_ptr<rhi::Device> rhiDevice;
+    std::unique_ptr<RhiInspection> inspection;
+    rhi::CommandContext& sceneCommands() {
+        if (!inspection) inspection = std::make_unique<RhiInspection>(rhiDevice->commands());
+        return *inspection;
+    }
+    std::string diagnosticVS, diagnosticPS;
+    std::shared_ptr<d3d12::D3D12RhiDevice> native12;
+    rhi::TextureHandle swapchainImage, sceneColorImage, sceneDepthImage, shadowImage;
+    std::array<rhi::TextureHandle, 3> gbufferImages;
+    rhi::ShaderHandle geometryModule, fullscreenModule;
+    std::array<rhi::ShaderHandle, 7> pixelModules;
+    std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
+    rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, zeroUv;
     ComPtr<IDXGISwapChain> swapChain;
     ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D11InfoQueue> infoQueue;
@@ -418,6 +468,7 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11RenderTargetView> sceneTarget;
     ComPtr<ID3D11Texture2D> sceneTexture;
     struct PreviewImage {
+        rhi::TextureHandle image;
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> view;
         std::uint32_t width = 0, height = 0;
@@ -458,6 +509,7 @@ struct SceneRenderer::Impl {
     bool raySceneActive = false;
     std::uint64_t usageEpoch = 0;
     struct GpuMesh {
+        rhi::BufferHandle vertexBuffer, indexBuffer, uvBuffer;
         ComPtr<ID3D11Buffer> vertices, indices, uv;
         UINT count = 0;
         assets::MeshGeometryKey geometry{};
@@ -475,13 +527,15 @@ struct SceneRenderer::Impl {
     assets::AssetLibrary defaultAssets;
     scene::World defaultWorld;
     ComPtr<ID3D11RasterizerState> rasterizer;
-    ComPtr<ID3D11DepthStencilState> depthEnabled, depthDisabled;
+    ComPtr<ID3D11DepthStencilState> depthDisabled;
     ComPtr<ID3D11SamplerState> sampler, shadowSampler;
     static constexpr UINT shadowMapSize = 2048;
     static constexpr UINT shadowCascadeCount = 2;
     std::uint32_t width = 0, height = 0;
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
+        rhi::TextureHandle colorImage, depthImage;
+        std::array<rhi::TextureHandle, 3> images;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
         ComPtr<ID3D11ShaderResourceView> colorView;
@@ -498,7 +552,7 @@ struct SceneRenderer::Impl {
     // Private DX11 diagnostic resources; public snapshots contain no native handles.
 #include "RenderDiagnostics.inl"
 #include "GeometryStatistics.inl"
-#include "MaterialRenderStates.inl"
+#include "FrustumCulling.inl"
 #include "DepthOfField.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
@@ -520,8 +574,11 @@ struct SceneRenderer::Impl {
     }
 
     void retireSceneTargets() {
-        if (sceneView) {
+        if (sceneColorImage) {
             auto& retired = retiredSceneTargets.emplace_back();
+            retired.colorImage = std::move(sceneColorImage);
+            retired.depthImage = std::move(sceneDepthImage);
+            retired.images = std::move(gbufferImages);
             retired.colorTarget = std::move(sceneTarget);
             retired.color = std::move(sceneTexture);
             retired.colorView = std::move(sceneView);
@@ -533,141 +590,42 @@ struct SceneRenderer::Impl {
         sceneWidth = sceneHeight = 0;
     }
 
-    bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
-        SceneTargets candidate;
-        ComPtr<ID3D11Texture2D> texture;
-        D3D11_TEXTURE2D_DESC description{};
-        description.Width = targetWidth;
-        description.Height = targetHeight;
-        description.MipLevels = 1;
-        description.ArraySize = 1;
-        // Typeless depth so the editor outline can read it as a float SRV while
-        // raster passes still use it as a D32 depth target.
-        description.Format = DXGI_FORMAT_R32_TYPELESS;
-        description.SampleDesc.Count = 1;
-        description.Usage = D3D11_USAGE_DEFAULT;
-        description.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-        texture.Reset();
-        if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create depth", error)) return false;
-        D3D11_DEPTH_STENCIL_VIEW_DESC depthViewDescription{};
-        depthViewDescription.Format = DXGI_FORMAT_D32_FLOAT;
-        depthViewDescription.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        if (failed(device->CreateDepthStencilView(texture.Get(), &depthViewDescription, &candidate.depthTarget),
-                   "Create depth view", error)) return false;
-        D3D11_SHADER_RESOURCE_VIEW_DESC depthResourceDescription{};
-        depthResourceDescription.Format = DXGI_FORMAT_R32_FLOAT;
-        depthResourceDescription.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        depthResourceDescription.Texture2D.MipLevels = 1;
-        if (failed(device->CreateShaderResourceView(texture.Get(), &depthResourceDescription, &candidate.depthResource),
-                   "Create depth resource view", error)) return false;
-
-        // Keep scene color separate from the swap chain so docked and floating
-        // editor windows composite it with normal UI clipping and z ordering.
-        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        texture.Reset();
-        if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create scene color", error)) return false;
-        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &candidate.colorTarget), "Create scene color target", error)) return false;
-        if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &candidate.colorView), "Create scene color SRV", error)) return false;
-        candidate.color = texture;
-
-        description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        for (std::size_t i = 0; i < candidate.gbufferTargets.size(); ++i) {
-            texture.Reset();
-            if (failed(device->CreateTexture2D(&description, nullptr, &texture), "Create G-buffer", error)) return false;
-            if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &candidate.gbufferTargets[i]), "Create G-buffer target", error)) return false;
-            if (failed(device->CreateShaderResourceView(texture.Get(), nullptr, &candidate.gbufferViews[i]), "Create G-buffer SRV", error)) return false;
-        }
-        // Publish only a complete target set. Invalid sizes/allocation failures
-        // never replace the texture already borrowed by this frame's UI.
-        retireSceneTargets();
-        sceneTarget = std::move(candidate.colorTarget);
-        sceneTexture = std::move(candidate.color);
-        sceneView = std::move(candidate.colorView);
-        depth = std::move(candidate.depthTarget);
-        depthView = std::move(candidate.depthResource);
-        gbufferTargets = std::move(candidate.gbufferTargets);
-        gbufferViews = std::move(candidate.gbufferViews);
-        sceneWidth = targetWidth;
-        sceneHeight = targetHeight;
-        return true;
-    }
-
-    bool createTargets(std::string& error) {
-        ComPtr<ID3D11Texture2D> texture;
-        if (failed(swapChain->GetBuffer(0, IID_PPV_ARGS(&texture)), "Get backbuffer", error)) return false;
-        if (failed(device->CreateRenderTargetView(texture.Get(), nullptr, &backbuffer),
-                   "Create backbuffer view", error)) return false;
-        if (!createSceneTargets(width, height, error)) return false;
-        if (shadowTexture) return true;
-
-        // A persistent directional shadow map. Keep this independent from the
-        // camera depth buffer so it can be sampled by both forward and deferred
-        // lighting passes.
-        D3D11_TEXTURE2D_DESC shadowDescription{};
-        shadowDescription.Width = shadowMapSize;
-        shadowDescription.Height = shadowMapSize;
-        shadowDescription.MipLevels = 1;
-        shadowDescription.ArraySize = shadowCascadeCount;
-        shadowDescription.Format = DXGI_FORMAT_R32_TYPELESS;
-        shadowDescription.SampleDesc.Count = 1;
-        shadowDescription.Usage = D3D11_USAGE_DEFAULT;
-        shadowDescription.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-        if (failed(device->CreateTexture2D(&shadowDescription, nullptr, &shadowTexture), "Create shadow map", error)) return false;
-        D3D11_DEPTH_STENCIL_VIEW_DESC shadowDsvDescription{};
-        shadowDsvDescription.Format = DXGI_FORMAT_D32_FLOAT;
-        shadowDsvDescription.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
-        shadowDsvDescription.Texture2DArray.MipSlice = 0;
-        shadowDsvDescription.Texture2DArray.FirstArraySlice = 0;
-        shadowDsvDescription.Texture2DArray.ArraySize = 1;
-        for (UINT cascade = 0; cascade < shadowCascadeCount; ++cascade) {
-            shadowDsvDescription.Texture2DArray.FirstArraySlice = cascade;
-            if (failed(device->CreateDepthStencilView(shadowTexture.Get(), &shadowDsvDescription, &shadowDepthSlices[cascade]), "Create shadow map depth view", error)) return false;
-        }
-        // Keep the legacy view member as an alias for the first cascade. The
-        // render path binds the explicit slice views when producing CSM data.
-        shadowDepth = shadowDepthSlices[0];
-        D3D11_SHADER_RESOURCE_VIEW_DESC shadowSrvDescription{};
-        shadowSrvDescription.Format = DXGI_FORMAT_R32_FLOAT;
-        shadowSrvDescription.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-        shadowSrvDescription.Texture2DArray.MostDetailedMip = 0;
-        shadowSrvDescription.Texture2DArray.MipLevels = 1;
-        shadowSrvDescription.Texture2DArray.FirstArraySlice = 0;
-        shadowSrvDescription.Texture2DArray.ArraySize = shadowCascadeCount;
-        if (failed(device->CreateShaderResourceView(shadowTexture.Get(), &shadowSrvDescription, &shadowView), "Create shadow map shader view", error)) return false;
-
-        return true;
-    }
+#include "RhiSceneResources.inl"
 
     bool createPipeline(std::string& error, const LoadProgress& progress = {}) {
+        try {
         ComPtr<ID3DBlob> shader;
-        progress.report(0, "Compiling geometry shader", "VSMain (1/9)");
+        progress.report(0.0f, "Compiling geometry shader", "VSMain (1/9)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSMain", "vs_5_0", shader, error)) return false;
-        if (failed(device->CreateVertexShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &geometryVS), "Create geometry VS", error)) return false;
+        geometryModule = rhiDevice->createShader(rhi::ShaderStage::Vertex,
+            gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "Scene geometry VS");
+        if (device) geometryVS = d3d11::nativeVertexShader(geometryModule);
         const D3D11_INPUT_ELEMENT_DESC layout[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
-        if (failed(device->CreateInputLayout(layout, static_cast<UINT>(std::size(layout)), shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
-        progress.report(.07f, "Geometry shader ready", "VSMain (1/9)");
+        if (device && failed(device->CreateInputLayout(layout, static_cast<UINT>(std::size(layout)), shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
+        progress.report(0.07f, "Geometry shader ready", "VSMain (1/9)");
         shader.Reset();
-        progress.report(.07f, "Compiling fullscreen shader", "VSFullscreen (2/9)");
+        progress.report(0.07f, "Compiling fullscreen shader", "VSFullscreen (2/9)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSFullscreen", "vs_5_0", shader, error)) return false;
-        if (failed(device->CreateVertexShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &fullscreenVS), "Create fullscreen VS", error)) return false;
-        progress.report(.14f, "Fullscreen shader ready", "VSFullscreen (2/9)");
-        unsigned shaderIndex = 0;
+        fullscreenModule = rhiDevice->createShader(rhi::ShaderStage::Vertex,
+            gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "Scene fullscreen VS");
+        if (device) fullscreenVS = d3d11::nativeVertexShader(fullscreenModule);
+        progress.report(0.14f, "Fullscreen shader ready", "VSFullscreen (2/9)");
+        unsigned moduleIndex = 0;
         const auto pixelShader = [&](const char* entry, ComPtr<ID3D11PixelShader>& result) {
             shader.Reset();
-            const auto detail = std::string(entry) + " (" + std::to_string(shaderIndex + 3) + "/9)";
-            progress.report(.14f + .08f * static_cast<float>(shaderIndex), "Compiling scene shader", detail);
-            if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, entry, "ps_5_0", shader, error) ||
-                failed(device->CreatePixelShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &result), entry, error))
-                return false;
-            ++shaderIndex;
-            progress.report(.14f + .08f * static_cast<float>(shaderIndex), "Scene shader ready", detail);
+            const auto detail = std::string(entry) + " (" + std::to_string(moduleIndex + 3) + "/9)";
+            progress.report(0.14f + 0.08f * static_cast<float>(moduleIndex), "Compiling scene shader", detail);
+            if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, entry, "ps_5_0", shader, error)) return false;
+            auto module = rhiDevice->createShader(rhi::ShaderStage::Pixel,
+                gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), entry);
+            if (device) result = d3d11::nativePixelShader(module);
+            pixelModules[moduleIndex++] = std::move(module);
+            progress.report(0.14f + 0.08f * static_cast<float>(moduleIndex), "Scene shader ready", detail);
             return true;
         };
         if (!pixelShader("PSForward", forwardPS) || !pixelShader("PSGBuffer", gbufferPS) ||
@@ -675,52 +633,41 @@ struct SceneRenderer::Impl {
             !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS) ||
             !pixelShader("PSDepthOfField", dofPS))
             return false;
-        progress.report(.70f, "Preparing selection outline");
-        if (!outline) outline = std::make_unique<SelectionOutlinePass>();
-        if (!outline->initialize(device.Get(), error)) return false;
+        if (device) {
+            progress.report(0.70f, "Preparing selection outline");
+            if (!outline) outline = std::make_unique<SelectionOutlinePass>();
+            if (!outline->initialize(device.Get(), error)) return false;
+        }
 
-        progress.report(.73f, "Creating scene constant buffers");
-        D3D11_BUFFER_DESC buffer{};
-        buffer.ByteWidth = sizeof(SceneConstants);
-        buffer.Usage = D3D11_USAGE_DEFAULT;
-        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        if (failed(device->CreateBuffer(&buffer, nullptr, &constants), "Create scene constants", error)) return false;
-
-        buffer.ByteWidth = sizeof(ObjectConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &objectConstants), "Create object constants", error)) return false;
-        buffer.ByteWidth = sizeof(RayConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &rayConstants), "Create ray constants", error)) return false;
-        buffer.ByteWidth = sizeof(ShadowConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &shadowConstants), "Create shadow constants", error)) return false;
-        buffer.ByteWidth = sizeof(GlobalIlluminationConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &giConstants), "Create GI constants", error)) return false;
-        buffer.ByteWidth = sizeof(DepthOfFieldConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &dofConstants), "Create DOF constants", error)) return false;
-        buffer.ByteWidth = sizeof(LightingConstants);
-        if (failed(device->CreateBuffer(&buffer, nullptr, &lightingConstants), "Create lighting constants", error)) return false;
-        meshAttributes::PackedUv zeroUv{};
-        D3D11_BUFFER_DESC uvDescription{}; uvDescription.ByteWidth = sizeof(zeroUv);
-        uvDescription.Usage = D3D11_USAGE_IMMUTABLE; uvDescription.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA uvInitial{}; uvInitial.pSysMem = &zeroUv;
-        if (failed(device->CreateBuffer(&uvDescription, &uvInitial, &zeroUvBuffer), "Create absent UV stream", error)) return false;
-        progress.report(.80f, "Scene constant buffers ready");
-        progress.report(.80f, "Creating raster state");
+        progress.report(0.73f, "Creating scene constant buffers");
+        const auto constant = [&](rhi::BufferHandle& handle, ComPtr<ID3D11Buffer>& native,
+            std::uint32_t size, const char* name) {
+            handle = rhiDevice->createBuffer({size, rhi::BufferUsage::Constant, false, name});
+            if (device) native = d3d11::nativeBuffer(handle);
+        };
+        constant(sceneBuffer, constants, sizeof(SceneConstants), "Scene constants");
+        constant(objectBuffer, objectConstants, sizeof(ObjectConstants), "Actor constants");
+        constant(rayBuffer, rayConstants, sizeof(RayConstants), "Analytic ray constants");
+        constant(shadowBuffer, shadowConstants, sizeof(ShadowConstants), "Shadow constants");
+        constant(giBuffer, giConstants, sizeof(GlobalIlluminationConstants), "GI constants");
+        constant(dofBuffer, dofConstants, sizeof(DepthOfFieldConstants), "DOF constants");
+        constant(lightingBuffer, lightingConstants, sizeof(LightingConstants), "Lighting constants");
+        meshAttributes::PackedUv missingUvData{};
+        this->zeroUv = rhiDevice->createBuffer({sizeof(missingUvData), rhi::BufferUsage::Vertex, true, "Absent UV stream"},
+            gpuBytes(&missingUvData, sizeof(missingUvData)));
+        progress.report(0.77f, "Scene constant buffers ready");
+        if (device) {
+        progress.report(0.77f, "Creating raster, depth and sampler states");
+        zeroUvBuffer = d3d11::nativeBuffer(this->zeroUv);
         D3D11_RASTERIZER_DESC raster{};
         raster.FillMode = D3D11_FILL_SOLID;
         raster.CullMode = D3D11_CULL_NONE;
         raster.DepthClipEnable = TRUE;
         if (failed(device->CreateRasterizerState(&raster, &rasterizer), "Create rasterizer", error)) return false;
-        progress.report(.82f, "Preparing material render states", "6 rasterizer and 18 depth states");
-        if (!createMaterialRenderStates(error)) return false;
-        progress.report(.90f, "Material render states ready", "6 rasterizer and 18 depth states");
-        progress.report(.92f, "Creating depth and sampler states");
         D3D11_DEPTH_STENCIL_DESC depthDescription{};
-        depthDescription.DepthEnable = TRUE;
-        depthDescription.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        depthDescription.DepthFunc = D3D11_COMPARISON_LESS;
-        if (failed(device->CreateDepthStencilState(&depthDescription, &depthEnabled), "Create depth state", error)) return false;
         depthDescription.DepthEnable = FALSE;
         depthDescription.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        depthDescription.DepthFunc = D3D11_COMPARISON_LESS;
         if (failed(device->CreateDepthStencilState(&depthDescription, &depthDisabled), "Create no-depth state", error)) return false;
         D3D11_SAMPLER_DESC samplerDescription{};
         samplerDescription.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -735,8 +682,26 @@ struct SceneRenderer::Impl {
         shadowSamplerDescription.MinLOD = 0.0f;
         shadowSamplerDescription.MaxLOD = 0.0f;
         if (failed(device->CreateSamplerState(&shadowSamplerDescription, &shadowSampler), "Create shadow sampler", error)) return false;
-        progress.report(1, "Raster pipelines ready");
+        }
+        // Validate every supported material-state variant before a hot-reload
+        // candidate can replace the live pipeline set.
+        for (unsigned rasterVariant = 0; rasterVariant != 6; ++rasterVariant) {
+            const auto detail = "Material and shadow variants " + std::to_string(rasterVariant * 37) + "/222";
+            progress.report(0.80f + 0.03f * static_cast<float>(rasterVariant), "Preparing graphics pipelines", detail);
+            (void)graphicsPipeline(7, rasterVariant, 3, false);
+            for (unsigned depthIndex = 0; depthIndex != 18; ++depthIndex) {
+                (void)graphicsPipeline(0, rasterVariant, depthIndex, false);
+                (void)graphicsPipeline(1, rasterVariant, depthIndex, false);
+            }
+            progress.report(0.80f + 0.03f * static_cast<float>(rasterVariant + 1), "Graphics pipeline group ready",
+                "Material and shadow variants " + std::to_string((rasterVariant + 1) * 37) + "/222");
+        }
+        progress.report(0.98f, "Preparing fullscreen pipelines", "Deferred lighting and background (0/2)");
+        (void)graphicsPipeline(2, 0, 16, true, false);
+        (void)graphicsPipeline(3, 0, 16, true, true);
+        progress.report(1.0f, "Raster pipelines ready", "224 graphics pipelines");
         return true;
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
     }
 
     bool prepareMesh(const assets::MeshAsset& mesh, std::string& error) {
@@ -757,14 +722,16 @@ struct SceneRenderer::Impl {
         catch (const std::exception& failure) { error = failure.what(); return false; }
         for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) { error = "Mesh index out of bounds: " + mesh.name; return false; }
         GpuMesh gpu; gpu.geometry = geometry; gpu.count = static_cast<UINT>(mesh.indices.size());
-        D3D11_BUFFER_DESC description{};
-        description.ByteWidth = static_cast<UINT>(mesh.vertices.size() * sizeof(assets::MeshVertex));
-        description.Usage = D3D11_USAGE_IMMUTABLE; description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA initial{}; initial.pSysMem = mesh.vertices.data();
-        if (failed(device->CreateBuffer(&description, &initial, &gpu.vertices), "Create mesh vertices", error)) return false;
-        description.ByteWidth = static_cast<UINT>(mesh.indices.size() * sizeof(std::uint32_t));
-        description.BindFlags = D3D11_BIND_INDEX_BUFFER; initial.pSysMem = mesh.indices.data();
-        if (failed(device->CreateBuffer(&description, &initial, &gpu.indices), "Create mesh indices", error)) return false;
+        const auto vertexBytes = static_cast<std::uint32_t>(mesh.vertices.size() * sizeof(assets::MeshVertex));
+        const auto indexBytes = static_cast<std::uint32_t>(mesh.indices.size() * sizeof(std::uint32_t));
+        gpu.vertexBuffer = rhiDevice->createBuffer({vertexBytes, rhi::BufferUsage::Vertex, true, mesh.name + " vertices"},
+            gpuBytes(mesh.vertices.data(), vertexBytes));
+        gpu.indexBuffer = rhiDevice->createBuffer({indexBytes, rhi::BufferUsage::Index, true, mesh.name + " indices"},
+            gpuBytes(mesh.indices.data(), indexBytes));
+        if (device) {
+            gpu.vertices = d3d11::nativeBuffer(gpu.vertexBuffer);
+            gpu.indices = d3d11::nativeBuffer(gpu.indexBuffer);
+        }
         gpu.bytes = mesh.vertices.size() * sizeof(assets::MeshVertex) + mesh.indices.size() * sizeof(std::uint32_t);
         if (mesh.uvChannelMask()) {
             if (mesh.vertices.size() > std::numeric_limits<UINT>::max() / sizeof(meshAttributes::PackedUv)) {
@@ -773,10 +740,11 @@ struct SceneRenderer::Impl {
             std::vector<meshAttributes::PackedUv> uv; uv.reserve(mesh.vertices.size());
             try { for (std::size_t i = 0; i < mesh.vertices.size(); ++i) uv.push_back(meshAttributes::vertexUv(mesh, i)); }
             catch (const std::exception& failure) { error = failure.what(); return false; }
-            description.ByteWidth = static_cast<UINT>(uv.size() * sizeof(meshAttributes::PackedUv));
-            description.BindFlags = D3D11_BIND_VERTEX_BUFFER; initial.pSysMem = uv.data();
-            if (failed(device->CreateBuffer(&description, &initial, &gpu.uv), "Create mesh UV vertices", error)) return false;
-            gpu.bytes += description.ByteWidth;
+            const auto uvBytes = static_cast<std::uint32_t>(uv.size() * sizeof(meshAttributes::PackedUv));
+            gpu.uvBuffer = rhiDevice->createBuffer({uvBytes, rhi::BufferUsage::Vertex, true, mesh.name + " UVs"},
+                gpuBytes(uv.data(), uvBytes));
+            if (device) gpu.uv = d3d11::nativeBuffer(gpu.uvBuffer);
+            gpu.bytes += uvBytes;
         }
         gpu.lastUsed = Clock::now();
         gpu.lastUsedEpoch = usageEpoch;
@@ -956,15 +924,13 @@ struct SceneRenderer::Impl {
         }
     }
 
-    bool drawGeometry(ID3D11PixelShader* pixelShader, const scene::World& world,
+#include "RhiSceneExecution.inl"
+
+    bool drawGeometry(unsigned pixelShader, const scene::World& world,
                       const assets::AssetLibrary& assets, std::string& error,
                       const assets::MaterialAsset* materialPreview,
                       const XMFLOAT4X4* clipMatrix = nullptr) {
-        const UINT stride = sizeof(assets::MeshVertex), offset = 0;
-        context->IASetInputLayout(inputLayout.Get());
-        context->VSSetShader(geometryVS.Get(), nullptr, 0);
-        context->PSSetShader(pixelShader, nullptr, 0);
-        context->OMSetDepthStencilState(depthEnabled.Get(), 0);
+
         // A revision/allocation key detects reloads and explicit geometry edits.
         // Shadow, raster and outline passes share the already prepared buffers.
         std::unordered_set<assets::AssetId> preparedMeshes;
@@ -980,21 +946,21 @@ struct SceneRenderer::Impl {
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
-            ID3D11Buffer* vertexBuffers[] = {gpu.vertices.Get(), gpu.uv ? gpu.uv.Get() : zeroUvBuffer.Get()};
-            const UINT strides[] = {stride, gpu.uv ? static_cast<UINT>(sizeof(meshAttributes::PackedUv)) : 0u};
-            const UINT offsets[] = {offset, 0};
-            context->IASetVertexBuffers(0, 2, vertexBuffers, strides, offsets);
-            context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
+            bindRhiMesh(gpu);
             meshAttributes::sections(*mesh, [&](std::uint32_t first, std::uint32_t count, std::uint32_t slot) {
                 const auto* material = resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), materialPreview);
                 if (!material) return;
-                bindMaterialRenderState(*material, mirroredTransform(actor), pixelShader == nullptr);
+                bindRhiMaterialPipeline(*material, mirroredTransform(actor), pixelShader);
                 data.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2],
                     static_cast<float>(mesh->uvChannelMask()));
                 data.parameters = XMFLOAT4(material->roughness, material->metallic, 0, materialFlags(*material));
-                context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
-                context->DrawIndexed(count, first, 0);
-                recordDraw(actor.id, mesh->id, material->id, count, static_cast<std::uint32_t>(mesh->vertices.size()));
+                uploadConstants(objectBuffer, data);
+                sceneCommands().drawIndexed(count, first);
+                if (auto* event = recordDraw(actor.id, mesh->id, material->id, count,
+                    static_cast<std::uint32_t>(mesh->vertices.size()))) {
+                    event->actorName = actor.name; event->meshName = mesh->name; event->materialName = material->name;
+                    event->materialSlot = slot;
+                }
             });
         }
         return true;
@@ -1021,15 +987,18 @@ struct SceneRenderer::Impl {
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
-            context->UpdateSubresource(objectConstants.Get(), 0, nullptr, &data, 0, 0);
+            uploadConstants(objectBuffer, data);
             ID3D11Buffer* vertexBuffers[] = {gpu.vertices.Get(), gpu.uv ? gpu.uv.Get() : zeroUvBuffer.Get()};
             const UINT strides[] = {stride, gpu.uv ? static_cast<UINT>(sizeof(meshAttributes::PackedUv)) : 0u};
             const UINT offsets[] = {offset, 0};
             context->IASetVertexBuffers(0, 2, vertexBuffers, strides, offsets);
             context->IASetIndexBuffer(gpu.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
             context->DrawIndexed(gpu.count, 0, 0);
-            recordDraw(actor.id, mesh->id, actor.mesh.materialId, gpu.count,
-                static_cast<std::uint32_t>(mesh->vertices.size()));
+            if (auto* event = recordDraw(actor.id, mesh->id, actor.mesh.materialId, gpu.count,
+                static_cast<std::uint32_t>(mesh->vertices.size()))) {
+                event->actorName = actor.name; event->meshName = mesh->name;
+                if (const auto* material = assets.findMaterial(actor.mesh.materialId)) event->materialName = material->name;
+            }
         }
         return true;
     }
@@ -1050,17 +1019,75 @@ SceneRenderer::SceneRenderer() : impl_(std::make_unique<Impl>()) {}
 SceneRenderer::~SceneRenderer() { shutdown(); }
 
 bool SceneRenderer::initializeDevice(HWND__* window, std::uint32_t width,
-                                     std::uint32_t height, std::string& error) {
+                                     std::uint32_t height, std::string& error,
+                                     const MainBackendRequest& backend) {
+    // The caller may pass a request borrowed from this renderer. Preserve it
+    // before shutdown resets the previous device and its selection snapshot.
+    const auto request = backend;
     shutdown();
     error.clear();
+    auto& state = *impl_;
+    state.backendSelection = selectMainBackend(request);
+    if (!state.backendSelection.startupAllowed) {
+        error = state.backendSelection.reason;
+        return false;
+    }
     if (!window || width == 0 || height == 0) {
         error = "A valid window and nonzero dimensions are required.";
         return false;
     }
-    auto& state = *impl_;
+    const auto failStartup = [&]() {
+        const auto selection = state.backendSelection;
+        const bool attempted = state.d3d12InitializationAttempted;
+        const auto failure = state.backendInitializationFailure;
+        shutdown();
+        impl_->backendSelection = selection;
+        impl_->d3d12InitializationAttempted = attempted;
+        impl_->backendInitializationFailure = failure;
+        return false;
+    };
     state.width = width;
     state.height = height;
-    if (failed(CreateDXGIFactory2(0, IID_PPV_ARGS(&state.factory)), "Create DXGI factory", error)) return false;
+    // CPU scene construction is independent of the backend and must not cause
+    // a native initialization failure to be mistaken for an API fallback.
+    try { state.defaultAssets.createDefaults(); state.defaultWorld.createDefaultScene(); }
+    catch (const std::exception& failure) { error = failure.what(); return failStartup(); }
+    if (state.backendSelection.effective == MainRenderBackend::D3D12) {
+        state.d3d12InitializationAttempted = true;
+        try {
+            state.native12 = d3d12::createD3D12RhiDevice(window, width, height,
+#if defined(_DEBUG)
+                true
+#else
+                false
+#endif
+            );
+            state.rhiDevice = state.native12;
+            state.adapter = state.native12->adapterName();
+            if (!state.createTargets(error)) throw std::runtime_error(error);
+            state.backendReady = true;
+            return true;
+        } catch (const std::exception& failure) {
+            const std::string nativeError = failure.what();
+            state.backendInitializationFailure = nativeError;
+            if (!request.allowFallbackToD3D11) {
+                error = "Native D3D12 initialization failed: " + nativeError;
+                return failStartup();
+            }
+            // The attempt owns no D3D11 resources. Drain and release the failed
+            // device/targets before starting the explicitly permitted fallback.
+            shutdown();
+            auto& fallback = *impl_;
+            fallback.backendSelection = selectD3D11Fallback(request);
+            fallback.backendInitializationFailure = nativeError;
+            fallback.d3d12InitializationAttempted = true;
+            fallback.width = width; fallback.height = height;
+            // shutdown preserves the Impl object but releases its CPU defaults.
+            try { fallback.defaultAssets.createDefaults(); fallback.defaultWorld.createDefaultScene(); }
+            catch (const std::exception& failure) { error = failure.what(); return failStartup(); }
+        }
+    }
+    if (failed(CreateDXGIFactory2(0, IID_PPV_ARGS(&state.factory)), "Create DXGI factory", error)) return failStartup();
     struct Adapter { ComPtr<IDXGIAdapter1> object; DXGI_ADAPTER_DESC1 description; };
     std::vector<Adapter> adapters;
     for (UINT index = 0;; ++index) {
@@ -1099,24 +1126,33 @@ bool SceneRenderer::initializeDevice(HWND__* window, std::uint32_t width,
         result = create(nullptr, D3D_DRIVER_TYPE_WARP);
         if (SUCCEEDED(result)) state.adapter = "Microsoft WARP (software rasterizer)";
     }
-    if (failed(result, "Create D3D11 device", error)) return false;
+    if (failed(result, "Create D3D11 device", error)) return failStartup();
+    state.rhiDevice = d3d11::createRhiDevice(state.device.Get(), state.context.Get());
     state.device.As(&state.infoQueue);
-    state.defaultAssets.createDefaults(); state.defaultWorld.createDefaultScene();
-    if (!state.createSwapChain(window, width, height, error)) { shutdown(); return false; }
-    if (!state.createTargets(error)) { shutdown(); return false; }
+    if (!state.createSwapChain(window, width, height, error)) return failStartup();
+    if (!state.createTargets(error)) return failStartup();
+    state.backendReady = true;
     return true;
 }
+
+const MainBackendSelection& SceneRenderer::mainBackendSelection() const { return impl_->backendSelection; }
+bool SceneRenderer::mainBackendReady() const { return impl_->backendReady && impl_->rhiDevice != nullptr; }
+bool SceneRenderer::d3d12InitializationAttempted() const { return impl_->d3d12InitializationAttempted; }
+const std::string& SceneRenderer::backendInitializationError() const { return impl_->backendInitializationFailure; }
 
 void SceneRenderer::detachWindow() {
     // Release the window-bound surface while its HWND is still alive: releasing a
     // swap chain after its window has been destroyed can block inside DXGI.
     auto& state = *impl_;
-    if (!state.device) return;
+    if (!state.rhiDevice) return;
     state.resetGeometryViewport();
     if (state.context) { state.context->ClearState(); state.context->Flush(); }
+    if (state.rhiDevice) state.sceneCommands().endRenderPass();
+    state.swapchainImage.reset();
     state.backbuffer.Reset();
     state.retireSceneTargets();
     state.swapChain.Reset();
+    if (state.native12) state.native12->detachWindow();
 }
 
 bool SceneRenderer::attachWindow(HWND__* window, std::uint32_t width,
@@ -1127,32 +1163,49 @@ bool SceneRenderer::attachWindow(HWND__* window, std::uint32_t width,
         error = "A valid window and nonzero dimensions are required.";
         return false;
     }
-    if (!state.device || !state.factory) { error = "Renderer is not initialized."; return false; }
+    if (!state.rhiDevice) { error = "Renderer is not initialized."; return false; }
     detachWindow();
     state.width = width;
     state.height = height;
-    if (!state.createSwapChain(window, width, height, error)) return false;
+    if (state.native12) {
+        try { state.native12->attachWindow(window, width, height); }
+        catch (const std::exception& failure) { error = failure.what(); return false; }
+    } else if (!state.createSwapChain(window, width, height, error)) return false;
     const bool targetsReady = state.createTargets(error);
     return targetsReady;
 }
 bool SceneRenderer::initializePipeline(std::string& error, const LoadProgress& progress) {
     error.clear();
     auto& state = *impl_;
-    if (!state.device) {
+    if (!state.rhiDevice) {
         error = "Create the render device before compiling the shader pipeline.";
         return false;
     }
-    progress.report(0, "Reading engine shaders", "Private/Scene.hlsl");
+    progress.report(0.0f, "Reading engine shaders", "Private/Scene.hlsl");
     if (!readText(state.shaderRoot / "Private/Scene.hlsl", state.sceneSource, error)) return false;
-    progress.report(.025f, "Reading material shader", pathUtf8(state.materialPath()));
+    progress.report(0.025f, "Reading material shader", pathUtf8(state.materialPath()));
     if (!readText(state.materialPath(), state.materialSource, error)) return false;
-    if (!state.createPipeline(error, progress.range(.05f, .75f))) return false;
+    const float rasterEnd = state.backendSelection.allowD3D12Bridge ? 0.75f : 0.98f;
+    if (!state.createPipeline(error, progress.range(0.05f, rasterEnd))) return false;
     state.revision = 1;
+    if (state.native12) {
+        state.hardwareStatus = "Native D3D12 raster backend; native DXR integration is not available yet. "
+            "Ray tracing and GI requests are retained.";
+        progress.report(1.0f, "Native D3D12 pipeline ready");
+        return true;
+    }
+    if (!state.backendSelection.allowD3D12Bridge) {
+        state.hardwareStatus = "Hardware ray tracing disabled by the strict D3D11 backend; "
+            "D3D12 is not initialized. The project ray tracing and GI requests are retained.";
+        progress.report(1.0f, "D3D11 pipeline ready", "Hardware ray tracing disabled by backend selection");
+        return true;
+    }
     state.hardwareRayTracing = std::make_unique<d3d12::HardwareRayTracing>();
     std::string hardwareError;
-    progress.report(.75f, "Initializing hardware ray tracing", "Same-adapter D3D12 device and shared fence");
+    state.d3d12InitializationAttempted = true;
+    progress.report(0.75f, "Initializing hardware ray tracing", "Same-adapter D3D12 device and shared fence");
     if (state.hardwareRayTracing->initialize(state.device.Get(), state.context.Get(), hardwareError)) {
-        progress.report(.82f, "Compiling hardware ray tracing", "HardwareRayTracing.hlsl::CSMain");
+        progress.report(0.82f, "Compiling hardware ray tracing", "HardwareRayTracing.hlsl::CSMain");
         state.hardwarePipelineReady = state.hardwareRayTracing->preparePipeline(state.shaderRoot,
             state.materialPath(), state.sceneSource, state.materialSource, hardwareError);
         state.hardwareStatus = state.hardwarePipelineReady ? "DXR 1.1 ready; disabled by project settings."
@@ -1160,28 +1213,60 @@ bool SceneRenderer::initializePipeline(std::string& error, const LoadProgress& p
     } else {
         state.hardwareStatus = "Hardware ray tracing unavailable: " + hardwareError;
     }
-    progress.report(1, "D3D11 pipeline ready", state.hardwareStatus);
+    progress.report(1.0f, "D3D11 pipeline ready", state.hardwareStatus);
     return true;
 }
 
 bool SceneRenderer::initialize(HWND__* window, std::uint32_t width,
-                               std::uint32_t height, std::string& error) {
-    if (!initializeDevice(window, width, height, error)) return false;
-    if (!initializePipeline(error)) { shutdown(); return false; }
+                               std::uint32_t height, std::string& error,
+                               const MainBackendRequest& backend) {
+    if (!initializeDevice(window, width, height, error, backend)) return false;
+    if (!initializePipeline(error)) {
+        const auto selection = impl_->backendSelection;
+        const bool attemptedD3D12 = impl_->d3d12InitializationAttempted;
+        shutdown();
+        impl_->backendSelection = selection;
+        impl_->d3d12InitializationAttempted = attemptedD3D12;
+        return false;
+    }
     return true;
 }
 
 bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::string& error) {
     error.clear();
     auto& state = *impl_;
+    if (state.native12) {
+        if (!width || !height) return true;
+        try {
+            state.sceneCommands().endRenderPass();
+            state.swapchainImage.reset();
+            state.native12->resize(width, height);
+            state.width = width; state.height = height;
+            state.resetGeometryViewport();
+            return state.createTargets(error);
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
+    }
     if (!state.swapChain) { error = "Renderer is not initialized."; return false; }
     if (width == 0 || height == 0) return true;
-    if (width == state.width && height == state.height) return ensureSceneTargetSize(width, height, error);
+    if (width == state.width && height == state.height) {
+        // A previous resize/target allocation may have failed after releasing
+        // the old surface. Permit retrying even when dimensions did not change.
+        if (!state.backbuffer) return state.createTargets(error);
+        return ensureSceneTargetSize(width, height, error);
+    }
     state.resetGeometryViewport();
     state.context->ClearState();
     state.context->Flush();
+    if (state.rhiDevice) state.sceneCommands().endRenderPass();
+    state.swapchainImage.reset();
     state.backbuffer.Reset();
-    if (failed(state.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0), "Resize swap chain", error)) return false;
+    if (failed(state.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0), "Resize swap chain", error)) {
+        // DXGI can retain its previous buffer on failure. Reacquire it without
+        // hiding the original failure; device removal may also prevent recovery.
+        std::string recoveryError;
+        if (!state.createTargets(recoveryError)) error += " Target recovery: " + recoveryError;
+        return false;
+    }
     state.width = width; state.height = height;
     return state.createTargets(error);
 }
@@ -1189,12 +1274,12 @@ bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::strin
 bool SceneRenderer::ensureSceneTargetSize(std::uint32_t width, std::uint32_t height, std::string& error) {
     error.clear();
     auto& state = *impl_;
-    if (!state.device || !state.context || !state.backbuffer) { error = "Renderer is not initialized."; return false; }
+    if (!state.rhiDevice || !state.swapchainImage) { error = "Renderer is not initialized."; return false; }
     if (width == 0 || height == 0 || width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         error = "Scene target dimensions must be between 1 and 16384 pixels.";
         return false;
     }
-    if (state.sceneTexture && width == state.sceneWidth && height == state.sceneHeight) return true;
+    if (state.sceneColorImage && width == state.sceneWidth && height == state.sceneHeight) return true;
     if (!state.createSceneTargets(width, height, error)) return false;
     state.resetGeometryViewport();
     ++state.giHistoryEpoch;
@@ -1202,6 +1287,8 @@ bool SceneRenderer::ensureSceneTargetSize(std::uint32_t width, std::uint32_t hei
 }
 
 void SceneRenderer::releaseRetiredSceneTargets() {
+    if (impl_->native12 && (!impl_->retiredSceneTargets.empty() || !impl_->retiredPreviews.empty()))
+        impl_->native12->waitIdle();
     impl_->retiredSceneTargets.clear();
     impl_->retiredPreviews.clear();
 }
@@ -1219,6 +1306,18 @@ bool SceneRenderer::clear(const float color[4], std::string& error) {
     error.clear();
     ++impl_->usageEpoch;
     impl_->raySceneActive = false;
+    if (impl_->native12) {
+        try {
+            impl_->swapchainImage = impl_->native12->backbuffer();
+            rhi::RenderPassDesc pass;
+            pass.name = "Window clear";
+            pass.colors = {{impl_->swapchainImage, rhi::LoadOp::Clear, rhi::StoreOp::Store,
+                {color[0], color[1], color[2], color[3]}}};
+            impl_->sceneCommands().beginRenderPass(pass);
+            impl_->sceneCommands().endRenderPass();
+            return true;
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
+    }
     if (!impl_->context || !impl_->backbuffer) {
         error = "Renderer is not initialized.";
         return false;
@@ -1235,25 +1334,28 @@ bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scen
                                        std::uint32_t size, std::string& error, PreviewSlot slot, std::uint32_t height) {
     error.clear();
     auto& state = *impl_;
-    if (!state.device || !state.context || !state.sceneTexture || !state.backbuffer) {
+    if (!state.rhiDevice || !state.sceneColorImage || !state.swapchainImage) {
         error = "Renderer is not initialized.";
         return false;
     }
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= state.previews.size()) { error = "Invalid preview slot."; return false; }
-    D3D11_TEXTURE2D_DESC sceneDescription{};
-    state.sceneTexture->GetDesc(&sceneDescription);
-    if (std::min(sceneDescription.Width, sceneDescription.Height) < 16) { error = "Scene target is too small for a preview."; return false; }
+    if (std::min(state.sceneWidth, state.sceneHeight) < 16) { error = "Scene target is too small for a preview."; return false; }
     size = std::max(16u, size);
     height = height ? std::max(16u, height) : size;
-    const double scale = std::min({1.0, static_cast<double>(sceneDescription.Width)/size,
-        static_cast<double>(sceneDescription.Height)/height});
+    const double scale = std::min({1.0, static_cast<double>(state.sceneWidth)/size,
+        static_cast<double>(state.sceneHeight)/height});
     size = std::max(1u, static_cast<std::uint32_t>(size*scale));
     height = std::max(1u, static_cast<std::uint32_t>(height*scale));
     auto& image = state.previews[slotIndex];
     Impl::PreviewImage candidate;
-    const bool replaceImage = !image.texture || image.width != size || image.height != height;
+    const bool replaceImage = (!image.texture && !image.image) || image.width != size || image.height != height;
     if (replaceImage) {
+        if (state.native12) {
+            try { candidate.image = state.rhiDevice->createTexture({size, height, 1,
+                rhi::Format::RGBA8Unorm, true, "Tool preview"}); }
+            catch (const std::exception& failure) { error = failure.what(); return false; }
+        } else {
         D3D11_TEXTURE2D_DESC description{};
         description.Width = size;
         description.Height = height;
@@ -1267,17 +1369,24 @@ bool SceneRenderer::renderPreviewFrame(const SceneSettings& settings, const scen
                    "Create preview texture", error)) return false;
         if (failed(state.device->CreateShaderResourceView(candidate.texture.Get(), nullptr, &candidate.view),
                    "Create preview view", error)) return false;
+        }
         candidate.width = size; candidate.height = height;
     }
     auto previewSettings = settings;
     previewSettings.viewportWidth = static_cast<int>(size);
     previewSettings.viewportHeight = static_cast<int>(height);
     if (!render(previewSettings, world, assets, error, materialOverride)) return false;
-    const D3D11_BOX region{0, 0, 0, size, height, 1};
-    state.context->CopySubresourceRegion(replaceImage ? candidate.texture.Get() : image.texture.Get(), 0, 0, 0, 0,
-        state.sceneTexture.Get(), 0, &region);
+    if (state.native12) {
+        try { state.native12->copyTextureRegion(replaceImage ? candidate.image : image.image,
+            state.sceneColorImage, 0, 0, size, height); }
+        catch (const std::exception& failure) { error = failure.what(); return false; }
+    } else {
+        const D3D11_BOX region{0, 0, 0, size, height, 1};
+        state.context->CopySubresourceRegion(replaceImage ? candidate.texture.Get() : image.texture.Get(), 0, 0, 0, 0,
+            state.sceneTexture.Get(), 0, &region);
+    }
     if (replaceImage) {
-        if (image.view) state.retiredPreviews.push_back(std::move(image));
+        if (image.view || image.image) state.retiredPreviews.push_back(std::move(image));
         image = std::move(candidate);
     }
     return true;
@@ -1406,6 +1515,8 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
 
 void* SceneRenderer::previewTexture(PreviewSlot slot) const {
     const auto slotIndex = static_cast<std::size_t>(slot);
+    if (impl_->native12 && slotIndex < impl_->previews.size() && impl_->previews[slotIndex].image)
+        return reinterpret_cast<void*>(static_cast<std::uintptr_t>(impl_->native12->uiTextureId(impl_->previews[slotIndex].image)));
     return slotIndex < impl_->previews.size() ? impl_->previews[slotIndex].view.Get() : nullptr;
 }
 
@@ -1427,6 +1538,17 @@ bool SceneRenderer::readPreviewPixels(PreviewSlot slot, std::vector<std::uint8_t
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= state.previews.size()) { error = "Invalid preview slot."; return false; }
     const auto& image = state.previews[slotIndex];
+    if (state.native12 && image.image) {
+        try {
+            const auto readback = state.native12->readTexture(image.image);
+            width = readback.width; height = readback.height;
+            pixels.resize(static_cast<std::size_t>(width)*height*4);
+            for (std::uint32_t row = 0; row < height; ++row)
+                std::memcpy(pixels.data() + static_cast<std::size_t>(row)*width*4,
+                    readback.bytes.data() + static_cast<std::size_t>(row)*readback.rowPitch, width*4);
+            return true;
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
+    }
     if (!state.device || !state.context || !image.texture) {
         error = "No image has been rendered in this preview slot yet.";
         return false;
@@ -1460,13 +1582,15 @@ bool SceneRenderer::readPreviewPixels(PreviewSlot slot, std::vector<std::uint8_t
 bool SceneRenderer::render(const SceneSettings& settings, const scene::World& world,
                            const assets::AssetLibrary& assets, std::string& error,
                            const assets::MaterialAsset* materialOverride) {
+    try {
     error.clear();
     auto& state = *impl_;
     ++state.usageEpoch;
+    if (state.native12) state.swapchainImage = state.native12->backbuffer();
     state.raySceneActive = false;
     const bool diagnosticMainScene = !settings.offscreenTarget;
     if (diagnosticMainScene) state.beginGeometryFrame(world, assets);
-    if (!state.device || !state.backbuffer) {
+    if (!state.rhiDevice || !state.swapchainImage) {
         if (diagnosticMainScene) state.failGeometryFrame();
         error = "Renderer has no render target."; return false;
     }
@@ -1488,7 +1612,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         ~GeometryFrameScope() { if (mainScene && !completed) state.failGeometryFrame(); }
     } geometryFrameScope{state, diagnosticMainScene};
     ID3D11ShaderResourceView* noIndirect = nullptr;
-    state.context->PSSetShaderResources(9, 1, &noIndirect);
+    if (state.context) state.context->PSSetShaderResources(9, 1, &noIndirect);
     if (diagnosticMainScene) {
         state.hardwareActive = false;
         if (settings.hardwareRayTracing && !state.hardwareRequested) {
@@ -1537,13 +1661,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     const auto cameraView = camera::evaluate(resolveCamera(settings),
         static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight));
+    if (diagnosticMainScene) state.beginFrameCapture(settings, cameraView.lens);
     XMFLOAT4X4 viewValues, projectionValues;
     std::memcpy(&viewValues, cameraView.view.data(), sizeof(viewValues));
     std::memcpy(&projectionValues, cameraView.projection.data(), sizeof(projectionValues));
     const XMMATRIX view = XMLoadFloat4x4(&viewValues);
     const XMMATRIX projection = XMLoadFloat4x4(&projectionValues);
     const XMVECTOR eye = XMVectorSet(cameraView.position[0], cameraView.position[1], cameraView.position[2], 1);
-    const bool wantsRayScene = settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay;
+    const bool wantsRayScene = !state.native12 && (settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay);
     const auto lighting = gatherLighting(world, settings.lightIntensity);
     state.raySceneActive = wantsRayScene;
     if (wantsRayScene) state.rayLastUsed = Impl::Clock::now();
@@ -1565,11 +1690,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         ? world.environment.directionalIntensity : settings.lightIntensity;
     data.parameters = XMFLOAT4(std::clamp(settings.roughness, 0.04f, 1.0f),
         std::clamp(settings.metallic, 0.0f, 1.0f), settings.exposure,
-        (settings.rayTracing && rayTracingSupported(world, assets)) ? 1.0f : 0.0f);
+        (!state.native12 && settings.rayTracing && rayTracingSupported(world, assets)) ? 1.0f : 0.0f);
     data.viewportDebug = XMFLOAT4(static_cast<float>(targetWidth), static_cast<float>(targetHeight),
-        static_cast<float>(settings.debugView), static_cast<float>(settings.shadowMethod == ShadowMethod::Disabled ? 2 :
+        static_cast<float>(settings.debugView), static_cast<float>((settings.shadowMethod == ShadowMethod::Disabled ||
+            (state.native12 && settings.shadowMethod == ShadowMethod::AnalyticRay)) ? 2 :
             settings.shadowMethod == ShadowMethod::AnalyticRay ? 1 : 0));
-    state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
+    state.uploadConstants(state.sceneBuffer, data);
     XMVECTOR lightDirection = XMVector3Normalize(XMVectorSet(-3, 6, -2, 0));
     if (lighting.info[1] > .5f && lighting.info[2] >= 0) {
         const auto& sun = lighting.lights[static_cast<std::size_t>(lighting.info[2])];
@@ -1636,7 +1762,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             else XMStoreFloat4x4(&shadowData.lightViewProjectionCascade1, lightView * cascadeProjection);
         }
     }
-    state.context->UpdateSubresource(state.shadowConstants.Get(), 0, nullptr, &shadowData, 0, 0);
+    state.uploadConstants(state.shadowBuffer, shadowData);
     RayConstants rays{};
     if (data.parameters.w > 0.5f || settings.shadowMethod == ShadowMethod::AnalyticRay) {
         for (const auto& actor : world.actors) {
@@ -1659,13 +1785,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         }
     }
     rays.info.y = wantsRayScene ? static_cast<float>(state.rayTriangleCount) : 0.0f;
-    state.context->UpdateSubresource(state.rayConstants.Get(), 0, nullptr, &rays, 0, 0);
-    ID3D11Buffer* constants[] = { state.constants.Get(), state.objectConstants.Get(), state.rayConstants.Get(), state.shadowConstants.Get() };
-    state.context->VSSetConstantBuffers(0, 4, constants);
-    state.context->PSSetConstantBuffers(0, 4, constants);
-    state.context->UpdateSubresource(state.lightingConstants.Get(), 0, nullptr, &lighting, 0, 0);
-    ID3D11Buffer* lightBuffer = state.lightingConstants.Get();
-    state.context->PSSetConstantBuffers(7, 1, &lightBuffer);
+    state.uploadConstants(state.rayBuffer, rays);
+    const rhi::BufferHandle constants[] = {state.sceneBuffer, state.objectBuffer, state.rayBuffer, state.shadowBuffer};
+    auto& commands = state.sceneCommands();
+    commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 0, constants);
+    commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 0, constants);
+    state.uploadConstants(state.lightingBuffer, lighting);
+    commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 7, std::span(&state.lightingBuffer, 1));
+    if (state.context) {
     ID3D11SamplerState* sampler = state.sampler.Get();
     state.context->PSSetSamplers(0, 1, &sampler);
     ID3D11SamplerState* comparisonSampler = state.shadowSampler.Get();
@@ -1680,6 +1807,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     state.context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     ID3D11ShaderResourceView* emptyViews[5]{};
     state.context->PSSetShaderResources(0, 5, emptyViews);
+    }
+    ID3D11ShaderResourceView* emptyViews[5]{};
     // A visible material with a raster-only depth state keeps hardware primary
     // visibility and GI inconsistent with the raster receiver. The request is
     // retained and the reason is reported; the raster path still renders.
@@ -1700,7 +1829,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     if (diagnosticMainScene) {
         if (hardwareDepthCompatible != state.hardwareDepthWasCompatible) ++state.giHistoryEpoch;
         state.hardwareDepthWasCompatible = hardwareDepthCompatible;
-        if (settings.hardwareRayTracing && !hardwareDepthCompatible) {
+        if (settings.hardwareRayTracing && state.backendSelection.allowD3D12Bridge && !hardwareDepthCompatible) {
             state.hardwareStatus = "Hardware ray tracing inactive: material '" + incompatibleDepthMaterial->name +
                 "' uses a raster-only depth state. Use ZTest Less/LessEqual and ZWrite On for DXR/GI.";
             if (settings.globalIllumination.method != GlobalIlluminationMethod::Disabled)
@@ -1719,7 +1848,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested && settings.debugView == 0;
-    const bool depthOfField = depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
+    const bool depthOfField = !state.native12 && depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
     const bool selectionOutline = settings.editorViewport && settings.outlineActors &&
         settings.outlineActorCount > 0;
     PipelineBuildInputs pipelineInputs;
@@ -1729,7 +1858,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.hardwareTransport = hardwareTransport;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.depthOfField = depthOfField;
-    pipelineInputs.selectionOutline = selectionOutline;
+    pipelineInputs.selectionOutline = selectionOutline && !state.native12;
     pipelineInputs.frameCapture = diagnosticMainScene && state.captureRequested;
     auto pipeline = buildScenePipeline(pipelineInputs);
     const auto pipelineValidation = validatePipeline(pipeline);
@@ -1751,13 +1880,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     GlobalIlluminationConstants giData{};
     giData.viewport = XMFLOAT4(0.0f, static_cast<float>(viewportWidth),
         static_cast<float>(viewportHeight), 0.0f);
-    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
-    ID3D11Buffer* giBuffer = state.giConstants.Get();
-    state.context->PSSetConstantBuffers(6, 1, &giBuffer);
+    state.uploadConstants(state.giBuffer, giData);
+    commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
     bool hardwareFrameReady = false;
     bool thinLensImage = false;
     ID3D11ShaderResourceView* indirectView = nullptr;
-    const auto drawMainGeometry = [&](ID3D11PixelShader* shader) {
+    const auto drawMainGeometry = [&](unsigned shader) {
         if (diagnosticMainScene) state.beginGeometrySample();
         struct SampleScope {
             Impl& state;
@@ -1770,50 +1898,71 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // Raster passes own their input binding: the shadow map must not be bound as
     // an SRV while the shadow pass still writes it as a depth target.
     const auto beginRasterPasses = [&] {
+        if (state.context) {
         ID3D11ShaderResourceView* shadowResources[] = {nullptr, nullptr, nullptr,
-            state.shadowView.Get(), state.rayTriangleView.Get()};
+            nullptr, state.rayTriangleView.Get()};
         state.context->PSSetShaderResources(0, 5, shadowResources);
         ID3D11ShaderResourceView* uvResources[] = {state.rayUvView.Get(), state.rayUvIndexView.Get()};
         state.context->PSSetShaderResources(10, 2, uvResources);
-        state.context->ClearDepthStencilView(state.depth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-        state.context->ClearRenderTargetView(backbuffer, backgroundClear);
+        }
         if (diagnosticMainScene) state.prepareGeometryStatistics(hardwareFrameReady && !realtimeGiRequested);
-        state.context->RSSetViewports(1, &sceneViewport);
+        commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY, sceneViewport.Width, sceneViewport.Height});
     };
     const auto releaseRasterInputs = [&] {
+        if (!state.context) return;
         ID3D11ShaderResourceView* noIndirectLighting = nullptr;
         state.context->PSSetShaderResources(9, 1, &noIndirectLighting);
         ID3D11ShaderResourceView* noUv[] = {nullptr, nullptr};
         state.context->PSSetShaderResources(10, 2, noUv);
     };
 
+    const auto destinationImage = (settings.editorViewport || settings.offscreenTarget)
+        ? state.sceneColorImage : state.swapchainImage;
+    const std::array<float, 4> clearColor{backgroundClear[0], backgroundClear[1], backgroundClear[2], backgroundClear[3]};
+    struct RhiPassScope {
+        Impl& state;
+        bool complete = false;
+        ~RhiPassScope() {
+            state.sceneCommands().endRenderPass();
+            if (!complete && state.context) {
+                // Native postprocess/outline bridges can fail with no RHI pass
+                // active. Release their temporary outputs/reads on that path.
+                state.context->OMSetRenderTargets(0, nullptr, nullptr);
+                ID3D11ShaderResourceView* empty[13]{};
+                state.context->PSSetShaderResources(0, 13, empty);
+                state.context->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
+            }
+        }
+    } rhiPassScope{state};
     for (const auto& pass : pipeline.passes) {
+        commands.endRenderPass();
+        const auto diagnosticPassCount = state.diagnosticFrame.passes.size();
+        if (diagnosticMainScene && pass.kind != RenderPassKind::FrameCapture)
+            state.capturePassBoundary(pass, true, destinationImage, useCsm ? Impl::shadowCascadeCount : 1);
         switch (pass.kind) {
         case RenderPassKind::ShadowMap: {
             state.beginDiagnosticPass(pass.name);
             passes::ShadowPassContext shadowPass;
-            shadowPass.context = state.context.Get();
-            shadowPass.shadowConstants = state.shadowConstants.Get();
+            shadowPass.commands = &commands;
+            shadowPass.shadowConstants = state.shadowBuffer;
             const std::uint32_t cascadeCount = useCsm ? Impl::shadowCascadeCount : 1;
-            ID3D11DepthStencilView* cascadeTargets[Impl::shadowCascadeCount]{
-                state.shadowDepthSlices[0].Get(), state.shadowDepthSlices[1].Get()};
-            shadowPass.cascadeTargets = cascadeTargets;
+            shadowPass.depthArray = state.shadowImage;
             shadowPass.cascadeCount = cascadeCount;
             shadowPass.mapSize = Impl::shadowMapSize;
             shadowPass.beginCascade = [&](std::uint32_t cascade) {
                 SceneConstants shadowScene = data;
                 shadowScene.viewProjection = cascade == 0
                     ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
-                state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &shadowScene, 0, 0);
+                state.uploadConstants(state.sceneBuffer, shadowScene);
             };
             shadowPass.draw = [&](std::uint32_t cascade, std::string& drawError) {
                 const XMFLOAT4X4& clip = cascade == 0
                     ? shadowData.lightViewProjection : shadowData.lightViewProjectionCascade1;
-                return state.drawGeometry(nullptr, world, assets, drawError, materialOverride,
+                return state.drawGeometry(7, world, assets, drawError, materialOverride,
                     settings.frustumCulling ? &clip : nullptr);
             };
             shadowPass.restoreSceneConstants = [&] {
-                state.context->UpdateSubresource(state.constants.Get(), 0, nullptr, &data, 0, 0);
+                state.uploadConstants(state.sceneBuffer, data);
             };
             if (!passes::executeShadowPass(shadowPass, error)) return false;
             break;
@@ -1872,7 +2021,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 if (indirectView) {
                     giData.viewport = XMFLOAT4(1.0f, static_cast<float>(viewportWidth),
                         static_cast<float>(viewportHeight), 0.0f);
-                    state.context->UpdateSubresource(state.giConstants.Get(), 0, nullptr, &giData, 0, 0);
+                    state.uploadConstants(state.giBuffer, giData);
                     state.context->PSSetShaderResources(9, 1, &indirectView);
                 }
             } else {
@@ -1885,42 +2034,59 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         case RenderPassKind::GBuffer: {
             state.beginDiagnosticPass(pass.name);
             beginRasterPasses();
-            ID3D11RenderTargetView* targets[3]{};
-            const float clear[4]{};
-            for (std::size_t index = 0; index < 3; ++index) {
-                targets[index] = state.gbufferTargets[index].Get();
-                state.context->ClearRenderTargetView(targets[index], clear);
-            }
-            state.context->OMSetRenderTargets(3, targets, state.depth.Get());
-            if (!drawMainGeometry(state.gbufferPS.Get())) return false;
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            for (const auto& image : state.gbufferImages)
+                rasterPass.colors.push_back({image, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}});
+            rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Clear};
+            if (contains(pass.reads, PipelineResource::ShadowMap))
+                rasterPass.reads.push_back({state.shadowImage, 3});
+            commands.beginRenderPass(rasterPass);
+            if (!drawMainGeometry(1)) return false;
             break;
         }
         case RenderPassKind::DeferredLighting: {
             state.beginDiagnosticPass(pass.name);
-            state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
-            ID3D11ShaderResourceView* views[] = {state.gbufferViews[0].Get(),
-                state.gbufferViews[1].Get(), state.gbufferViews[2].Get(),
-                state.shadowView.Get(), state.rayTriangleView.Get()};
-            state.context->PSSetShaderResources(0, 5, views);
-            state.drawFullscreen(state.deferredPS.Get());
-            state.context->PSSetShaderResources(0, 5, emptyViews);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{destinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
+            rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
+                {state.gbufferImages[2], 2}};
+            if (contains(pass.reads, PipelineResource::ShadowMap))
+                rasterPass.reads.push_back({state.shadowImage, 3});
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(2, false);
+            commands.endRenderPass();
             releaseRasterInputs();
             break;
         }
         case RenderPassKind::ForwardBackground: {
             state.beginDiagnosticPass(pass.name);
             beginRasterPasses();
-            state.context->OMSetRenderTargets(1, &backbuffer, state.depth.Get());
-            state.drawFullscreen(state.backgroundPS.Get());
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{destinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
+            rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Clear};
+            if (contains(pass.reads, PipelineResource::ShadowMap))
+                rasterPass.reads.push_back({state.shadowImage, 3});
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(3, true);
             break;
         }
         case RenderPassKind::ForwardGeometry: {
             state.beginDiagnosticPass(pass.name);
-            if (!drawMainGeometry(state.forwardPS.Get())) return false;
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{destinationImage}};
+            rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage};
+            if (contains(pass.reads, PipelineResource::ShadowMap))
+                rasterPass.reads.push_back({state.shadowImage, 3});
+            commands.beginRenderPass(rasterPass);
+            if (!drawMainGeometry(0)) return false;
+            commands.endRenderPass();
             releaseRasterInputs();
             break;
-        }
-        case RenderPassKind::HardwareResolve: {
+        }        case RenderPassKind::HardwareResolve: {
             // The pass is declared from the transport attempt; a failed attempt
             // keeps the raster image and reports the reason separately.
             if (!hardwareFrameReady || realtimeGiRequested) break;
@@ -1969,14 +2135,23 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             // the CPU submit total of the rendered passes. Failure retains the
             // previous immutable snapshot and does not abort rendering.
             if (diagnosticMainScene) state.finishDiagnostics();
-            state.context->OMSetRenderTargets(0, nullptr, nullptr);
+            if (state.context) state.context->OMSetRenderTargets(0, nullptr, nullptr);
             std::string captureError;
-            if (!state.copyFrameCapture(settings, captureError))
+            if (!state.copyFrameCapture(settings, captureError)) {
                 state.capture.status = "Capture failed: " + captureError + (state.capture.valid ? " Previous capture retained." : "");
+                rae::diagnostics::runtimeDiagnostics().log(rae::diagnostics::MessageSeverity::Error, "Frame Inspector", state.capture.status);
+            }
             state.captureRequested = false;
-            state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
+            if (state.context) state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
             break;
         }
+        }
+        if (diagnosticMainScene && pass.kind != RenderPassKind::FrameCapture &&
+            state.diagnosticFrame.passes.size() > diagnosticPassCount) {
+            commands.endRenderPass();
+            state.endDiagnosticPass();
+            state.capturePassBoundary(pass, false, destinationImage, useCsm ? Impl::shadowCascadeCount : 1);
+            state.captureProduced |= pass.writes;
         }
     }
     if (diagnosticMainScene) {
@@ -1996,8 +2171,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         featureRequests.depthOfField = depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
         featureRequests.selectionOutline = selectionOutline;
         FeatureCapabilities featureCapabilities;
+        featureCapabilities.nativeD3D12 = state.native12 != nullptr;
+        featureCapabilities.analyticRayTracingAvailable = !state.native12;
+        featureCapabilities.depthOfFieldAvailable = !state.native12;
+        featureCapabilities.selectionOutlineAvailable = !state.native12;
         featureCapabilities.shaderPipelineReady = state.revision != 0;
-        featureCapabilities.hardwareRayTracingBuilt = state.hardwareRayTracing != nullptr;
+        // The module is linked even when strict D3D11 intentionally never creates it.
+        featureCapabilities.hardwareRayTracingBuilt = true;
+        featureCapabilities.hardwareRayTracingBackendAllowed = state.backendSelection.allowD3D12Bridge;
         featureCapabilities.hardwareRayTracingDevice =
             state.hardwareRayTracing && state.hardwareRayTracing->supported();
         featureCapabilities.hardwarePipelineReady = state.hardwarePipelineReady;
@@ -2007,7 +2188,22 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         featureCapabilities.thinLensDepthOfField = thinLensImage;
         state.features = evaluateRenderFeatures(featureRequests, featureCapabilities);
     }
+    commands.endRenderPass();
     // Keep the backbuffer bound for the caller's Dear ImGui draw submission.
+    if (state.native12) {
+        if (settings.editorViewport) {
+            rhi::RenderPassDesc windowPass;
+            windowPass.name = "Editor background";
+            windowPass.colors = {{state.swapchainImage, rhi::LoadOp::Clear, rhi::StoreOp::Store,
+                {editorClear[0], editorClear[1], editorClear[2], editorClear[3]}}};
+            commands.beginRenderPass(windowPass);
+            commands.endRenderPass();
+        }
+        const bool complete = !failed(state.native12->device()->GetDeviceRemovedReason(), "D3D12 render/device status", error);
+        geometryFrameScope.completed = complete;
+        rhiPassScope.complete = complete;
+        return complete;
+    }
     if (settings.editorViewport) {
         backbuffer = state.backbuffer.Get();
         state.context->ClearRenderTargetView(backbuffer, editorClear);
@@ -2016,7 +2212,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const HRESULT removed = state.device->GetDeviceRemovedReason();
     const bool complete = !failed(removed, "Render/device status", error);
     geometryFrameScope.completed = complete;
+    rhiPassScope.complete = complete;
     return complete;
+    } catch (const std::exception& failure) { error = failure.what(); return false; }
 }
 
 void SceneRenderer::setShaderRoot(std::filesystem::path root) { impl_->shaderRoot = std::filesystem::absolute(std::move(root)).lexically_normal(); }
@@ -2033,9 +2231,17 @@ const RenderFeatureMatrix& SceneRenderer::renderFeatures() const { return impl_-
 bool SceneRenderer::applyShaderSource(const std::string& source, std::string& diagnostics) {
     rae::diagnostics::TraceScope trace("Shader Compile / Pipeline Build", "Shader");
     diagnostics.clear();
-    if (!impl_->device) { diagnostics = "Initialize the renderer before applying shaders."; return false; }
+    struct CompileMessage {
+        std::string& text;
+        bool success = false;
+        ~CompileMessage() { rae::diagnostics::runtimeDiagnostics().log(success ? rae::diagnostics::MessageSeverity::Info
+            : rae::diagnostics::MessageSeverity::Error, "Shader", text); }
+    } compileMessage{diagnostics};
+    if (!impl_->rhiDevice) { diagnostics = "Initialize the renderer before applying shaders."; return false; }
     Impl candidate;
     candidate.device = impl_->device;
+    candidate.rhiDevice = impl_->rhiDevice;
+    candidate.native12 = impl_->native12;
     candidate.shaderRoot = impl_->shaderRoot;
     candidate.materialOverride = impl_->materialOverride;
     candidate.materialSource = source;
@@ -2059,6 +2265,10 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
         }
     }
     // No live GPU state or source is changed until all nine stages and contracts pass.
+    impl_->geometryModule = std::move(candidate.geometryModule);
+    impl_->fullscreenModule = std::move(candidate.fullscreenModule);
+    impl_->pixelModules = std::move(candidate.pixelModules);
+    impl_->graphicsPipelines = std::move(candidate.graphicsPipelines);
     impl_->geometryVS = std::move(candidate.geometryVS);
     impl_->fullscreenVS = std::move(candidate.fullscreenVS);
     impl_->forwardPS = std::move(candidate.forwardPS);
@@ -2076,6 +2286,7 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     if (impl_->hardwarePipelineReady) diagnostics += " and the DXR hardware pipeline";
     diagnostics += ". Revision " + std::to_string(impl_->revision) + ".";
     if (!hardwareWarning.empty()) diagnostics += " Hardware mode unavailable: " + hardwareWarning;
+    compileMessage.success = true;
     return true;
 }
 
@@ -2106,6 +2317,7 @@ bool SceneRenderer::saveShaderSource(std::string& error) {
 }
 
 std::string SceneRenderer::rayTracingStatus(const scene::World& world, const assets::AssetLibrary& assets) const {
+    if (impl_->native12) return "Ray effects unavailable: software ray structured buffers have not been migrated to native D3D12.";
     unsigned analytic = 0;
     unsigned actors = 0;
     std::uint64_t triangles = 0;
@@ -2154,14 +2366,26 @@ void SceneRenderer::resetGlobalIllumination() {
 }
 
 bool SceneRenderer::present(bool vsync, std::string& error) {
-    releaseRetiredSceneTargets();
     error.clear();
+    if (impl_->native12) {
+        try {
+            impl_->native12->present(vsync);
+            impl_->swapchainImage = impl_->native12->backbuffer();
+            releaseRetiredSceneTargets();
+            return true;
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
+    }
+    releaseRetiredSceneTargets();
     if (!impl_->swapChain) { error = "Renderer is not initialized."; return false; }
     const bool result = !failed(impl_->swapChain->Present(vsync ? 1 : 0, 0), "Present", error);
     // UI submission has consumed any retired capture SRVs. D3D11 owns pending
     // GPU references, so clearing here needs no idle wait.
     impl_->retiredCapturedTextures.clear();
     return result;
+}
+
+rhi::Statistics SceneRenderer::rhiStatistics() const {
+    return impl_->rhiDevice ? impl_->rhiDevice->statistics() : rhi::Statistics{};
 }
 
 RendererCacheStats SceneRenderer::cacheStats() const {
@@ -2177,12 +2401,22 @@ RendererCacheStats SceneRenderer::cacheStats() const {
 
 rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSeconds) {
     rae::GarbageCollectionMemoryStats result;
-    if (!impl_->context || !std::isfinite(maxIdleSeconds) || maxIdleSeconds < 0) return result;
+    if (!impl_->rhiDevice || !std::isfinite(maxIdleSeconds) || maxIdleSeconds < 0) return result;
     auto& state = *impl_;
     const auto now = Impl::Clock::now();
     const auto expired = [&](const auto& lastUsed) {
         return std::chrono::duration<double>(now - lastUsed).count() >= maxIdleSeconds;
     };
+    if (state.native12) {
+        state.native12->waitIdle();
+        for (auto it = state.meshes.begin(); it != state.meshes.end();) {
+            if (it->second.lastUsedEpoch == state.usageEpoch || !expired(it->second.lastUsed)) { ++it; continue; }
+            result.gpuBytesReleasedEstimate += it->second.bytes;
+            result.objectsReleased += it->second.uvBuffer ? 3 : 2;
+            it = state.meshes.erase(it);
+        }
+        return result;
+    }
     // The immediate context owns binding references too. Remove only bindings
     // to evicted resources; keep all live render targets/pipeline/UI resources.
     ComPtr<ID3D11Buffer> boundVertex, boundIndex;
@@ -2194,13 +2428,12 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
         const auto& mesh = it->second;
         if (mesh.lastUsedEpoch == state.usageEpoch || !expired(mesh.lastUsed)) { ++it; continue; }
         if (boundVertex.Get() == mesh.vertices.Get()) {
-            ID3D11Buffer* empty[] = {nullptr, nullptr};
-            const UINT zero[] = {0, 0};
-            state.context->IASetVertexBuffers(0, 2, empty, zero, zero);
+            const rhi::VertexBufferBinding emptyBindings[2]{};
+            state.sceneCommands().bindVertexBuffers(0, emptyBindings);
             boundVertex.Reset();
         }
         if (boundIndex.Get() == mesh.indices.Get()) {
-            state.context->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
+            state.sceneCommands().bindIndexBuffer(nullptr);
             boundIndex.Reset();
         }
         result.gpuBytesReleasedEstimate += mesh.bytes;
@@ -2235,6 +2468,9 @@ rae::GarbageCollectionMemoryStats SceneRenderer::collectGarbage(double maxIdleSe
 }
 
 void SceneRenderer::shutdown() {
+    if (impl_ && impl_->native12) {
+        try { impl_->native12->waitIdle(); } catch (...) {}
+    }
     if (impl_ && impl_->context) { impl_->context->ClearState(); impl_->context->Flush(); }
     if (impl_) {
         const auto root = impl_->shaderRoot;
@@ -2247,13 +2483,19 @@ void SceneRenderer::shutdown() {
 
 ID3D11Device* SceneRenderer::device() const { return impl_->device.Get(); }
 ID3D11DeviceContext* SceneRenderer::context() const { return impl_->context.Get(); }
-void* SceneRenderer::sceneTexture() const { return impl_->sceneView.Get(); }
+std::shared_ptr<rhi::Device> SceneRenderer::graphicsDevice() const { return impl_->rhiDevice; }
+void* SceneRenderer::sceneTexture() const {
+    if (impl_->native12 && impl_->sceneColorImage)
+        return reinterpret_cast<void*>(static_cast<std::uintptr_t>(impl_->native12->uiTextureId(impl_->sceneColorImage)));
+    return impl_->sceneView.Get();
+}
 std::uint32_t SceneRenderer::sceneTextureWidth() const { return impl_->sceneWidth; }
 std::uint32_t SceneRenderer::sceneTextureHeight() const { return impl_->sceneHeight; }
 std::string SceneRenderer::adapterName() const { return impl_->adapter; }
-bool SceneRenderer::validationEnabled() const { return impl_->infoQueue != nullptr; }
+bool SceneRenderer::validationEnabled() const { return impl_->native12 ? impl_->native12->validationEnabled() : impl_->infoQueue != nullptr; }
 
 std::uint32_t SceneRenderer::validationErrorCount() const {
+    if (impl_->native12) return impl_->native12->validationErrorCount();
     std::uint32_t count = impl_->hardwareRayTracing ? impl_->hardwareRayTracing->validationErrorCount() : 0;
     if (!impl_->infoQueue) return count;
     const auto total = impl_->infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
@@ -2287,6 +2529,22 @@ bool SceneRenderer::saveScreenshot(std::FILE* file, std::string& error) {
     error.clear();
     if (!file) { error = "Screenshot output stream is null."; return false; }
     auto& state = *impl_;
+    if (state.native12) {
+        try {
+            const auto image = state.native12->readTexture(state.native12->backbuffer());
+            std::vector<unsigned char> pixels(static_cast<std::size_t>(image.width)*image.height*4);
+            for (std::uint32_t y = 0; y < image.height; ++y) {
+                const auto* row = reinterpret_cast<const unsigned char*>(image.bytes.data()) +
+                    static_cast<std::size_t>(y)*image.rowPitch;
+                auto* output = pixels.data() + static_cast<std::size_t>(y)*image.width*4;
+                for (std::uint32_t x = 0; x < image.width; ++x) {
+                    output[x*4] = row[x*4+2]; output[x*4+1] = row[x*4+1];
+                    output[x*4+2] = row[x*4]; output[x*4+3] = 255;
+                }
+            }
+            return writeBitmap(file, image.width, image.height, pixels, error);
+        } catch (const std::exception& failure) { error = failure.what(); return false; }
+    }
     if (!state.swapChain) { error = "Renderer is not initialized."; return false; }
     ComPtr<ID3D11Texture2D> source, staging;
     if (failed(state.swapChain->GetBuffer(0, IID_PPV_ARGS(&source)), "Get screenshot backbuffer", error)) return false;
@@ -2314,23 +2572,7 @@ bool SceneRenderer::saveScreenshot(std::FILE* file, std::string& error) {
         }
     }
     state.context->Unmap(staging.Get(), 0);
-    BITMAPFILEHEADER fileHeader{};
-    BITMAPINFOHEADER info{};
-    fileHeader.bfType = 0x4d42;
-    fileHeader.bfOffBits = sizeof(fileHeader) + sizeof(info);
-    fileHeader.bfSize = fileHeader.bfOffBits + static_cast<DWORD>(pixels.size());
-    info.biSize = sizeof(info);
-    info.biWidth = static_cast<LONG>(description.Width);
-    info.biHeight = -static_cast<LONG>(description.Height);
-    info.biPlanes = 1;
-    info.biBitCount = 32;
-    info.biCompression = BI_RGB;
-    info.biSizeImage = static_cast<DWORD>(pixels.size());
-    const bool written = std::fwrite(&fileHeader, sizeof(fileHeader), 1, file) == 1 &&
-        std::fwrite(&info, sizeof(info), 1, file) == 1 &&
-        std::fwrite(pixels.data(), 1, pixels.size(), file) == pixels.size();
-    if (!written) { error = "Could not write complete screenshot."; return false; }
-    return true;
+    return writeBitmap(file, description.Width, description.Height, pixels, error);
 }
 
 #include "RenderDiagnosticsApi.inl"

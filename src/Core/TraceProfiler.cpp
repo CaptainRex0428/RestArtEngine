@@ -1,4 +1,5 @@
 #include <RestArtEngine/Core/TraceProfiler.h>
+#include <RestArtEngine/Core/RuntimeDiagnostics.h>
 
 #include <algorithm>
 #include <fstream>
@@ -6,10 +7,8 @@
 
 namespace rae::diagnostics {
 namespace {
-std::atomic<std::uint64_t> nextThreadId{1};
 std::uint64_t threadId() noexcept {
-    static thread_local const auto id = nextThreadId.fetch_add(1, std::memory_order_relaxed);
-    return id;
+    return diagnosticThreadId();
 }
 struct StackEntry {
     const TraceProfiler* owner = nullptr;
@@ -201,7 +200,10 @@ bool TraceProfiler::save(const std::filesystem::path& path, std::string& error) 
 }
 
 TraceProfiler& profiler() noexcept { static TraceProfiler instance; return instance; }
-void beginFrame() noexcept { profiler().beginFrame(); }
+void beginFrame() noexcept {
+    profiler().beginFrame();
+    runtimeDiagnostics().setFrame(profiler().currentFrameId());
+}
 void endFrame() noexcept { profiler().endFrame(); }
 std::uint64_t currentFrameId() noexcept { return profiler().currentFrameId(); }
 TraceScope::TraceScope(const char* name, const char* category) noexcept : TraceScope(profiler(), name, category) {}

@@ -31,6 +31,17 @@ namespace {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
 
+void validateBackendPreference(renderer::MainRenderBackend backend) {
+    switch (backend) {
+    case renderer::MainRenderBackend::D3D11Dxr:
+    case renderer::MainRenderBackend::Auto:
+    case renderer::MainRenderBackend::D3D11:
+    case renderer::MainRenderBackend::D3D12:
+        return;
+    }
+    throw std::runtime_error("rendering.backendPreference must be d3d11Dxr, auto, d3d11 or d3d12.");
+}
+
 void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& settings) {
     using renderer::GlobalIlluminationMethod;
     using renderer::GlobalIlluminationMode;
@@ -62,6 +73,19 @@ RenderingSettings readRenderingSettings(const Json& value) {
             throw std::runtime_error(std::string("rendering.") + key + " must be a boolean.");
         result = rendering.at(key).get<bool>();
     };
+    if (rendering.contains("backendPreference")) {
+        const auto& encoded = rendering.at("backendPreference");
+        if (!encoded.is_string())
+            throw std::runtime_error("rendering.backendPreference must be d3d11Dxr, auto, d3d11 or d3d12.");
+        const auto& key = encoded.get_ref<const std::string&>();
+        const auto backend = renderer::parseMainRenderBackend(key);
+        // Retain the first selector's compatibility spelling while writing only
+        // the stable name of the explicit D3D11 + DXR mode on subsequent saves.
+        if (!backend || (key != renderer::mainRenderBackendKey(*backend) && key != "legacyHybrid"))
+            throw std::runtime_error("rendering.backendPreference must be d3d11Dxr, auto, d3d11 or d3d12.");
+        settings.backendPreference = *backend;
+    }
+    read("allowFallbackToD3D11", settings.allowFallbackToD3D11);
     read("hardwareRayTracing", settings.hardwareRayTracing);
     read("hardwareRayTracingReflections", settings.hardwareRayTracingReflections);
     read("hardwareRayTracingShadows", settings.hardwareRayTracingShadows);
@@ -843,6 +867,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
     fs::path temporary;
     bool temporaryOwned = false;
     try {
+        validateBackendPreference(settings.backendPreference);
         validateGlobalIllumination(settings.globalIllumination);
         fs::path manifest;
         if (!resolveManifest(folderOrManifest, manifest, error)) return false;
@@ -858,6 +883,8 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         (void)readRenderingSettings(value);
         auto& rendering = value["rendering"];
         if (rendering.is_null()) rendering = Json::object();
+        rendering["backendPreference"] = renderer::mainRenderBackendKey(settings.backendPreference);
+        rendering["allowFallbackToD3D11"] = settings.allowFallbackToD3D11;
         rendering["hardwareRayTracing"] = settings.hardwareRayTracing;
         rendering["hardwareRayTracingReflections"] = settings.hardwareRayTracingReflections;
         rendering["hardwareRayTracingShadows"] = settings.hardwareRayTracingShadows;

@@ -34,7 +34,7 @@ bool renderDepthOfField(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vi
     DepthOfFieldConstants data{
         XMFLOAT4(viewport.TopLeftX,viewport.TopLeftY,viewport.Width,viewport.Height),
         XMFLOAT4(dof.focusDistance,scale,24.0f,0)};
-    context->UpdateSubresource(dofConstants.Get(),0,nullptr,&data,0,0);
+    sceneCommands().writeBuffer(dofBuffer, gpuBytes(&data, sizeof(data)));
     ID3D11Buffer* buffer = dofConstants.Get();
     context->PSSetConstantBuffers(8,1,&buffer);
     ID3D11ShaderResourceView* color = dofSourceView.Get();

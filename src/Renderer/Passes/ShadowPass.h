@@ -7,25 +7,23 @@
 // view, then restore the camera constants. Ownership of the depth array, the
 // constant buffer and the mesh cache stays with SceneRenderer in this
 // iteration; the pass receives bindings and two callbacks so it never reaches
-// into renderer internals. Moving resource ownership into the pass is the next
-// step once the RHI contract exists.
+// into renderer internals. Attachments and commands use the shared RHI contract;
+// this module does not depend on a native graphics API.
+
+#include <RestArtEngine/Renderer/Rhi.h>
 
 #include <cstdint>
 #include <functional>
 #include <string>
 
-struct ID3D11Buffer;
-struct ID3D11DepthStencilView;
-struct ID3D11DeviceContext;
-
 namespace rae::renderer::passes {
 
 struct ShadowPassContext {
-    ID3D11DeviceContext* context = nullptr;
+    rhi::CommandContext* commands = nullptr;
     // b3 ShadowConstants, already uploaded for this frame by the caller.
-    ID3D11Buffer* shadowConstants = nullptr;
-    // One depth-stencil view per cascade slice; entries must be non-null.
-    ID3D11DepthStencilView* const* cascadeTargets = nullptr;
+    rhi::BufferHandle shadowConstants;
+    // Persistent sampled depth array; each cascade writes one layer.
+    rhi::TextureHandle depthArray;
     std::uint32_t cascadeCount = 0;
     std::uint32_t mapSize = 0;
     // Writes the light-space constants for one cascade before its draw.

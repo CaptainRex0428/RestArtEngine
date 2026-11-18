@@ -110,8 +110,14 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
                 "Contact shadows need the Deferred position buffer; Forward keeps the raster shadow map.");
         }
     }
-    if (requests.shadowMethod == ShadowMethod::AnalyticRay || requests.rayTracing)
-        set(RenderFeature::AnalyticRayTracing, FeatureState::Active);
+    if (requests.shadowMethod == ShadowMethod::AnalyticRay || requests.rayTracing) {
+        if (!capabilities.analyticRayTracingAvailable) {
+            set(RenderFeature::AnalyticRayTracing, FeatureState::UnavailableInBuild,
+                "Analytic ray effects are not implemented by the active backend in this build; the request is retained.");
+        } else {
+            set(RenderFeature::AnalyticRayTracing, FeatureState::Active);
+        }
+    }
 
     // Hardware ray tracing, checked layer by layer. The first failing layer is
     // reported; later requests inherit the same reason.
@@ -123,7 +129,14 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
             hardwareReason = "The raster shader pipeline is not ready.";
         } else if (!capabilities.hardwareRayTracingBuilt) {
             hardwareState = FeatureState::UnavailableInBuild;
-            hardwareReason = "This build has no DX12/DXR module.";
+            hardwareReason = capabilities.nativeD3D12
+                ? "Native D3D12 hardware ray tracing is not implemented in this build; the request is retained."
+                : "This build has no DX12/DXR module.";
+        } else if (!capabilities.hardwareRayTracingBackendAllowed) {
+            hardwareState = capabilities.nativeD3D12 ? FeatureState::UnavailableInBuild : FeatureState::UnsupportedByDevice;
+            hardwareReason = capabilities.nativeD3D12
+                ? "Native D3D12 hardware ray tracing is not implemented; the D3D11/DXR bridge is unavailable to this backend."
+                : "The strict D3D11 backend disables D3D12/DXR initialization; the request is retained.";
         } else if (!capabilities.hardwareRayTracingDevice) {
             hardwareState = FeatureState::UnsupportedByDevice;
             hardwareReason = "The selected device or adapter does not support DXR 1.1.";
@@ -183,7 +196,10 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
     }
 
     if (requests.depthOfField) {
-        if (capabilities.thinLensDepthOfField) {
+        if (!capabilities.depthOfFieldAvailable) {
+            set(RenderFeature::DepthOfField, FeatureState::UnavailableInBuild,
+                "Depth of field is not implemented by the active backend in this build; the lens request is retained.");
+        } else if (capabilities.thinLensDepthOfField) {
             set(RenderFeature::DepthOfField, FeatureState::Degraded,
                 "Progressive path tracing resolves thin-lens depth of field; the screen-space pass is skipped.");
         } else {
@@ -192,7 +208,10 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
     }
 
     if (requests.selectionOutline) {
-        if (!capabilities.editorSelection) {
+        if (!capabilities.selectionOutlineAvailable) {
+            set(RenderFeature::SelectionOutline, FeatureState::UnavailableInBuild,
+                "Selection outline is not implemented by the active backend in this build; the request is retained.");
+        } else if (!capabilities.editorSelection) {
             set(RenderFeature::SelectionOutline, FeatureState::BlockedByDependency,
                 "The editor has no selection to outline.");
         } else {

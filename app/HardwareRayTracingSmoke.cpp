@@ -635,6 +635,21 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "Project settings has no Rendering navigation/category or hardware checkbox.");
         require(uiText.find("[ ] Ray tracing") == std::string::npos && uiText.find("[x] Ray tracing") == std::string::npos,
             "The old ambiguous top-level ray-tracing checkbox remains visible.");
+        const auto launchBackend = renderer.mainBackendSelection().requested;
+        const auto launchD3D12Attempt = renderer.d3d12InitializationAttempted();
+        click(itemRect(findChild("ProjectSettingsContent"), "##MainBackend").GetCenter());
+        require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+            "Main backend choices did not open.");
+        auto* backendPopup = context->OpenPopupStack.back().Window;
+        const auto strictItem = ImHashStr("D3D11 (strict)", 0, backendPopup->GetID(2));
+        click(itemRect(backendPopup, "D3D11 (strict)", ImGuiNavLayer_Main, strictItem).GetCenter());
+        click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());
+        require(editor.projectSettingsDirty(), "Backend editing did not mark the project dirty.");
+        require(renderer.mainBackendSelection().requested == launchBackend &&
+            renderer.d3d12InitializationAttempted() == launchD3D12Attempt && renderer.mainBackendReady(),
+            "Editing the next-launch backend changed the live device.");
+        (void)itemRect(findChild("ProjectSettingsContent"), "##MainBackend");
+        uiFrame("project-settings-backend.bmp");
         click(itemRect(findChild("ProjectSettingsContent"), "Hardware ray tracing").GetCenter());
         require(uiSettings.hardwareRayTracing != project.rendering.hardwareRayTracing && editor.projectSettingsDirty(),
             "Hardware checkbox failed to update the requested value immediately.");
@@ -799,6 +814,12 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         require(!editor.projectSettingsDirty(), "Save project settings did not clear the unsaved state.");
         project::ProjectPaths reloaded;
         require(project::loadProject(project.manifest, reloaded, error), error);
+        require(reloaded.rendering.backendPreference == renderer::MainRenderBackend::D3D11 &&
+            reloaded.rendering.allowFallbackToD3D11 != project.rendering.allowFallbackToD3D11,
+            "The next-launch backend and fallback draft did not survive saving.");
+        require(renderer.mainBackendSelection().requested == launchBackend &&
+            renderer.d3d12InitializationAttempted() == launchD3D12Attempt,
+            "Saving project preferences hot-switched the live backend.");
         require(reloaded.rendering.hardwareRayTracing == uiSettings.hardwareRayTracing &&
             reloaded.rendering.hardwareRayTracingReflections == uiSettings.hardwareRayTracingReflections &&
             reloaded.rendering.hardwareRayTracingShadows == uiSettings.hardwareRayTracingShadows,

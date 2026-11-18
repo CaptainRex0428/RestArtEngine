@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -12,6 +13,8 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
 struct ImGuiViewport;
+
+namespace rae::renderer { class SceneRenderer; }
 
 namespace rae::imgui {
 
@@ -36,10 +39,14 @@ public:
     // validation retain the original single-window coordinate space by default.
     bool initialize(void* window, ID3D11Device* device, ID3D11DeviceContext* deviceContext,
                     bool enablePlatformWindows = false);
+    // Selects the UI backend from the renderer's actual device, including a
+    // native D3D12 renderer with no borrowed D3D11 resources.
+    bool initialize(void* window, renderer::SceneRenderer& renderer,
+                    bool enablePlatformWindows = false);
     void shutdown() noexcept;
-    void beginFrame(float deltaSeconds) noexcept;
+    void beginFrame(float deltaSeconds);
     // A minimized main surface can still submit and present secondary windows.
-    void endFrame(bool renderMain = true) noexcept;
+    void endFrame(bool renderMain = true);
     [[nodiscard]] bool hasVisiblePlatformWindows() const noexcept;
     // Native requests can arrive while every window is minimized. Service one
     // UI frame to acknowledge them without keeping idle minimized surfaces live.
@@ -68,6 +75,10 @@ public:
                               std::uintptr_t wparam, std::intptr_t lparam);
 
 private:
+    struct D3D12State;
+    bool initializeBackends(void* window, ID3D11Device* device,
+        ID3D11DeviceContext* deviceContext, bool enablePlatformWindows);
+    std::shared_ptr<D3D12State> d3d12_;
     static void createPlatformWindow(ImGuiViewport* viewport);
     void dispatchFileDrop(void* window, std::uintptr_t drop);
     void (*createPlatformWindow_)(ImGuiViewport*) = nullptr;

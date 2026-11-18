@@ -49,7 +49,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
     projectSettingsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (visible) {
         ImGui::TextUnformatted(project_.name.c_str());
-        ImGui::TextDisabled("Settings apply immediately. Save to keep them with this project.");
+        ImGui::TextWrapped("Rendering features update immediately. Backend changes take effect on the next launch after saving.");
         ImGui::Separator();
 
         const float footerHeight = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
@@ -63,10 +63,36 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::SeparatorText("Rendering");
         ImGui::TextWrapped("Configure project rendering features independently of the current device.");
         ImGui::Spacing();
+        bool changed = false;
+        int backend = static_cast<int>(projectRenderingDraft_.backendPreference);
+        ImGui::TextUnformatted("Main backend (next launch)");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##MainBackend", &backend,
+            "D3D11 + D3D12 ray tracing\0Auto\0D3D11 (strict)\0D3D12 (experimental raster)\0")) {
+            projectRenderingDraft_.backendPreference = static_cast<renderer::MainRenderBackend>(backend);
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("Allow fallback to D3D11", &projectRenderingDraft_.allowFallbackToD3D11);
+        const auto& activeBackend = renderer.mainBackendSelection();
+        ImGui::Text("Current main backend: %s", renderer.mainBackendReady()
+            ? renderer::mainRenderBackendKey(activeBackend.effective) : "Not initialized");
+        ImGui::Text("This launch requested: %s", renderer::mainRenderBackendKey(activeBackend.requested.preference));
+        ImGui::TextWrapped("%s", activeBackend.reason);
+        if (!renderer.backendInitializationError().empty())
+            ImGui::TextWrapped("D3D12 initialization failed: %s", renderer.backendInitializationError().c_str());
+        ImGui::TextWrapped("Auto uses strict D3D11. Native D3D12 is an experimental raster backend. Hybrid mode uses D3D11 raster and optional D3D12/DXR ray tracing.");
+        if (activeBackend.effective == renderer::MainRenderBackend::D3D12)
+            ImGui::TextWrapped("Native D3D12 currently keeps requests for ray tracing, GI, depth of field and selection outlines without executing those features.");
+        const renderer::MainBackendRequest nextLaunch{
+            projectRenderingDraft_.backendPreference, projectRenderingDraft_.allowFallbackToD3D11};
+        if (nextLaunch != activeBackend.requested)
+            ImGui::TextWrapped("The project preference differs from this launch. Save and relaunch without command-line overrides to use it.");
+        ImGui::Spacing();
+        ImGui::SeparatorText("Lighting features");
         auto& gi = settings.globalIllumination;
         const bool giEnabled = gi.method != renderer::GlobalIlluminationMethod::Disabled;
         const bool realtimeGi = giEnabled && gi.mode == renderer::GlobalIlluminationMode::Realtime;
-        bool changed = ImGui::Checkbox("Hardware ray tracing", &settings.hardwareRayTracing);
+        changed |= ImGui::Checkbox("Hardware ray tracing", &settings.hardwareRayTracing);
         ImGui::TextWrapped("Use supported hardware tracing for the configured lighting features.");
         ImGui::BeginDisabled(!settings.hardwareRayTracing || giEnabled);
         changed |= ImGui::Checkbox("Ray-traced reflections", &settings.hardwareRayTracingReflections);
@@ -162,7 +188,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::Spacing();
         ImGui::SeparatorText("Compatibility preview");
         ImGui::BeginDisabled(settings.hardwareRayTracing);
-        ImGui::Checkbox("Analytic reflections (DX11)", &settings.rayTracing);
+        ImGui::Checkbox("Analytic reflections (D3D11)", &settings.rayTracing);
         ImGui::EndDisabled();
         ImGui::TextWrapped("Session-only analytic tracing. Hardware ray tracing takes precedence when requested.");
         ImGui::EndChild();

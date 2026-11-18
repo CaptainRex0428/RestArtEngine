@@ -286,6 +286,8 @@ void SceneEditor::registerCommands() {
         [this] { showDiagnostics(DiagnosticsTab::Profiler); });
     commands_.add("debug.frameInspector", "debug", "Frame Inspector...", "", 0,
         [this] { showDiagnostics(DiagnosticsTab::FrameInspector); });
+    commands_.add("debug.runtime", "debug", "Runtime Debug...", "", 0,
+        [this] { showDiagnostics(DiagnosticsTab::Runtime); });
 }
 
 bool SceneEditor::commandButton(std::string_view id) {
@@ -3614,7 +3616,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         }
         ImGui::SameLine();
         ImGui::TextDisabled("Project: %s | %s / %s | %.0f FPS | F1 UI, F2 pipeline, F11 fullscreen",
-            project_.name.c_str(), renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
+            project_.name.c_str(), renderer.mainBackendSelection().effective == renderer::MainRenderBackend::D3D12
+                ? "DX12" : renderer.hardwareRayTracingActive() ? "DX11 + DXR" : "DX11",
             renderer.adapterName().c_str(), ImGui::GetIO().Framerate);
         ImGui::End();
 

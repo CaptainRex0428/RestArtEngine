@@ -8,13 +8,18 @@
 #include <wrl/client.h>
 
 #include <RestArtEngine/Editor/LoadingScreen.h>
+#include "../Renderer/D3D12/D3D12Rhi.h"
 #include <imgui.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "windowscodecs.lib")
@@ -28,10 +33,13 @@ std::string pathText(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
 }
 
-// Decodes the PNG through WIC and uploads it as an immutable shader resource.
-bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
-                 ID3D11ShaderResourceView** result, std::uint32_t* outWidth, std::uint32_t* outHeight,
-                 std::string& error) {
+struct DecodedImage {
+    std::uint32_t width = 0, height = 0;
+    std::vector<std::byte> pixels;
+};
+
+// WIC decoding is shared by the two uploads; it never creates a graphics device.
+bool decodeImage(const std::filesystem::path& image, DecodedImage& result, std::string& error) {
     if (!std::filesystem::is_regular_file(image)) {
         error = "Loading image not found: " + pathText(image);
         return false;
@@ -41,6 +49,10 @@ bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
         error = "Cannot initialize COM for the loading image decoder.";
         return false;
     }
+    struct ApartmentScope {
+        HRESULT status;
+        ~ApartmentScope() { if (SUCCEEDED(status)) ::CoUninitialize(); }
+    } apartment{com};
     ComPtr<IWICImagingFactory> factory;
     if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
         error = "Windows Imaging Component is unavailable.";
@@ -69,14 +81,28 @@ bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
         error = "Loading image has invalid dimensions.";
         return false;
     }
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * height * 4u);
-    if (FAILED(converter->CopyPixels(nullptr, width * 4u, static_cast<UINT>(pixels.size()), pixels.data()))) {
+    if (width > std::numeric_limits<UINT>::max() / 4u ||
+        height > std::numeric_limits<UINT>::max() / (width * 4u)) {
+        error = "Loading image exceeds the decoder buffer limit.";
+        return false;
+    }
+    std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height * 4u);
+    if (FAILED(converter->CopyPixels(nullptr, width * 4u, static_cast<UINT>(pixels.size()),
+        reinterpret_cast<BYTE*>(pixels.data())))) {
         error = "Cannot read loading image pixels.";
         return false;
     }
+    result.width = width;
+    result.height = height;
+    result.pixels = std::move(pixels);
+    return true;
+}
+
+bool uploadD3D11Image(ID3D11Device* device, const DecodedImage& image,
+    ID3D11ShaderResourceView** result, std::string& error) {
     D3D11_TEXTURE2D_DESC description{};
-    description.Width = width;
-    description.Height = height;
+    description.Width = image.width;
+    description.Height = image.height;
     description.MipLevels = 1;
     description.ArraySize = 1;
     description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -84,8 +110,8 @@ bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
     description.Usage = D3D11_USAGE_IMMUTABLE;
     description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     D3D11_SUBRESOURCE_DATA initial{};
-    initial.pSysMem = pixels.data();
-    initial.SysMemPitch = width * 4u;
+    initial.pSysMem = image.pixels.data();
+    initial.SysMemPitch = image.width * 4u;
     ComPtr<ID3D11Texture2D> texture;
     if (FAILED(device->CreateTexture2D(&description, &initial, &texture))) {
         error = "Cannot create the loading image texture.";
@@ -97,8 +123,6 @@ bool decodeImage(ID3D11Device* device, const std::filesystem::path& image,
         return false;
     }
     *result = view.Detach();
-    if (outWidth) *outWidth = width;
-    if (outHeight) *outHeight = height;
     return true;
 }
 } // namespace
@@ -108,18 +132,65 @@ LoadingScreen::~LoadingScreen() { release(); }
 bool LoadingScreen::initialize(ID3D11Device* device, const std::filesystem::path& image, std::string& error) {
     release();
     error.clear();
+    if (!device) {
+        error = "The loading image requires an initialized D3D11 device.";
+        return false;
+    }
+    DecodedImage decoded;
+    if (!decodeImage(image, decoded, error)) return false;
     ID3D11ShaderResourceView* view = nullptr;
-    if (!decodeImage(device, image, &view, &width_, &height_, error)) return false;
+    if (!uploadD3D11Image(device, decoded, &view, error)) return false;
     texture_ = view;
+    textureId_ = reinterpret_cast<std::uintptr_t>(view);
+    width_ = decoded.width;
+    height_ = decoded.height;
     return true;
 }
 
+bool LoadingScreen::initializeGraphicsDevice(std::shared_ptr<renderer::rhi::Device> graphics,
+    const std::filesystem::path& image, std::string& error) {
+    release();
+    error.clear();
+    try {
+        auto* native = dynamic_cast<renderer::d3d12::D3D12RhiDevice*>(graphics.get());
+        if (!native) {
+            error = "The active backend cannot upload a loading image.";
+            return false;
+        }
+        DecodedImage decoded;
+        if (!decodeImage(image, decoded, error)) return false;
+        auto texture = native->uploadRgba8(decoded.width, decoded.height, decoded.pixels, "Loading artwork");
+        if (!texture) throw std::runtime_error("Cannot create the D3D12 loading image texture.");
+        const auto textureId = native->uiTextureId(texture);
+        if (!textureId) throw std::runtime_error("Cannot create the D3D12 loading image view.");
+        textureDevice_ = std::move(graphics);
+        nativeTexture_ = std::move(texture);
+        textureId_ = textureId;
+        width_ = decoded.width;
+        height_ = decoded.height;
+        return true;
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        return false;
+    }
+}
+
 void LoadingScreen::release() noexcept {
+    // The boot artwork may still be referenced by the last submitted UI list.
+    // Keep its device alive and drain that work before releasing the handle.
+    if (nativeTexture_) {
+        if (auto* native = dynamic_cast<renderer::d3d12::D3D12RhiDevice*>(textureDevice_.get())) {
+            try { native->waitIdle(); } catch (...) { /* Device loss must not throw from teardown. */ }
+        }
+    }
+    nativeTexture_.reset();
+    textureDevice_.reset();
     if (texture_) {
         texture_->Release();
         texture_ = nullptr;
-        width_ = height_ = 0;
     }
+    textureId_ = 0;
+    width_ = height_ = 0;
 }
 
 void LoadingScreen::draw(float progress, const char* text, const char* detail) const {
@@ -131,8 +202,8 @@ void LoadingScreen::draw(float progress, const char* text, const char* detail) c
     const ImVec2 bottomRight(topLeft.x + displayWidth, topLeft.y + displayHeight);
     const auto position = [topLeft](float x, float y) { return ImVec2(topLeft.x + x, topLeft.y + y); };
     list->PushClipRect(topLeft, bottomRight, true);
-    if (texture_)
-        list->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture_)), topLeft, bottomRight);
+    if (textureId_)
+        list->AddImage(static_cast<ImTextureID>(textureId_), topLeft, bottomRight);
     else
         list->AddRectFilled(topLeft, bottomRight, IM_COL32(10, 12, 18, 255));
     // A soft scrim keeps the overlay readable on bright artwork.

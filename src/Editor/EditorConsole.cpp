@@ -1,4 +1,5 @@
 #include "RestArtEngine/Editor/EditorConsole.h"
+#include <RestArtEngine/Core/RuntimeDiagnostics.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -65,6 +66,10 @@ void EditorConsole::append(std::string_view text, bool error) {
     ConsoleEntry entry{error, std::string(text)};
     if (entries_.size() == MaxEntries) entries_.erase(entries_.begin());
     entries_.push_back(std::move(entry));
+    // Mirror only committed entries. The runtime journal has no console
+    // callback, and its noexcept logging cannot replace a command result.
+    diagnostics::runtimeDiagnostics().log(error ? diagnostics::MessageSeverity::Error
+        : diagnostics::MessageSeverity::Info, "EditorConsole", entries_.back().text);
 }
 
 void EditorConsole::clearOutput() noexcept { entries_.clear(); }

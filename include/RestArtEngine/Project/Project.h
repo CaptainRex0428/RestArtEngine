@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Renderer/BackendSelection.h>
 
 #include <filesystem>
 #include <string>
@@ -46,6 +47,10 @@ struct EngineCompatibilityReport {
 // Requested project features, independent of the device that opens the project.
 // Capability detection must not rewrite these values when a feature is unavailable.
 struct RenderingSettings {
+    // Missing fields in older projects retain the existing D3D11 + DXR mode.
+    // Explicit D3D11 selection instead requests a strict D3D11-only session.
+    renderer::MainRenderBackend backendPreference = renderer::MainRenderBackend::D3D11Dxr;
+    bool allowFallbackToD3D11 = true;
     bool hardwareRayTracing = false;
     bool hardwareRayTracingReflections = true;
     bool hardwareRayTracingShadows = true;

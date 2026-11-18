@@ -84,7 +84,14 @@ struct FeatureRequests {
 // device creation and after it has inspected the visible materials.
 struct FeatureCapabilities {
     bool shaderPipelineReady = true;
+    // Implementation availability belongs to the active backend, even when
+    // another backend in the same binary already provides the feature.
+    bool analyticRayTracingAvailable = true;
+    bool depthOfFieldAvailable = true;
+    bool selectionOutlineAvailable = true;
+    bool nativeD3D12 = false;
     bool hardwareRayTracingBuilt = true;
+    bool hardwareRayTracingBackendAllowed = true;
     bool hardwareRayTracingDevice = false;
     bool hardwarePipelineReady = false;
     bool hardwareDepthCompatible = true;

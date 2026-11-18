@@ -4,6 +4,7 @@
     std::uint64_t diagnosticSequence = 0;
     RenderDiagnosticsFrame diagnosticFrame;
     RenderFrameCapture capture;
+    FrameCaptureOptions captureOptions;
     Clock::time_point diagnosticStart{}, passStart{};
     std::unique_ptr<rae::diagnostics::TraceScope> diagnosticPassTrace;
     std::size_t activePass = static_cast<std::size_t>(-1);
@@ -18,6 +19,8 @@
     std::array<TimingSlot, 4> timingRing;
     TimingSlot* activeTiming = nullptr;
     struct CapturedTexture {
+        rhi::TextureHandle image;
+        std::vector<std::uint8_t> cpuBytes; // Offline raw payload, never a Live resource.
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> view;
         std::array<PreviewImage, 5> displays;
@@ -28,6 +31,11 @@
     // ImGui may already hold raw SRVs in this frame's not-yet-submitted draw
     // list when Clear/Capture replaces the snapshot. Retire one previous set.
     std::vector<CapturedTexture> retiredCapturedTextures;
+    RenderFrameCapture pendingCapture;
+    std::vector<CapturedTexture> pendingTextures;
+    std::string pendingCaptureError;
+    std::uint64_t pendingCaptureBytes = 0;
+    PipelineResource captureProduced = PipelineResource::None;
     std::uint64_t mainSceneSequence = 0, retireAfterSequence = 0;
     std::uint64_t captureBytes = 0;
     static constexpr std::uint64_t captureBudget = 256ull * 1024 * 1024;
@@ -36,18 +44,57 @@
 
     void retireCapturedTextures() {
         if (capturedTextures.empty()) return;
-        retiredCapturedTextures = std::move(capturedTextures);
+        for (auto& texture : capturedTextures) retiredCapturedTextures.push_back(std::move(texture));
+        capturedTextures.clear();
         retireAfterSequence = mainSceneSequence + 2;
     }
 
     void pollGpuTimings() {
-        if (!context) return;
+        struct CaptureTimingUpdate {
+            Impl& state;
+            ~CaptureTimingUpdate() {
+                if (!state.capture.valid || state.capture.offline || state.diagnosticFrame.gpuFrameId != state.capture.frameId) return;
+                state.capture.gpuFrameId = state.diagnosticFrame.gpuStatus == GpuTimingStatus::Unavailable
+                    ? 0 : state.diagnosticFrame.gpuFrameId;
+                state.capture.gpuStatus = state.diagnosticFrame.gpuStatus;
+                state.capture.gpuTotalMs = state.diagnosticFrame.gpuTotalMs;
+                state.capture.gpuPasses = state.diagnosticFrame.gpuPasses;
+            }
+        } captureTimingUpdate{*this};
+        if (native12 || !device || !context) {
+            if (native12 && !gpuQueriesUnavailable) {
+                try {
+                    if (auto result = native12->pollDiagnosticTiming()) {
+                        diagnosticFrame.gpuFrameId = result->frameId;
+                        diagnosticFrame.gpuStatus = GpuTimingStatus::Ready;
+                        diagnosticFrame.gpuTotalMs = result->totalMs;
+                        diagnosticFrame.gpuPasses.clear();
+                        for (const auto& [name, ms] : result->passes) {
+                            RenderPassTiming pass; pass.name = name; pass.gpuMs = ms;
+                            diagnosticFrame.gpuPasses.push_back(std::move(pass));
+                        }
+                    }
+                    return;
+                } catch (...) { gpuQueriesUnavailable = true; }
+            }
+            diagnosticFrame.gpuStatus = GpuTimingStatus::Unavailable;
+            diagnosticFrame.gpuFrameId = 0;
+            diagnosticFrame.gpuTotalMs = 0;
+            diagnosticFrame.gpuPasses.clear();
+            activeTiming = nullptr;
+            return;
+        }
         for (auto& slot : timingRing) {
             if (!slot.busy) continue;
             D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
             const auto result = context->GetData(slot.disjoint.Get(), &disjoint, sizeof(disjoint), D3D11_ASYNC_GETDATA_DONOTFLUSH);
             if (result == S_FALSE) continue;
             if (FAILED(result) || disjoint.Disjoint || disjoint.Frequency == 0) {
+                if (capture.valid && !capture.offline && capture.frameId == slot.frameId) {
+                    capture.gpuStatus = FAILED(result) ? GpuTimingStatus::Unavailable : GpuTimingStatus::Disjoint;
+                    capture.gpuFrameId = FAILED(result) ? 0 : slot.frameId;
+                    capture.gpuTotalMs = 0; capture.gpuPasses.clear();
+                }
                 if (slot.frameId >= diagnosticFrame.gpuFrameId) {
                     diagnosticFrame.gpuFrameId = slot.frameId;
                     diagnosticFrame.gpuStatus = FAILED(result) ? GpuTimingStatus::Unavailable : GpuTimingStatus::Disjoint;
@@ -63,14 +110,22 @@
                     D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { ready = false; break; }
             }
             if (!ready) continue;
+            const double scale = 1000.0 / static_cast<double>(disjoint.Frequency);
+            auto gpuPasses = slot.passes;
+            for (std::size_t i = 0; i < gpuPasses.size(); ++i)
+                gpuPasses[i].gpuMs = static_cast<double>(ticks[3 + i * 2] - ticks[2 + i * 2]) * scale;
+            // Several slots can finish in one poll, in ring rather than frame
+            // order. Preserve the captured frame even if Live advances later.
+            if (capture.valid && !capture.offline && capture.frameId == slot.frameId) {
+                capture.gpuFrameId = slot.frameId; capture.gpuStatus = GpuTimingStatus::Ready;
+                capture.gpuTotalMs = static_cast<double>(ticks[1] - ticks[0]) * scale;
+                capture.gpuPasses = gpuPasses;
+            }
             if (slot.frameId >= diagnosticFrame.gpuFrameId) {
                 diagnosticFrame.gpuFrameId = slot.frameId;
                 diagnosticFrame.gpuStatus = GpuTimingStatus::Ready;
-                const double scale = 1000.0 / static_cast<double>(disjoint.Frequency);
                 diagnosticFrame.gpuTotalMs = static_cast<double>(ticks[1] - ticks[0]) * scale;
-                diagnosticFrame.gpuPasses = slot.passes;
-                for (std::size_t i = 0; i < slot.passes.size(); ++i)
-                    diagnosticFrame.gpuPasses[i].gpuMs = static_cast<double>(ticks[3 + i * 2] - ticks[2 + i * 2]) * scale;
+                diagnosticFrame.gpuPasses = std::move(gpuPasses);
             }
             slot.busy = false;
         }
@@ -82,16 +137,26 @@
         if (mainSceneSequence >= retireAfterSequence) retiredCapturedTextures.clear();
         pollGpuTimings();
         collectingDiagnostics = diagnosticsOn || captureRequested || rae::diagnostics::profiler().isRecording();
+        sceneCommands();
+        inspection->start(captureRequested);
         if (!collectingDiagnostics) return;
         diagnosticStart = Clock::now();
         diagnosticFrame.frameId = rae::diagnostics::currentFrameId();
         if (!diagnosticFrame.frameId) diagnosticFrame.frameId = ++diagnosticSequence;
         diagnosticFrame.cpuSubmitMs = 0;
         diagnosticFrame.drawCalls = diagnosticFrame.triangles = 0;
+        diagnosticFrame.droppedEvents = 0;
         diagnosticFrame.passes.clear(); diagnosticFrame.events.clear();
         activePass = static_cast<std::size_t>(-1);
         activeTiming = nullptr;
-        if (gpuQueriesUnavailable) return;
+        if (native12) {
+            if (!gpuQueriesUnavailable) try {
+                native12->beginDiagnosticFrame(diagnosticFrame.frameId);
+                if (!diagnosticFrame.gpuFrameId) diagnosticFrame.gpuStatus = GpuTimingStatus::Pending;
+            } catch (...) { gpuQueriesUnavailable = true; diagnosticFrame.gpuStatus = GpuTimingStatus::Unavailable; }
+            return;
+        }
+        if (!device || !context || gpuQueriesUnavailable) return;
         for (auto& slot : timingRing) {
             if (slot.busy) continue;
             if (!slot.disjoint) {
@@ -118,7 +183,9 @@
         if (!collectingDiagnostics || activePass == static_cast<std::size_t>(-1)) return;
         diagnosticFrame.passes[activePass].cpuMs =
             std::chrono::duration<double, std::milli>(Clock::now() - passStart).count();
-        if (activeTiming) context->End(activeTiming->timestamps[3 + activePass * 2].Get());
+        if (activeTiming && context) context->End(activeTiming->timestamps[3 + activePass * 2].Get());
+        if (native12 && !gpuQueriesUnavailable) try { native12->endDiagnosticPass(); } catch (...) { gpuQueriesUnavailable = true; }
+        diagnosticFrame.passes[activePass].lastEventId = diagnosticFrame.events.size();
         diagnosticPassTrace.reset();
         activePass = static_cast<std::size_t>(-1);
     }
@@ -126,106 +193,69 @@
     void beginDiagnosticPass(std::string_view name) {
         if (!collectingDiagnostics) return;
         endDiagnosticPass();
+        // Native stages do not call the RHI pipeline binding helpers. Never
+        // label them with the previous pass's Shader entry points.
+        diagnosticVS.clear(); diagnosticPS.clear();
         if (diagnosticFrame.passes.size() == maxDiagnosticPasses) return;
         activePass = diagnosticFrame.passes.size();
         diagnosticFrame.passes.push_back({std::string(name)});
         passStart = Clock::now();
+        diagnosticFrame.passes.back().cpuStartMs = std::chrono::duration<double, std::milli>(passStart - diagnosticStart).count();
+        diagnosticFrame.passes.back().firstEventId = diagnosticFrame.events.size() + 1;
+        for (const auto& declaration : pipeline.passes) if (declaration.name == name) {
+            diagnosticFrame.passes.back().reads.push_back(describePipelineResources(declaration.reads));
+            diagnosticFrame.passes.back().writes.push_back(describePipelineResources(declaration.writes));
+        }
         if (rae::diagnostics::profiler().isRecording())
             diagnosticPassTrace = std::make_unique<rae::diagnostics::TraceScope>(
                 std::string(name).c_str(), "Renderer CPU");
-        if (activeTiming) context->End(activeTiming->timestamps[2 + activePass * 2].Get());
+        if (activeTiming && context) context->End(activeTiming->timestamps[2 + activePass * 2].Get());
+        if (native12 && !gpuQueriesUnavailable) try { native12->beginDiagnosticPass(name); } catch (...) { gpuQueriesUnavailable = true; }
     }
 
-    void recordDraw(std::uint64_t actor, std::uint64_t mesh, std::uint64_t material,
+    RenderDrawEvent* recordDraw(std::uint64_t actor, std::uint64_t mesh, std::uint64_t material,
                     std::uint32_t indices, std::uint32_t vertices) {
-        if (!collectingDiagnostics || activePass == static_cast<std::size_t>(-1)) return;
+        if (!collectingDiagnostics || activePass == static_cast<std::size_t>(-1)) return nullptr;
         ++diagnosticFrame.drawCalls;
         diagnosticFrame.triangles += (indices ? indices : vertices) / 3;
         ++diagnosticFrame.passes[activePass].drawCalls;
-        if (diagnosticFrame.events.size() < 65536)
+        if (diagnosticFrame.events.size() < 65536) {
             diagnosticFrame.events.push_back({diagnosticFrame.passes[activePass].name, actor, mesh, material,
                 indices, vertices, revision});
+            auto& event = diagnosticFrame.events.back();
+            event.eventId = diagnosticFrame.events.size();
+            event.passIndex = static_cast<std::uint32_t>(activePass);
+            event.command = indices ? "DrawIndexed (native)" : "Draw (native)";
+            if (inspection) inspection->describe(event);
+            event.vertexShader = diagnosticVS; event.pixelShader = diagnosticPS;
+            return &event;
+        } else ++diagnosticFrame.droppedEvents;
+        return nullptr;
     }
 
     void finishDiagnostics() {
         if (!collectingDiagnostics) return;
         endDiagnosticPass();
         diagnosticFrame.cpuSubmitMs = std::chrono::duration<double, std::milli>(Clock::now() - diagnosticStart).count();
-        if (activeTiming) {
+        if (activeTiming && context) {
             activeTiming->passes = diagnosticFrame.passes;
             context->End(activeTiming->timestamps[1].Get());
             context->End(activeTiming->disjoint.Get());
             activeTiming = nullptr;
         }
+        if (native12 && !gpuQueriesUnavailable) try { native12->endDiagnosticFrame(); } catch (...) { gpuQueriesUnavailable = true; }
         collectingDiagnostics = false;
     }
 
-    bool copyFrameCapture(const SceneSettings& settings, std::string& error) {
-        rae::diagnostics::TraceScope trace("Frame capture copy", "Renderer CPU");
-        RenderFrameCapture candidate;
-        candidate.frameId = diagnosticFrame.frameId;
-        candidate.shaderRevision = revision;
-        candidate.renderPath = settings.path == RenderPath::Deferred ? "Deferred" : "Forward";
-        candidate.cpuSubmitMs = diagnosticFrame.cpuSubmitMs;
-        candidate.events = diagnosticFrame.events;
-        std::vector<CapturedTexture> images;
-        std::uint64_t bytes = 0;
-        const auto copy = [&](ID3D11Resource* source, const char* name, unsigned kind) {
-            CapturedTexture image;
-            ComPtr<ID3D11Texture2D> original;
-            if (!source || FAILED(source->QueryInterface(IID_PPV_ARGS(&original)))) {
-                error = "Capture source unavailable."; return false;
-            }
-            D3D11_TEXTURE2D_DESC desc{};
-            original->GetDesc(&desc);
-            const bool half = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-            const std::uint64_t size = static_cast<std::uint64_t>(desc.Width) * desc.Height * (half ? 8 : 4);
-            if (size > captureBudget - bytes) { error = "Frame capture exceeds the 256 MiB resource budget. Reduce the window size."; return false; }
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.CPUAccessFlags = desc.MiscFlags = 0;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (failed(device->CreateTexture2D(&desc, nullptr, &image.texture), "Create capture snapshot", error)) return false;
-            D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format = desc.Format == DXGI_FORMAT_R32_TYPELESS ? DXGI_FORMAT_R32_FLOAT : desc.Format;
-            srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            srv.Texture2D.MipLevels = 1;
-            if (failed(device->CreateShaderResourceView(image.texture.Get(), &srv, &image.view), "Create capture view", error)) return false;
-            context->CopyResource(image.texture.Get(), original.Get());
-            image.format = desc.Format;
-            image.kind = kind;
-            candidate.resources.push_back({name, half ? "RGBA16F" : kind == 4 ? "R32_FLOAT" : "RGBA8_UNORM",
-                desc.Width, desc.Height, size});
-            images.push_back(std::move(image));
-            bytes += size;
-            return true;
-        };
-        ComPtr<ID3D11Resource> color;
-        if (settings.editorViewport || settings.offscreenTarget) color = sceneTexture;
-        else backbuffer->GetResource(&color);
-        if (!copy(color.Get(), "SceneColor (after viewport debug / outline)", 0)) return false;
-        if (settings.path == RenderPath::Deferred) {
-            const char* names[] = {"GBuffer0: Albedo.rgb / Roughness.a", "GBuffer1: WorldNormal.xyz / Metallic.a", "GBuffer2: WorldPosition.xyz / Valid.a"};
-            for (std::size_t i = 0; i < gbufferTargets.size(); ++i) {
-                ComPtr<ID3D11Resource> source;
-                gbufferTargets[i]->GetResource(&source);
-                if (!copy(source.Get(), names[i], static_cast<unsigned>(i + 1))) return false;
-            }
-        }
-        ComPtr<ID3D11Resource> depthSource;
-        depth->GetResource(&depthSource);
-        if (!copy(depthSource.Get(), "Depth (raw device depth; preview linear 0..100m)", 4)) return false;
-        candidate.valid = true;
-        candidate.status = "Captured final pass outputs. No event replay or per-draw images. Export is JSON metadata only.";
-        if (diagnosticFrame.events.size() == 65536) candidate.status += " Event list limited to 65536 draws.";
-        // Release the old snapshot only after all new resources succeeded.
-        retireCapturedTextures();
-        capture = std::move(candidate);
-        capturedTextures = std::move(images);
-        captureBytes = bytes;
-        return true;
-    }
+#include "FrameCaptureResources.inl"
 
     bool ensureDiagnosticDisplay(std::string& error) {
+        if (native12 || !device || !context) {
+            error = native12
+                ? "Frame Inspector texture display is not implemented for the native D3D12 backend."
+                : "Frame Inspector texture display requires an initialized rendering device.";
+            return false;
+        }
         if (diagnosticDisplayCS) return true;
         static constexpr char source[] = R"(
 Texture2D<float4> inputImage : register(t0);

@@ -20,6 +20,9 @@
 #include "MaterialRenderStateSmoke.h"
 #include "LightingSmoke.h"
 #include "CameraSmoke.h"
+#include "NativeD3D12Smoke.h"
+#include "InspectorSmoke.h"
+#include "InspectorUiSmoke.h"
 #include <RestArtEngine/Editor/CameraNavigation.h>
 #include "MeshAttributesSmoke.h"
 #include <imgui.h>
@@ -145,6 +148,25 @@ private:
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point lastPresent_{};
 };
+
+const char* mainGraphicsApiName(const SceneRenderer& renderer) {
+    return renderer.mainBackendSelection().effective == MainRenderBackend::D3D12 ? "D3D12" : "D3D11";
+}
+
+void reportMainBackend(const SceneRenderer& renderer) {
+    if (!renderer.mainBackendReady()) throw std::runtime_error("The main render backend did not create a device.");
+    const auto& active = renderer.mainBackendSelection();
+    if (active.effective == MainRenderBackend::D3D12 && (renderer.device() || renderer.context()))
+        throw std::runtime_error("The independent D3D12 backend must not create a D3D11 device or context.");
+    std::cout << "Main backend requested: " << mainRenderBackendKey(active.requested.preference)
+        << "; effective: " << mainRenderBackendKey(active.effective)
+        << "; fallback: " << (active.fallback ? "yes" : "no") << '\n'
+        << active.reason << '\n'
+        << "D3D12 initialization attempted: " << (renderer.d3d12InitializationAttempted() ? "yes" : "no") << '\n'
+        << "D3D11 device created: " << (renderer.device() ? "yes" : "no") << '\n';
+    if (!renderer.backendInitializationError().empty())
+        std::cout << "D3D12 initialization error: " << renderer.backendInitializationError() << '\n';
+}
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -432,7 +454,7 @@ void updateGarbageCollection(rae::GarbageCollector& gc, SceneRenderer& renderer,
 }
 
 bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::ProjectPaths& selected,
-    rae::GarbageCollector& gc, std::string& error) {
+    rae::GarbageCollector& gc, const MainBackendRequest& backendRequest, std::string& error) {
     if (engineRoot.empty()) { error = "Cannot locate the RestArtEngine root. Start the project manager inside an engine checkout."; return false; }
     WindowState windowState;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -454,9 +476,13 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     SceneRenderer renderer;
     renderer.setShaderRoot(engineRoot / "Shaders");
     renderer.setMaterialShaderPath(engineRoot / "Shaders/Materials/Standard.hlsli");
-    if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error)) return false;
+    // Honor an explicit session backend for every surface, including the launcher.
+    // Without an override the caller selects strict D3D11 for this simple surface.
+    if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error,
+        backendRequest)) return false;
     rae::imgui::ImGuiLayer ui;
-    if (!ui.initialize(window.handle, renderer.device(), renderer.context())) { error = "Dear ImGui initialization failed for project manager."; return false; }
+    if (!ui.initialize(window.handle, renderer)) { error = "Dear ImGui initialization failed for project manager."; return false; }
+    reportMainBackend(renderer);
     ui.setWindowChrome(&windowState.chrome);
     ShowWindow(window.handle, SW_SHOW);
     char projectName[256] = "MyProject";
@@ -685,9 +711,8 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
             }
         }
         if (windowState.closeRequested) running = false;
-        // The project manager is intentionally a pure project-selection surface. It
-        // still uses the lightweight D3D11 presentation path required by
-        // Dear ImGui, but never renders the scene, grid, or preview geometry.
+        // The project manager only clears the selected native presentation target
+        // and renders UI; it never renders scene, grid, or preview geometry.
         const float projectManagerClear[4] = {0.018f, 0.024f, 0.038f, 1.0f};
         if (!renderer.clear(projectManagerClear, error)) { ui.shutdown(); return false; }
         ui.endFrame();
@@ -695,6 +720,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
         updateGarbageCollection(gc, renderer, ui, previousGc);
     }
     ui.shutdown();
+    renderer.detachWindow();
     // The project manager owns a separate Win32 window. Destroy it before the
     // function returns so the WM_QUIT posted by its WM_DESTROY handler can be
     // drained here; otherwise the editor loop that starts next would consume the
@@ -711,11 +737,14 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
 
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false, editorSelfTest = false, gcSelfTest = false, showUI = true, vsync = true;
+    bool native12SelfTest = false, inspectorSelfTest = false, inspectorUiSelfTest = false;
     bool hardwareRtSelfTest = false;
     bool quadView = false;
     bool giSelfTest = false, pathTracingOverride = false;
     bool renderScaleTest = false, materialRenderStateTest = false, lightingSelfTest = false, meshAttributesSelfTest = false, cameraSelfTest = false;
     std::optional<bool> hardwareRtOverride;
+    std::optional<MainRenderBackend> backendOverride;
+    std::optional<bool> backendFallbackOverride;
     bool temporaryCaptures = false, explicitCaptureDir = false, disableGc = false;
     std::optional<double> gcInterval, gcIdle, gcCaptureAge;
     std::filesystem::path gcSettingsPath = "RestArtEngine.gc.json";
@@ -724,6 +753,7 @@ int wmain(int argc, wchar_t** argv) {
     std::filesystem::path projectPath;
     std::filesystem::path enginePath;
     std::filesystem::path traceOutput;
+    std::filesystem::path inspectCapturePath;
     std::filesystem::path loadingReport;
     SceneSettings settings;
     try {
@@ -731,6 +761,9 @@ int wmain(int argc, wchar_t** argv) {
             const auto argument = std::filesystem::path(argv[i]).u8string();
             const std::string arg(reinterpret_cast<const char*>(argument.data()), argument.size());
             if (arg == "--self-test") selfTest = true;
+            else if (arg == "--native-d3d12-self-test") native12SelfTest = true;
+            else if (arg == "--inspector-self-test") inspectorSelfTest = true;
+            else if (arg == "--inspector-ui-self-test") inspectorUiSelfTest = true;
             else if (arg == "--editor-self-test") editorSelfTest = true;
             else if (arg == "--gc-self-test") gcSelfTest = true;
             else if (arg == "--hardware-rt-self-test") hardwareRtSelfTest = true;
@@ -756,10 +789,23 @@ int wmain(int argc, wchar_t** argv) {
             }
             else if (arg == "--project" && i + 1 < argc) projectPath = argv[++i];
             else if (arg == "--engine" && i + 1 < argc) enginePath = argv[++i];
+            else if (arg == "--inspect-capture") {
+                if (i + 1 >= argc) throw std::runtime_error("--inspect-capture requires a .raframe file.");
+                inspectCapturePath = std::filesystem::absolute(argv[++i]);
+            }
             else if (arg == "--loading-report") {
                 if (i + 1 >= argc) throw std::runtime_error("--loading-report requires a JSONL output path.");
                 loadingReport = argv[++i];
             }
+            else if (arg == "--backend") {
+                if (i + 1 >= argc) throw std::runtime_error("--backend requires auto, d3d11, d3d12 or d3d11Dxr.");
+                const auto encoded = std::filesystem::path(argv[++i]).u8string();
+                const std::string value(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+                backendOverride = parseMainRenderBackend(value);
+                if (!backendOverride) throw std::runtime_error("Invalid --backend: " + value);
+            }
+            else if (arg == "--allow-backend-fallback") backendFallbackOverride = true;
+            else if (arg == "--no-backend-fallback") backendFallbackOverride = false;
             else if (arg == "--no-ui") showUI = false;
             else if (arg == "--forward") settings.path = RenderPath::Forward;
             else if (arg == "--deferred") settings.path = RenderPath::Deferred;
@@ -772,14 +818,20 @@ int wmain(int argc, wchar_t** argv) {
                 if (frameLimit <= 0) throw std::runtime_error("--frames must be positive");
             }
             else if (arg == "--capture-dir" && i + 1 < argc) { captureDir = argv[++i]; explicitCaptureDir = true; }
-            else if (arg == "auto" || arg == "dx11") {}
+            else if (arg == "auto" || arg == "dx11") backendOverride = parseMainRenderBackend(arg);
             else if (arg == "--help") {
-                std::cout << "RestArtEngine: DX11 scene and asset editor\n"
+                std::cout << "RestArtEngine: scene and asset editor\n"
+                    "--backend auto|d3d11|d3d12|d3d11Dxr (session only; native D3D12 is experimental)\n"
+                    "--allow-backend-fallback | --no-backend-fallback (D3D12 to strict D3D11)\n"
                     "--forward | --deferred   --rt (analytic)   --hardware-rt | --no-hardware-rt\n"
                     "--hardware-rt-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
                     "--render-scale-test (10M triangles, 1080p hardware realtime GI benchmark)\n"
                     "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
                     "--camera-self-test (projection, depth of field, previews and GI validation)\n"
+                    "--native-d3d12-self-test (independent native D3D12 GPU validation; no fallback)\n"
+                    "--inspector-self-test (frame capture, offline resources and profiling validation on the selected backend)\n"
+                    "--inspector-ui-self-test (native inspector/profiler/runtime UI validation on the selected backend)\n"
+                    "--inspect-capture <file.raframe> (open an offline snapshot in Frame Inspector)\n"
                     "--quad-view (start the editor with four independent camera views)\n"
                     "--lighting-self-test (five light types, live parameters and GPU validation)\n"
                     "--mesh-attributes-self-test (material slots and UV0-3 GPU validation)\n"
@@ -798,11 +850,11 @@ int wmain(int argc, wchar_t** argv) {
             // A bare argument that is not a flag is treated as the project path,
             // so passing (or double-clicking) a .raproject opens it directly.
             else if (projectPath.empty() && !arg.starts_with("--")) projectPath = argv[i];
-            else throw std::runtime_error("Unsupported argument: " + arg + ". This scene currently runs on DX11. Use --help.");
+            else throw std::runtime_error("Unsupported argument: " + arg + ". Use --help.");
         }
-        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest))
+        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest))
             throw std::runtime_error("--capture-temp requires --frames and cannot be combined with --capture-dir or self-tests.");
-        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest) && !explicitCaptureDir)
+        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest) && !explicitCaptureDir)
             captureDir = std::filesystem::temp_directory_path() / "RestArtEngine/Validation";
         rae::GarbageCollector gc;
         std::string gcError;
@@ -814,7 +866,7 @@ int wmain(int argc, wchar_t** argv) {
         if (disableGc) gcSettings.enabled = false;
         if (!gc.setSettings(gcSettings, gcError)) throw std::runtime_error(gcError);
         // Validation outputs are durable evidence; self-tests use isolated GC services.
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) {
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) {
             std::error_code tempError;
             const auto root = std::filesystem::temp_directory_path(tempError) / "RestArtEngine/Captures";
             if (tempError || !gc.initializeTemporaryCaptures(root, gcError)) {
@@ -827,6 +879,11 @@ int wmain(int argc, wchar_t** argv) {
         rae::imgui::uiPreferences() = rae::imgui::loadUiPreferences(rae::imgui::defaultUiPreferencesPath());
         rae::imgui::currentTheme() = rae::imgui::uiPreferences().theme;
         if (selfTest) { vsync = false; frameLimit = 14; }
+        if (native12SelfTest) {
+            if (backendOverride && *backendOverride != MainRenderBackend::D3D12)
+                throw std::runtime_error("--native-d3d12-self-test requires --backend d3d12");
+            backendOverride = MainRenderBackend::D3D12; backendFallbackOverride = false;
+        }
         rae::project::ProjectPaths project;
         std::string error;
         // Self-tests run against a throwaway copy so they never write into the
@@ -840,9 +897,11 @@ int wmain(int argc, wchar_t** argv) {
                 std::filesystem::remove_all(path, cleanupCode);
             }
         } tempProjectCleanup;
-        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) {
+        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
-            if (!runProjectManager(engineRoot, project, gc, error)) {
+            const MainBackendRequest launcherBackend{
+                backendOverride.value_or(MainRenderBackend::D3D11), backendFallbackOverride.value_or(true)};
+            if (!runProjectManager(engineRoot, project, gc, launcherBackend, error)) {
                 if (!error.empty()) throw std::runtime_error(error);
                 return 0; // User closed the project manager without opening a project.
             }
@@ -851,7 +910,7 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
-            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest) {
+            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest) {
                 std::error_code copyCode;
                 isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
                     ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
@@ -870,6 +929,13 @@ int wmain(int argc, wchar_t** argv) {
         settings.hardwareRayTracingShadows = project.rendering.hardwareRayTracingShadows;
         settings.globalIllumination = project.rendering.globalIllumination;
         if (pathTracingOverride) settings.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+        const MainBackendRequest backendRequest{
+            backendOverride.value_or(project.rendering.backendPreference),
+            backendFallbackOverride.value_or(project.rendering.allowFallbackToD3D11)};
+        // Reject invalid requests before creating a window. A D3D12 selection
+        // permits a real device attempt; the renderer decides actual fallback.
+        const auto backendPlan = selectMainBackend(backendRequest);
+        if (!backendPlan.startupAllowed) throw std::runtime_error(backendPlan.reason);
         const HINSTANCE instance = GetModuleHandleW(nullptr);
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
         wc.style = CS_CLASSDC; wc.lpfnWndProc = windowProc; wc.hInstance = instance;
@@ -877,7 +943,7 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIcon = loadEngineIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
-        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest;
+        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest;
         const auto title = windowTitle(project.name);
         const RECT monitor = primaryMonitorRect();
         SceneRenderer renderer;
@@ -890,7 +956,7 @@ int wmain(int argc, wchar_t** argv) {
         const rae::LoadProgress loadProgress([&](float fraction, std::string_view stage, std::string_view detail) {
             startup.update(fraction, stage, detail);
         });
-        loadProgress.report(0, "Creating render device", "D3D11");
+        loadProgress.report(0, "Creating render device", mainRenderBackendKey(backendRequest.preference));
         if (interactive) {
             // Phase 1: borderless loading window, 28% of the monitor width at the
             // artwork aspect, centred. It is destroyed before the editor window
@@ -922,12 +988,12 @@ int wmain(int argc, wchar_t** argv) {
                     }
                 } loadingSurface{renderer, ui, loading};
                 ShowWindow(loadingWindow.handle, SW_SHOW);
-                if (!renderer.initializeDevice(loadingWindow.handle, loadingState.width, loadingState.height, error))
+                if (!renderer.initializeDevice(loadingWindow.handle, loadingState.width, loadingState.height, error, backendRequest))
                     throw std::runtime_error(error);
-                if (!ui.initialize(loadingWindow.handle, renderer.device(), renderer.context(), true))
+                if (!ui.initialize(loadingWindow.handle, renderer, true))
                     throw std::runtime_error("Dear ImGui initialization failed");
                 std::string loadingError;
-                if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
+                if (!loading.initialize(renderer, project.engineRoot / "assets/load/load.png", loadingError))
                     std::cerr << "Loading screen unavailable: " << loadingError << '\n';
                 startup.surface(loadingWindow.handle, &loadingState);
                 if (loading.ready()) {
@@ -982,21 +1048,26 @@ int wmain(int argc, wchar_t** argv) {
         if (interactive) {
             if (!renderer.attachWindow(window.handle, windowState.width, windowState.height, error))
                 throw std::runtime_error(error);
-            if (!ui.initialize(window.handle, renderer.device(), renderer.context(), true))
+            if (!ui.initialize(window.handle, renderer, true))
                 throw std::runtime_error("Dear ImGui initialization failed");
             ui.setIniFilename("RestArtEngine.imgui.ini");
             std::string loadingError;
-            if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
+            if (!loading.initialize(renderer, project.engineRoot / "assets/load/load.png", loadingError))
                 std::cerr << "Loading screen unavailable: " << loadingError << '\n';
             startup.surface(window.handle, &windowState);
         } else {
-            if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
+            if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error, backendRequest))
                 throw std::runtime_error(error);
-            if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest && !gcSelfTest))
+            if (!ui.initialize(window.handle, renderer, !selfTest && !gcSelfTest))
                 throw std::runtime_error("Dear ImGui initialization failed");
             if (!renderer.initializePipeline(error, loadProgress.range(.04f, .62f))) throw std::runtime_error(error);
         }
         ui.setWindowChrome(&windowState.chrome);
+        reportMainBackend(renderer);
+        if (renderer.mainBackendSelection().effective == MainRenderBackend::D3D12 &&
+            (editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest ||
+             materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest))
+            throw std::runtime_error("This validation suite requires D3D11 native readback. Use --native-d3d12-self-test for native D3D12.");
         if (!interactive && !editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
             throw std::runtime_error(error);
         editor.applyStartupCamera(settings);
@@ -1019,6 +1090,10 @@ int wmain(int argc, wchar_t** argv) {
             editor.queueExternalImport(std::move(sources), x, y, sourceViewport);
         });
         if (interactive) editor.setGarbageCollector(&gc, gcSettingsPath);
+        if (!inspectCapturePath.empty()) {
+            if (!renderer.loadFrameCapture(inspectCapturePath, error)) throw std::runtime_error(error);
+            editor.showDiagnostics(rae::editor::DiagnosticsTab::FrameInspector);
+        }
         loadProgress.report(.99f, "Preparing initial scene and workspace", project.name);
         startup.surface(nullptr, nullptr);
         if (interactive) {
@@ -1034,6 +1109,18 @@ int wmain(int argc, wchar_t** argv) {
         loadProgress.report(1, "Ready", project.name);
         startup.surface(nullptr, nullptr);
         loading.release();
+        if (native12SelfTest) {
+            if (!runNativeD3D12Smoke(renderer, ui, captureDir, error)) throw std::runtime_error(error);
+            return 0;
+        }
+        if (inspectorSelfTest) {
+            if (!runInspectorSmoke(renderer, captureDir, error)) throw std::runtime_error(error);
+            return 0;
+        }
+        if (inspectorUiSelfTest) {
+            if (!runInspectorUiSmoke(renderer, ui, editor, captureDir, error)) throw std::runtime_error(error);
+            return 0;
+        }
         if (gcSelfTest) {
             runGarbageCollectionSmoke(renderer, ui, editor, captureDir);
             return 0;
@@ -1070,8 +1157,8 @@ int wmain(int argc, wchar_t** argv) {
             runMaterialRenderStateSmoke(renderer, captureDir);
             return 0;
         }
-        std::cout << "RestArtEngine / D3D11 / " << renderer.adapterName() << '\n';
-        std::cout << "Forward + deferred rasterization; directional shadow maps, selectable analytic shadows, and GPU ray reflections.\n";
+        std::cout << "RestArtEngine / " << mainGraphicsApiName(renderer) << " / " << renderer.adapterName() << '\n';
+        std::cout << "Forward + deferred rasterization; feature availability follows the selected backend.\n";
         std::cout << renderer.hardwareRayTracingStatus() << '\n';
         bool running = true;
         int frame = 0;
@@ -1280,10 +1367,15 @@ int wmain(int argc, wchar_t** argv) {
             if (!rae::diagnostics::profiler().save(traceOutput, error)) throw std::runtime_error(error);
         }
         ui.shutdown();
+        const auto rhiStats = renderer.rhiStatistics();
+        std::cout << "RHI executed: buffers=" << rhiStats.buffersCreated << "; textures=" << rhiStats.texturesCreated
+            << "; pipelines=" << rhiStats.pipelinesCreated << "; uploads=" << rhiStats.bufferUploads
+            << "; passes=" << rhiStats.renderPasses << "; draws=" << rhiStats.drawCalls
+            << "; indexed=" << rhiStats.indexedDrawCalls << '\n';
         const auto validationErrors = renderer.validationErrorCount();
-        std::cout << "D3D11 debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
+        std::cout << mainGraphicsApiName(renderer) << " debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
             << "; validation errors: " << validationErrors << '\n';
-        if (validationErrors) throw std::runtime_error("D3D11 validation reported errors");
+        if (validationErrors) throw std::runtime_error(std::string(mainGraphicsApiName(renderer)) + " validation reported errors");
         if (frameLimit > 0 && settings.globalIllumination.method != GlobalIlluminationMethod::Disabled) {
             const auto gi = renderer.globalIlluminationStatus();
             std::cout << "GI effective: " << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing" : "disabled")
@@ -1299,7 +1391,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

@@ -2,6 +2,8 @@
 
 #include <RestArtEngine/Core/GarbageCollector.h>
 #include <RestArtEngine/Core/LoadProgress.h>
+#include <RestArtEngine/Renderer/BackendSelection.h>
+#include <RestArtEngine/Renderer/Rhi.h>
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
@@ -117,8 +119,8 @@ inline camera::Camera resolveCamera(const SceneSettings& settings) {
         settings.cameraTarget, settings.cameraLens);
 }
 
-// Native D3D11 preview renderer. The broader RHI remains separate until its
-// resource/command interfaces are implemented by the other graphics APIs.
+// Scene execution uses RHI; native window/UI interop stays backend-private.
+// D3D11Dxr adds the optional DXR bridge to the D3D11 main renderer.
 class SceneRenderer {
 public:
     SceneRenderer();
@@ -130,10 +132,19 @@ public:
     // fast device creation and the slower shader compile. `initialize` performs
     // both stages and keeps the historical one-call behaviour.
     bool initializeDevice(HWND__* window, std::uint32_t width, std::uint32_t height,
-                          std::string& error);
+                          std::string& error, const MainBackendRequest& backend = {});
+    // Reports completed startup work synchronously, between shader/PSO builds.
+    // An observer may present the loading UI; it must not render a scene or
+    // change the renderer's device, surface, or shader lifecycle.
     bool initializePipeline(std::string& error, const LoadProgress& progress = {});
     bool initialize(HWND__* window, std::uint32_t width, std::uint32_t height,
-                    std::string& error);
+                    std::string& error, const MainBackendRequest& backend = {});
+    // Startup selection is immutable for the device lifetime. UI drafts take
+    // effect only on the next initialization, never during an existing frame.
+    [[nodiscard]] const MainBackendSelection& mainBackendSelection() const;
+    [[nodiscard]] bool mainBackendReady() const;
+    [[nodiscard]] bool d3d12InitializationAttempted() const;
+    [[nodiscard]] const std::string& backendInitializationError() const;
     bool resize(std::uint32_t width, std::uint32_t height, std::string& error);
     // The editor's scene texture can outgrow or move outside the main swap
     // chain. Call before borrowing sceneTexture() into a UI draw list. Failure
@@ -162,7 +173,7 @@ public:
     bool renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
                             std::uint32_t size, std::string& error,
                             PreviewSlot slot = PreviewSlot::SceneThumbnail);
-    // Borrowed SRV until a successful resize of the same slot or shutdown.
+    // Borrowed backend-specific ImGui texture ID until replacement/shutdown.
     // Requested size is bounded to the available scene target dimensions.
     [[nodiscard]] void* previewTexture(PreviewSlot slot) const;
     // Raster tool view; call before the main scene render, like other previews.
@@ -214,10 +225,12 @@ public:
     // frames while minimized). Retains caches used by the latest scene frame.
     rae::GarbageCollectionMemoryStats collectGarbage(double maxIdleSeconds);
     [[nodiscard]] RendererCacheStats cacheStats() const;
+    [[nodiscard]] rhi::Statistics rhiStatistics() const;
     void shutdown();
     ID3D11Device* device() const;
     ID3D11DeviceContext* context() const;
-    // D3D11 SRV borrowed until target replacement/shutdown. Replaced scene SRVs
+    [[nodiscard]] std::shared_ptr<rhi::Device> graphicsDevice() const;
+    // Backend-specific ImGui texture ID borrowed until target replacement/shutdown. Replaced images
     // remain alive until releaseRetiredSceneTargets()/Present, after UI submit.
     // render() fills it before the UI submits that draw list.
     void* sceneTexture() const;
@@ -245,6 +258,8 @@ public:
     // Captures the next main scene render, never a tool preview. One immutable
     // resource set, bounded to 256 MiB, retained until clear/replacement/shutdown.
     void requestFrameCapture();
+    void setFrameCaptureOptions(const FrameCaptureOptions& options);
+    [[nodiscard]] const FrameCaptureOptions& frameCaptureOptions() const;
     [[nodiscard]] const RenderFrameCapture& frameCapture() const;
     // Display conversion is generated on demand and cached per resource/channel.
     // Borrowed until clear/replacement/shutdown; resize and hot reload are safe.
@@ -253,9 +268,17 @@ public:
     // Explicit synchronous GPU readback of one raw texel (can stall the CPU).
     bool readCapturedPixel(std::size_t resourceIndex, std::uint32_t x, std::uint32_t y,
                            float (&value)[4], std::string& error) const;
+    // Read the actual cached RGBA8 display conversion, distinct from raw data.
+    // Conversion/readback is synchronous and may wait for the GPU.
+    bool readCapturedDisplayPixel(std::size_t resourceIndex, DebugTextureChannel channel,
+                                  std::uint32_t x, std::uint32_t y, float (&value)[4], std::string& error);
     void clearFrameCapture();
     // JSON metadata only: resource image payloads and replay are not exported.
     bool exportFrameCapture(const std::filesystem::path& path, std::string& error) const;
+    // Versioned resources + immutable event/constant/trace metadata, not replay.
+    bool saveFrameCapture(const std::filesystem::path& path, std::string& error) const;
+    bool loadFrameCapture(const std::filesystem::path& path, std::string& error);
+    [[nodiscard]] std::vector<std::string> debugMessages() const;
 
 private:
     struct Impl;

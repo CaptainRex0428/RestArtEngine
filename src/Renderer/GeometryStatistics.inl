@@ -25,7 +25,7 @@
 
     void endGeometrySample() {
         if (!activeGeometryQuery) return;
-        context->End(activeGeometryQuery->query.Get());
+        if (!native12 && context) context->End(activeGeometryQuery->query.Get());
         activeGeometryQuery = nullptr;
     }
 
@@ -52,6 +52,12 @@
     }
 
     void pollGeometrySamples() {
+        if (native12 || !device || !context) {
+            discardGeometrySamples(GeometrySampleStatus::Unavailable, native12
+                ? "GPU primitive statistics queries are not implemented for native D3D12. Scene topology counts remain available."
+                : "GPU primitive statistics require an initialized rendering device.");
+            return;
+        }
         if (geometryQueriesUnavailable) return;
         for (auto& slot : geometryQueries) {
             if (!slot.busy) continue;
@@ -83,6 +89,10 @@
                               : "Waiting for an asynchronous main-view GPU sample.");
         }
         if (hardwareImage) return;
+        if (native12 || !device || !context) {
+            pollGeometrySamples();
+            return;
+        }
         if (geometryQueriesUnavailable) {
             geometryStatistics.status = GeometrySampleStatus::Unavailable;
             geometryStatistics.statusMessage = "GPU primitive statistics queries are unavailable.";
@@ -92,6 +102,7 @@
     }
 
     void beginGeometrySample() {
+        if (native12 || !device || !context) return;
         if (geometryView != GeometryView::Raster || geometryQueriesUnavailable) return;
         for (auto& slot : geometryQueries) {
             if (slot.busy) continue;

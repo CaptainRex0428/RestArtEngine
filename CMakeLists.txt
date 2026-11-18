@@ -9,7 +9,7 @@ if(MSVC)
 endif()
 
 if(NOT WIN32)
-    message(FATAL_ERROR "RestArtEngine currently targets Windows and DirectX 11.")
+    message(FATAL_ERROR "RestArtEngine currently targets Windows with D3D11 or D3D12.")
 endif()
 
 # ufbx supports C++ compilation as well as C. Keep third-party diagnostics
@@ -18,17 +18,18 @@ add_library(ufbx STATIC vendor/ufbx/ufbx.c)
 set_source_files_properties(vendor/ufbx/ufbx.c PROPERTIES LANGUAGE CXX)
 target_include_directories(ufbx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor/ufbx>)
 
-# Vendored Dear ImGui (Win32/DX11 backend) as its own library.
+# Vendored Dear ImGui (Win32/DX11/DX12 backends) as its own library.
 add_library(DearImGui STATIC
     vendor/imgui/imgui.cpp vendor/imgui/imgui_draw.cpp
     vendor/imgui/imgui_tables.cpp vendor/imgui/imgui_widgets.cpp
-    vendor/imgui/backends/imgui_impl_win32.cpp vendor/imgui/backends/imgui_impl_dx11.cpp)
+    vendor/imgui/backends/imgui_impl_win32.cpp vendor/imgui/backends/imgui_impl_dx11.cpp
+    vendor/imgui/backends/imgui_impl_dx12.cpp)
 target_include_directories(DearImGui PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui>
     $<INSTALL_INTERFACE:include/RestArtEngine/ThirdParty/imgui>)
 target_include_directories(DearImGui PRIVATE vendor/imgui/backends)
 # These are consumer link requirements; do not merge import libraries into the archive.
-target_link_libraries(DearImGui INTERFACE d3d11 dxgi d3dcompiler dwmapi)
+target_link_libraries(DearImGui INTERFACE d3d11 d3d12 dxgi d3dcompiler dwmapi)
 
 # The single engine executable: project manager, editor, and renderer.
 # It owns the project selection screen and editor entry point; users build and
@@ -44,14 +45,22 @@ add_executable(RestArtEngine
     app/GlobalIlluminationSmoke.cpp
     app/LightingSmoke.cpp
     app/CameraSmoke.cpp
+    app/NativeD3D12Smoke.cpp
+    app/InspectorSmoke.cpp
+    app/InspectorUiSmoke.cpp
     app/MeshAttributesSmoke.cpp
     app/RenderScaleSmoke.cpp
     app/MaterialRenderStateSmoke.cpp
     src/Core/Engine.cpp
     src/Core/GarbageCollector.cpp
     src/Core/TraceProfiler.cpp
+    src/Core/RuntimeDiagnostics.cpp
+    src/Renderer/FrameCaptureArchive.cpp
+    src/Renderer/FrameCaptureMetadata.cpp
     src/Renderer/RenderBackend.cpp
     src/Renderer/SceneRenderer.cpp
+    src/Renderer/D3D11/D3D11Rhi.cpp
+    src/Renderer/D3D12/D3D12Rhi.cpp
     src/Renderer/Lighting.cpp
     src/Renderer/SelectionOutline.cpp
     src/Renderer/Pipelines/ScenePipeline.cpp
@@ -81,6 +90,7 @@ add_executable(RestArtEngine
     src/Editor/UndoStack.cpp
     src/Editor/ViewportInteraction.cpp
     src/Editor/LoadingScreen.cpp
+    src/Editor/LoadingScreenRenderer.cpp
     vendor/ImGuizmo/src/ImGuizmo.cpp
     RestArtEngine.rc)
 # HLSL sources are listed for editing in IDEs; the build never compiles them.
@@ -154,6 +164,28 @@ if(MSVC)
     target_compile_options(GenerateCornellBox PRIVATE /W4 /permissive- /utf-8)
 endif()
 if(BUILD_TESTING)
+    add_executable(D3D12RhiTests tests/D3D12RhiTests.cpp src/Renderer/D3D12/D3D12Rhi.cpp)
+    target_include_directories(D3D12RhiTests PRIVATE include)
+    target_compile_definitions(D3D12RhiTests PRIVATE NOMINMAX)
+    target_link_libraries(D3D12RhiTests PRIVATE d3d12 dxgi dxguid d3dcompiler)
+    if(MSVC)
+        target_compile_options(D3D12RhiTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME D3D12RhiTests COMMAND D3D12RhiTests)
+    add_executable(RhiTests tests/RhiTests.cpp src/Renderer/D3D11/D3D11Rhi.cpp)
+    target_include_directories(RhiTests PRIVATE include)
+    target_compile_definitions(RhiTests PRIVATE NOMINMAX)
+    target_link_libraries(RhiTests PRIVATE d3d11 dxgi dxguid d3dcompiler)
+    if(MSVC)
+        target_compile_options(RhiTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME RhiTests COMMAND RhiTests)
+    add_executable(BackendSelectionTests tests/BackendSelectionTests.cpp)
+    target_include_directories(BackendSelectionTests PRIVATE include)
+    if(MSVC)
+        target_compile_options(BackendSelectionTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME BackendSelectionTests COMMAND BackendSelectionTests)
     add_executable(CameraMathTests tests/CameraMathTests.cpp)
     target_include_directories(CameraMathTests PRIVATE include)
     target_compile_definitions(CameraMathTests PRIVATE NOMINMAX)
@@ -189,7 +221,7 @@ if(BUILD_TESTING)
         target_compile_options(RenderPipelineTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME RenderPipelineTests COMMAND RenderPipelineTests)
-    add_executable(EditorConsoleTests tests/EditorConsoleTests.cpp src/Editor/EditorConsole.cpp)
+    add_executable(EditorConsoleTests tests/EditorConsoleTests.cpp src/Editor/EditorConsole.cpp src/Core/RuntimeDiagnostics.cpp)
     target_include_directories(EditorConsoleTests PRIVATE include)
     if(MSVC)
         target_compile_options(EditorConsoleTests PRIVATE /W4 /permissive- /utf-8)
@@ -230,13 +262,26 @@ if(BUILD_TESTING)
         target_compile_options(ProjectSettingsTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME ProjectSettingsTests COMMAND ProjectSettingsTests)
-    add_executable(TraceProfilerTests tests/TraceProfilerTests.cpp src/Core/TraceProfiler.cpp)
+    add_executable(TraceProfilerTests tests/TraceProfilerTests.cpp src/Core/TraceProfiler.cpp src/Core/RuntimeDiagnostics.cpp)
     target_include_directories(TraceProfilerTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(TraceProfilerTests PRIVATE UNICODE _UNICODE NOMINMAX)
     if(MSVC)
         target_compile_options(TraceProfilerTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME TraceProfilerTests COMMAND TraceProfilerTests)
+    add_executable(FrameCaptureArchiveTests tests/FrameCaptureArchiveTests.cpp src/Renderer/FrameCaptureArchive.cpp)
+    add_executable(FrameCaptureMetadataTests tests/FrameCaptureMetadataTests.cpp src/Renderer/FrameCaptureMetadata.cpp)
+    add_executable(RuntimeDiagnosticsTests tests/RuntimeDiagnosticsTests.cpp src/Core/RuntimeDiagnostics.cpp
+        src/Core/TraceProfiler.cpp src/Editor/EditorConsole.cpp)
+    add_executable(RhiInspectionTests tests/RhiInspectionTests.cpp)
+    foreach(diagnosticTest FrameCaptureArchiveTests FrameCaptureMetadataTests RuntimeDiagnosticsTests RhiInspectionTests)
+        target_include_directories(${diagnosticTest} PRIVATE include src vendor/nlohmann/single_include)
+        target_compile_definitions(${diagnosticTest} PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(MSVC)
+            target_compile_options(${diagnosticTest} PRIVATE /W4 /permissive- /utf-8)
+        endif()
+        add_test(NAME ${diagnosticTest} COMMAND ${diagnosticTest})
+    endforeach()
     add_executable(EngineContentTests tests/EngineContentTests.cpp
         src/Assets/AssetLibrary.cpp src/Assets/FbxImporter.cpp src/Assets/AssetRegistry.cpp
         src/Assets/AssetFile.cpp src/Assets/AssetThumbnail.cpp src/Scene/World.cpp)
