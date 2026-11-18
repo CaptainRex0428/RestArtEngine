@@ -240,6 +240,17 @@ foreach ($loadingCase in $loadingCases) {
             if ($loadingFractions.Count -lt 30 -or $loadingStages.Count -lt 15 -or $loadingPresented -le 15) {
                 throw "Insufficient actual feedback: $($loadingFractions.Count) values / $($loadingStages.Count) stages / $loadingPresented UI submissions."
             }
+            $loadingSurfaces = @($loadingEvents | Where-Object { $_.presented })
+            $loadingFirstSurface = $loadingSurfaces[0]
+            foreach ($loadingSurface in $loadingSurfaces) {
+                if ($loadingSurface.surfaceWidth -ne $loadingFirstSurface.surfaceWidth -or
+                    $loadingSurface.surfaceHeight -ne $loadingFirstSurface.surfaceHeight -or !$loadingSurface.borderless) {
+                    throw 'The loading page changed size or gained an editor frame before completion.'
+                }
+            }
+            if (@($loadingSurfaces | Where-Object { $_.stage -eq 'Preparing initial scene and workspace' }).Count -ne 1) {
+                throw 'The final scene preparation stage did not retain the original small loading surface.'
+            }
             if ($loadingMaximumJump -gt 0.25) { throw "Loading still contains a large progress jump: $loadingMaximumJump" }
             foreach ($loadingEntry in @('VSMain', 'VSFullscreen', 'PSForward', 'PSGBuffer', 'PSDeferred',
                 'PSBackground', 'PSOutlineMask', 'PSOutlineComposite', 'PSDepthOfField')) {
@@ -278,6 +289,7 @@ foreach ($loadingCase in $loadingCases) {
                 case = $loadingCase.Name; passed = $true; exitCode = $loadingExecution.ExitCode
                 events = $loadingEvents.Count; distinctProgress = $loadingFractions.Count
                 stages = $loadingStages.Count; presented = $loadingPresented; maximumJump = $loadingMaximumJump
+                loadingWidth = $loadingFirstSurface.surfaceWidth; loadingHeight = $loadingFirstSurface.surfaceHeight
                 seconds = $loadingExecution.Seconds; ready = $true
             })
         }

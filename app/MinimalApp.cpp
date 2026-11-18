@@ -130,9 +130,13 @@ public:
             }
         }
         if (report_.is_open()) {
+            RECT surface{};
+            if (window_) GetClientRect(window_, &surface);
             const double elapsed = std::chrono::duration<double, std::milli>(now - started_).count();
             report_ << nlohmann::json{{"progress", progress_}, {"stage", stage_}, {"detail", detail_},
-                {"elapsedMs", elapsed}, {"presented", submitted}}.dump() << '\n';
+                {"elapsedMs", elapsed}, {"presented", submitted},
+                {"surfaceWidth", surface.right}, {"surfaceHeight", surface.bottom},
+                {"borderless", window_ && (GetWindowLongPtrW(window_, GWL_STYLE) & WS_POPUP) != 0}}.dump() << '\n';
             report_.flush();
         }
     }
@@ -946,6 +950,7 @@ int wmain(int argc, wchar_t** argv) {
         const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest;
         const auto title = windowTitle(project.name);
         const RECT monitor = primaryMonitorRect();
+        RECT loadingBounds{};
         SceneRenderer renderer;
         renderer.setShaderRoot(project.engineRoot / "Shaders");
         renderer.setMaterialShaderPath(project.shaderRoot / "Materials/Standard.hlsli");
@@ -959,8 +964,8 @@ int wmain(int argc, wchar_t** argv) {
         loadProgress.report(0, "Creating render device", mainRenderBackendKey(backendRequest.preference));
         if (interactive) {
             // Phase 1: borderless loading window, 28% of the monitor width at the
-            // artwork aspect, centred. It is destroyed before the editor window
-            // exists, so no runtime window-style switching is involved.
+            // artwork aspect, centred. The following preparation surface keeps
+            // those bounds until the full editor is ready to be revealed.
             WindowState loadingState;
             loadingState.chrome.setEnabled(false);
             loadingState.width = static_cast<unsigned>(std::max(320, static_cast<int>((monitor.right - monitor.left) * 0.28f)));
@@ -1009,6 +1014,8 @@ int wmain(int argc, wchar_t** argv) {
                             throw std::runtime_error(error);
                     }
                 }
+                loadingBounds = centredWindowRect(monitor, static_cast<int>(loadingState.width),
+                    static_cast<int>(loadingState.height), false);
                 loadProgress.report(.04f, "Render device ready", renderer.adapterName());
                 if (!renderer.initializePipeline(error, loadProgress.range(.04f, .62f))) throw std::runtime_error(error);
                 if (!editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
@@ -1022,25 +1029,26 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         WindowState windowState;
-        windowState.chrome.setEnabled(!selfTest);
+        windowState.chrome.setEnabled(!selfTest && !interactive);
         windowState.quitOnDestroy = true;
         RECT bounds{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
+        RECT editorBounds{};
         int windowX = CW_USEDEFAULT, windowY = CW_USEDEFAULT;
         if (interactive) {
-            // Phase 2: editor window, 80% of the monitor, centred with the native
-            // frame and the custom title bar.
+            // Keep the second surface identical to the splash until scene GPU
+            // resources are ready. The full editor bounds are applied afterward.
             const int width = std::max(640, static_cast<int>((monitor.right - monitor.left) * 0.8f));
             const int height = std::max(480, static_cast<int>((monitor.bottom - monitor.top) * 0.8f));
-            const RECT placed = centredWindowRect(monitor, width, height, true);
-            windowState.width = static_cast<unsigned>(width);
-            windowState.height = static_cast<unsigned>(height);
-            windowX = placed.left;
-            windowY = placed.top;
-            bounds = RECT{0, 0, placed.right - placed.left, placed.bottom - placed.top};
+            editorBounds = centredWindowRect(monitor, width, height, true);
+            windowState.width = static_cast<unsigned>(loadingBounds.right - loadingBounds.left);
+            windowState.height = static_cast<unsigned>(loadingBounds.bottom - loadingBounds.top);
+            windowX = loadingBounds.left;
+            windowY = loadingBounds.top;
+            bounds = RECT{0, 0, static_cast<LONG>(windowState.width), static_cast<LONG>(windowState.height)};
         } else if (selfTest) {
             AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
         }
-        WindowOwner window{CreateWindowW(wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW,
+        WindowOwner window{CreateWindowW(wc.lpszClassName, title.c_str(), interactive ? WS_POPUP : WS_OVERLAPPEDWINDOW,
             windowX, windowY, bounds.right - bounds.left, bounds.bottom - bounds.top,
             nullptr, nullptr, instance, &windowState)};
         if (interactive) ShowWindow(window.handle, SW_SHOW);
@@ -1097,6 +1105,31 @@ int wmain(int argc, wchar_t** argv) {
         loadProgress.report(.99f, "Preparing initial scene and workspace", project.name);
         startup.surface(nullptr, nullptr);
         if (interactive) {
+            // Warm scene uploads/acceleration structures behind the unchanged
+            // small loading image, without laying out editor docks at this size.
+            auto initialScene = settings;
+            initialScene.editorViewport = false;
+            initialScene.viewportX = initialScene.viewportY = 0;
+            initialScene.viewportWidth = initialScene.viewportHeight = 0;
+            if (!renderer.render(initialScene, editor.world(), editor.assets(), error)) throw std::runtime_error(error);
+
+            // Never stretch the loading artwork over the large editor surface.
+            // Resize while hidden and reveal only its first completed UI frame.
+            ShowWindow(window.handle, SW_HIDE);
+            windowState.chrome.setEnabled(true);
+            SetLastError(0);
+            if (!SetWindowLongPtrW(window.handle, GWL_STYLE, WS_OVERLAPPEDWINDOW) && GetLastError())
+                throw std::runtime_error("Cannot restore the editor window frame.");
+            if (!SetWindowPos(window.handle, nullptr, editorBounds.left, editorBounds.top,
+                editorBounds.right - editorBounds.left, editorBounds.bottom - editorBounds.top,
+                SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
+                throw std::runtime_error("Cannot resize the prepared editor window.");
+            RECT client{};
+            GetClientRect(window.handle, &client);
+            windowState.width = static_cast<unsigned>(client.right);
+            windowState.height = static_cast<unsigned>(client.bottom);
+            if (!renderer.resize(windowState.width, windowState.height, error)) throw std::runtime_error(error);
+            windowState.resized = false;
             // Build and render the actual initial workspace before declaring it
             // ready; this includes lazy scene uploads and the restored viewport.
             ui.beginFrame(1.0f / 60.0f);
@@ -1105,6 +1138,7 @@ int wmain(int argc, wchar_t** argv) {
             if (!renderer.render(settings, editor.world(), editor.assets(), error)) throw std::runtime_error(error);
             ui.endFrame();
             if (!renderer.present(false, error)) throw std::runtime_error(error);
+            ShowWindow(window.handle, SW_SHOWNORMAL);
         }
         loadProgress.report(1, "Ready", project.name);
         startup.surface(nullptr, nullptr);
