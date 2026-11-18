@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Core/GarbageCollector.h>
+#include <RestArtEngine/Core/LoadProgress.h>
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
@@ -130,7 +131,7 @@ public:
     // both stages and keeps the historical one-call behaviour.
     bool initializeDevice(HWND__* window, std::uint32_t width, std::uint32_t height,
                           std::string& error);
-    bool initializePipeline(std::string& error);
+    bool initializePipeline(std::string& error, const LoadProgress& progress = {});
     bool initialize(HWND__* window, std::uint32_t width, std::uint32_t height,
                     std::string& error);
     bool resize(std::uint32_t width, std::uint32_t height, std::string& error);

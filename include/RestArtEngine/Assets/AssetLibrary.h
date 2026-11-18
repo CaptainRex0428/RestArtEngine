@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RestArtEngine/Assets/AssetImportOptions.h"
+#include "RestArtEngine/Core/LoadProgress.h"
 
 #include <cstddef>
 #include <array>
@@ -181,16 +182,16 @@ public:
     // Explicit asset save: only this Project material is written. Engine assets
     // are read-only; saving a scene does not implicitly persist asset edits.
     bool saveMaterial(AssetId id, const std::filesystem::path& folder, std::string& error) const;
-    bool loadMaterials(const std::filesystem::path& folder, std::string& error);
+    bool loadMaterials(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress = {});
     // Loads a read-only engine mount; requires the stable default material.
     // Project reload/save never replace or copy these assets into the project.
-    bool loadEngineMaterials(const std::filesystem::path& folder, std::string& error);
+    bool loadEngineMaterials(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress = {});
     // Mounts self-contained engine meshes; ownership is assigned here, never by files.
-    bool loadEngineMeshes(const std::filesystem::path& folder, std::string& error);
+    bool loadEngineMeshes(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress = {});
     // Static meshes are persisted as .rasset containers; built-in primitives stay
     // procedural and are skipped. Loading keeps the built-ins already present.
     bool saveMeshes(const std::filesystem::path& folder, std::string& error) const;
-    bool loadMeshes(const std::filesystem::path& folder, std::string& error);
+    bool loadMeshes(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress = {});
     // Call only after successfully publishing/loading this exact mesh as a
     // modern container. Failure to cache the baseline simply leaves it dirty.
     void rememberMeshPersisted(AssetId id, const std::filesystem::path& path) const noexcept;

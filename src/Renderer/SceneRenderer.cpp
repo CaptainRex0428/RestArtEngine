@@ -640,8 +640,9 @@ struct SceneRenderer::Impl {
         return true;
     }
 
-    bool createPipeline(std::string& error) {
+    bool createPipeline(std::string& error, const LoadProgress& progress = {}) {
         ComPtr<ID3DBlob> shader;
+        progress.report(0, "Compiling geometry shader", "VSMain (1/9)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSMain", "vs_5_0", shader, error)) return false;
         if (failed(device->CreateVertexShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &geometryVS), "Create geometry VS", error)) return false;
         const D3D11_INPUT_ELEMENT_DESC layout[] = {
@@ -651,22 +652,34 @@ struct SceneRenderer::Impl {
             {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
         if (failed(device->CreateInputLayout(layout, static_cast<UINT>(std::size(layout)), shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
+        progress.report(.07f, "Geometry shader ready", "VSMain (1/9)");
         shader.Reset();
+        progress.report(.07f, "Compiling fullscreen shader", "VSFullscreen (2/9)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSFullscreen", "vs_5_0", shader, error)) return false;
         if (failed(device->CreateVertexShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &fullscreenVS), "Create fullscreen VS", error)) return false;
+        progress.report(.14f, "Fullscreen shader ready", "VSFullscreen (2/9)");
+        unsigned shaderIndex = 0;
         const auto pixelShader = [&](const char* entry, ComPtr<ID3D11PixelShader>& result) {
             shader.Reset();
-            return compile(shaderRoot, materialPath(), sceneSource, materialSource, entry, "ps_5_0", shader, error) &&
-                !failed(device->CreatePixelShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &result), entry, error);
+            const auto detail = std::string(entry) + " (" + std::to_string(shaderIndex + 3) + "/9)";
+            progress.report(.14f + .08f * static_cast<float>(shaderIndex), "Compiling scene shader", detail);
+            if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, entry, "ps_5_0", shader, error) ||
+                failed(device->CreatePixelShader(shader->GetBufferPointer(), shader->GetBufferSize(), nullptr, &result), entry, error))
+                return false;
+            ++shaderIndex;
+            progress.report(.14f + .08f * static_cast<float>(shaderIndex), "Scene shader ready", detail);
+            return true;
         };
         if (!pixelShader("PSForward", forwardPS) || !pixelShader("PSGBuffer", gbufferPS) ||
             !pixelShader("PSDeferred", deferredPS) || !pixelShader("PSBackground", backgroundPS) ||
             !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS) ||
             !pixelShader("PSDepthOfField", dofPS))
             return false;
+        progress.report(.70f, "Preparing selection outline");
         if (!outline) outline = std::make_unique<SelectionOutlinePass>();
         if (!outline->initialize(device.Get(), error)) return false;
 
+        progress.report(.73f, "Creating scene constant buffers");
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(SceneConstants);
         buffer.Usage = D3D11_USAGE_DEFAULT;
@@ -690,12 +703,17 @@ struct SceneRenderer::Impl {
         uvDescription.Usage = D3D11_USAGE_IMMUTABLE; uvDescription.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA uvInitial{}; uvInitial.pSysMem = &zeroUv;
         if (failed(device->CreateBuffer(&uvDescription, &uvInitial, &zeroUvBuffer), "Create absent UV stream", error)) return false;
+        progress.report(.80f, "Scene constant buffers ready");
+        progress.report(.80f, "Creating raster state");
         D3D11_RASTERIZER_DESC raster{};
         raster.FillMode = D3D11_FILL_SOLID;
         raster.CullMode = D3D11_CULL_NONE;
         raster.DepthClipEnable = TRUE;
         if (failed(device->CreateRasterizerState(&raster, &rasterizer), "Create rasterizer", error)) return false;
+        progress.report(.82f, "Preparing material render states", "6 rasterizer and 18 depth states");
         if (!createMaterialRenderStates(error)) return false;
+        progress.report(.90f, "Material render states ready", "6 rasterizer and 18 depth states");
+        progress.report(.92f, "Creating depth and sampler states");
         D3D11_DEPTH_STENCIL_DESC depthDescription{};
         depthDescription.DepthEnable = TRUE;
         depthDescription.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -717,6 +735,7 @@ struct SceneRenderer::Impl {
         shadowSamplerDescription.MinLOD = 0.0f;
         shadowSamplerDescription.MaxLOD = 0.0f;
         if (failed(device->CreateSamplerState(&shadowSamplerDescription, &shadowSampler), "Create shadow sampler", error)) return false;
+        progress.report(1, "Raster pipelines ready");
         return true;
     }
 
@@ -1116,21 +1135,24 @@ bool SceneRenderer::attachWindow(HWND__* window, std::uint32_t width,
     const bool targetsReady = state.createTargets(error);
     return targetsReady;
 }
-bool SceneRenderer::initializePipeline(std::string& error) {
+bool SceneRenderer::initializePipeline(std::string& error, const LoadProgress& progress) {
     error.clear();
     auto& state = *impl_;
     if (!state.device) {
         error = "Create the render device before compiling the shader pipeline.";
         return false;
     }
-    if (!readText(state.shaderRoot / "Private/Scene.hlsl", state.sceneSource, error) ||
-        !readText(state.materialPath(), state.materialSource, error) ||
-        !state.createPipeline(error))
-        return false;
+    progress.report(0, "Reading engine shaders", "Private/Scene.hlsl");
+    if (!readText(state.shaderRoot / "Private/Scene.hlsl", state.sceneSource, error)) return false;
+    progress.report(.025f, "Reading material shader", pathUtf8(state.materialPath()));
+    if (!readText(state.materialPath(), state.materialSource, error)) return false;
+    if (!state.createPipeline(error, progress.range(.05f, .75f))) return false;
     state.revision = 1;
     state.hardwareRayTracing = std::make_unique<d3d12::HardwareRayTracing>();
     std::string hardwareError;
+    progress.report(.75f, "Initializing hardware ray tracing", "Same-adapter D3D12 device and shared fence");
     if (state.hardwareRayTracing->initialize(state.device.Get(), state.context.Get(), hardwareError)) {
+        progress.report(.82f, "Compiling hardware ray tracing", "HardwareRayTracing.hlsl::CSMain");
         state.hardwarePipelineReady = state.hardwareRayTracing->preparePipeline(state.shaderRoot,
             state.materialPath(), state.sceneSource, state.materialSource, hardwareError);
         state.hardwareStatus = state.hardwarePipelineReady ? "DXR 1.1 ready; disabled by project settings."
@@ -1138,6 +1160,7 @@ bool SceneRenderer::initializePipeline(std::string& error) {
     } else {
         state.hardwareStatus = "Hardware ray tracing unavailable: " + hardwareError;
     }
+    progress.report(1, "D3D11 pipeline ready", state.hardwareStatus);
     return true;
 }
 

@@ -11,6 +11,7 @@
 #include <RestArtEngine/Editor/LoadingScreen.h>
 #include <RestArtEngine/Core/GarbageCollector.h>
 #include <RestArtEngine/Core/TraceProfiler.h>
+#include <RestArtEngine/Core/LoadProgress.h>
 #include "EditorSmoke.h"
 #include "GarbageCollectionSmoke.h"
 #include "HardwareRayTracingSmoke.h"
@@ -22,6 +23,7 @@
 #include <RestArtEngine/Editor/CameraNavigation.h>
 #include "MeshAttributesSmoke.h"
 #include <imgui.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -72,15 +74,77 @@ HICON loadEngineIcon(int width, int height) {
 // Called between the staged renderer startup steps so the wait is never a blank
 // window.
 void presentLoading(SceneRenderer& renderer, rae::imgui::ImGuiLayer& ui,
-                    const rae::editor::LoadingScreen& screen, float progress, const char* text) {
-    std::string ignored;
+                    const rae::editor::LoadingScreen& screen, float progress, const char* text,
+                    const char* detail = nullptr) {
+    std::string error;
     const float clear[4] = {0.02f, 0.025f, 0.035f, 1.0f};
-    if (!renderer.clear(clear, ignored)) return;
+    if (!renderer.clear(clear, error)) throw std::runtime_error("Loading screen clear failed: " + error);
     ui.beginFrame(1.0f / 60.0f);
-    screen.draw(progress, text);
+    screen.draw(progress, text, detail);
     ui.endFrame();
-    renderer.present(false, ignored);
+    if (!renderer.present(false, error)) throw std::runtime_error("Loading screen present failed: " + error);
 }
+
+struct LoadingCancelled {};
+
+// Loaders report real work synchronously. Only this presentation boundary pumps
+// messages and draws UI; individual loaders remain independent of the window.
+class StartupLoading {
+public:
+    StartupLoading(SceneRenderer& renderer, rae::imgui::ImGuiLayer& ui,
+        rae::editor::LoadingScreen& screen, const std::filesystem::path& report)
+        : renderer_(renderer), ui_(ui), screen_(screen) {
+        if (!report.empty()) {
+            report_.open(report, std::ios::binary | std::ios::trunc);
+            if (!report_) throw std::runtime_error("Cannot open the loading progress report.");
+        }
+    }
+    void surface(HWND window, WindowState* state) { window_ = window; state_ = state; }
+    void update(float fraction, std::string_view stage, std::string_view detail) {
+        fraction = std::max(progress_, fraction);
+        const auto now = std::chrono::steady_clock::now();
+        const bool changedStage = stage_ != stage;
+        const bool present = window_ && !state_->minimized && (changedStage || fraction == 1.0f ||
+            now - lastPresent_ >= std::chrono::milliseconds(33));
+        progress_ = fraction;
+        stage_ = stage;
+        detail_ = detail;
+        bool submitted = false;
+        if (window_) {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (message.message == WM_QUIT) throw LoadingCancelled{};
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            if (state_->closeRequested) throw LoadingCancelled{};
+            // WM_SIZE is recorded by WindowState. Load callbacks must not resize
+            // targets while their owning renderer operation is still in progress.
+            if (present && !state_->minimized) {
+                presentLoading(renderer_, ui_, screen_, progress_, stage_.c_str(), detail_.c_str());
+                lastPresent_ = now;
+                submitted = true;
+            }
+        }
+        if (report_.is_open()) {
+            const double elapsed = std::chrono::duration<double, std::milli>(now - started_).count();
+            report_ << nlohmann::json{{"progress", progress_}, {"stage", stage_}, {"detail", detail_},
+                {"elapsedMs", elapsed}, {"presented", submitted}}.dump() << '\n';
+            report_.flush();
+        }
+    }
+private:
+    SceneRenderer& renderer_;
+    rae::imgui::ImGuiLayer& ui_;
+    rae::editor::LoadingScreen& screen_;
+    HWND window_ = nullptr;
+    WindowState* state_ = nullptr;
+    float progress_ = 0;
+    std::string stage_, detail_;
+    std::ofstream report_;
+    std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastPresent_{};
+};
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -390,7 +454,7 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
     SceneRenderer renderer;
     renderer.setShaderRoot(engineRoot / "Shaders");
     renderer.setMaterialShaderPath(engineRoot / "Shaders/Materials/Standard.hlsli");
-    if (!renderer.initialize(window.handle, windowState.width, windowState.height, error)) return false;
+    if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error)) return false;
     rae::imgui::ImGuiLayer ui;
     if (!ui.initialize(window.handle, renderer.device(), renderer.context())) { error = "Dear ImGui initialization failed for project manager."; return false; }
     ui.setWindowChrome(&windowState.chrome);
@@ -660,6 +724,7 @@ int wmain(int argc, wchar_t** argv) {
     std::filesystem::path projectPath;
     std::filesystem::path enginePath;
     std::filesystem::path traceOutput;
+    std::filesystem::path loadingReport;
     SceneSettings settings;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -691,6 +756,10 @@ int wmain(int argc, wchar_t** argv) {
             }
             else if (arg == "--project" && i + 1 < argc) projectPath = argv[++i];
             else if (arg == "--engine" && i + 1 < argc) enginePath = argv[++i];
+            else if (arg == "--loading-report") {
+                if (i + 1 >= argc) throw std::runtime_error("--loading-report requires a JSONL output path.");
+                loadingReport = argv[++i];
+            }
             else if (arg == "--no-ui") showUI = false;
             else if (arg == "--forward") settings.path = RenderPath::Forward;
             else if (arg == "--deferred") settings.path = RenderPath::Deferred;
@@ -716,6 +785,7 @@ int wmain(int argc, wchar_t** argv) {
                     "--mesh-attributes-self-test (material slots and UV0-3 GPU validation)\n"
                     "--self-test --editor-self-test --capture-dir PATH (GPU validation and BMP captures)\n"
                     "--trace-output PATH (record application frames to Chrome Trace JSON)\n"
+                    "--loading-report PATH (record real startup stages, resource counts and presentation events as JSONL)\n"
                     "F9/Capture: Save As dialog; --frames alone does not save an image.\n"
                     "--gc-settings PATH --gc-interval SECONDS --gc-idle SECONDS --gc-capture-age SECONDS --no-gc\n"
                     "--capture-temp (managed temporary final-frame capture; requires --frames, excludes --capture-dir)\n"
@@ -815,6 +885,12 @@ int wmain(int argc, wchar_t** argv) {
         renderer.setMaterialShaderPath(project.shaderRoot / "Materials/Standard.hlsli");
         rae::imgui::ImGuiLayer ui;
         rae::editor::LoadingScreen loading;
+        rae::editor::SceneEditor editor;
+        StartupLoading startup(renderer, ui, loading, loadingReport);
+        const rae::LoadProgress loadProgress([&](float fraction, std::string_view stage, std::string_view detail) {
+            startup.update(fraction, stage, detail);
+        });
+        loadProgress.report(0, "Creating render device", "D3D11");
         if (interactive) {
             // Phase 1: borderless loading window, 28% of the monitor width at the
             // artwork aspect, centred. It is destroyed before the editor window
@@ -830,6 +906,21 @@ int wmain(int argc, wchar_t** argv) {
                     placed.left, placed.top, placed.right - placed.left, placed.bottom - placed.top,
                     nullptr, nullptr, instance, &loadingState)};
                 if (!loadingWindow.handle) throw std::runtime_error("CreateWindow failed");
+                // The surface must release UI/texture references and its swap
+                // chain before the boot HWND is destroyed, including on failure.
+                struct LoadingSurfaceCleanup {
+                    SceneRenderer& renderer;
+                    rae::imgui::ImGuiLayer& ui;
+                    rae::editor::LoadingScreen& loading;
+                    ~LoadingSurfaceCleanup() {
+                        loading.release();
+                        ui.shutdown();
+                        try { renderer.detachWindow(); }
+                        catch (const std::exception& failure) {
+                            std::cerr << "Loading surface teardown failed: " << failure.what() << '\n';
+                        }
+                    }
+                } loadingSurface{renderer, ui, loading};
                 ShowWindow(loadingWindow.handle, SW_SHOW);
                 if (!renderer.initializeDevice(loadingWindow.handle, loadingState.width, loadingState.height, error))
                     throw std::runtime_error(error);
@@ -838,6 +929,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::string loadingError;
                 if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
                     std::cerr << "Loading screen unavailable: " << loadingError << '\n';
+                startup.surface(loadingWindow.handle, &loadingState);
                 if (loading.ready()) {
                     const int width = std::max(320, static_cast<int>((monitor.right - monitor.left) * 0.28f));
                     const int height = std::max(180, static_cast<int>(width / loading.aspect()));
@@ -851,15 +943,16 @@ int wmain(int argc, wchar_t** argv) {
                             throw std::runtime_error(error);
                     }
                 }
-                presentLoading(renderer, ui, loading, 0.15f, "Initializing render device");
-                if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
-                presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
-                presentLoading(renderer, ui, loading, 1.0f, "Ready");
-                loading.release();
-                // Release the swap chain while the boot HWND is alive, then tear
-                // down the UI that was bound to it.
-                renderer.detachWindow();
-                ui.shutdown();
+                loadProgress.report(.04f, "Render device ready", renderer.adapterName());
+                if (!renderer.initializePipeline(error, loadProgress.range(.04f, .62f))) throw std::runtime_error(error);
+                if (!editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
+                    throw std::runtime_error(error);
+                editor.applyStartupCamera(settings);
+                loadProgress.report(.95f, "Project loaded", project.name);
+                loadProgress.report(.97f, "Opening editor window", project.name);
+                startup.surface(nullptr, nullptr);
+                // loadingSurface drains GPU use, destroys the UI backend, then
+                // detaches the swap chain while the boot HWND is still alive.
             }
         }
         WindowState windowState;
@@ -892,17 +985,20 @@ int wmain(int argc, wchar_t** argv) {
             if (!ui.initialize(window.handle, renderer.device(), renderer.context(), true))
                 throw std::runtime_error("Dear ImGui initialization failed");
             ui.setIniFilename("RestArtEngine.imgui.ini");
+            std::string loadingError;
+            if (!loading.initialize(renderer.device(), project.engineRoot / "assets/load/load.png", loadingError))
+                std::cerr << "Loading screen unavailable: " << loadingError << '\n';
+            startup.surface(window.handle, &windowState);
         } else {
             if (!renderer.initializeDevice(window.handle, windowState.width, windowState.height, error))
                 throw std::runtime_error(error);
             if (!ui.initialize(window.handle, renderer.device(), renderer.context(), !selfTest && !gcSelfTest))
                 throw std::runtime_error("Dear ImGui initialization failed");
-            if (!renderer.initializePipeline(error)) throw std::runtime_error(error);
+            if (!renderer.initializePipeline(error, loadProgress.range(.04f, .62f))) throw std::runtime_error(error);
         }
         ui.setWindowChrome(&windowState.chrome);
-        if (interactive) presentLoading(renderer, ui, loading, 0.65f, "Compiling shader pipeline");
-        rae::editor::SceneEditor editor;
-        if (!editor.initialize(project, renderer, error)) throw std::runtime_error(error);
+        if (!interactive && !editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
+            throw std::runtime_error(error);
         editor.applyStartupCamera(settings);
         if (quadView) editor.setQuadView(true);
         if (!showUI && editor.world().defaultCameraActor) {
@@ -923,6 +1019,21 @@ int wmain(int argc, wchar_t** argv) {
             editor.queueExternalImport(std::move(sources), x, y, sourceViewport);
         });
         if (interactive) editor.setGarbageCollector(&gc, gcSettingsPath);
+        loadProgress.report(.99f, "Preparing initial scene and workspace", project.name);
+        startup.surface(nullptr, nullptr);
+        if (interactive) {
+            // Build and render the actual initial workspace before declaring it
+            // ready; this includes lazy scene uploads and the restored viewport.
+            ui.beginFrame(1.0f / 60.0f);
+            bool initialCapture = false;
+            if (showUI) editor.draw(settings, renderer, vsync, initialCapture);
+            if (!renderer.render(settings, editor.world(), editor.assets(), error)) throw std::runtime_error(error);
+            ui.endFrame();
+            if (!renderer.present(false, error)) throw std::runtime_error(error);
+        }
+        loadProgress.report(1, "Ready", project.name);
+        startup.surface(nullptr, nullptr);
+        loading.release();
         if (gcSelfTest) {
             runGarbageCollectionSmoke(renderer, ui, editor, captureDir);
             return 0;
@@ -1182,6 +1293,9 @@ int wmain(int argc, wchar_t** argv) {
             if (!gi.reason.empty()) std::cout << "GI status: " << gi.reason << '\n';
         }
         std::cout << "Completed " << frame << " frames.\n";
+        return 0;
+    } catch (const LoadingCancelled&) {
+        std::cout << "Startup cancelled.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';

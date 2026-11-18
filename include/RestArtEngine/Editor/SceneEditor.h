@@ -2,6 +2,7 @@
 
 #include <RestArtEngine/Scene/World.h>
 #include <RestArtEngine/Core/GarbageCollector.h>
+#include <RestArtEngine/Core/LoadProgress.h>
 #include <RestArtEngine/Project/Project.h>
 #include <RestArtEngine/Editor/ViewportInteraction.h>
 #include <RestArtEngine/Renderer/SceneRenderer.h>
@@ -21,7 +22,8 @@ namespace rae::editor {
 // UI orchestration is isolated from the runtime scene/assets and renderer.
 class SceneEditor {
 public:
-    bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error);
+    bool initialize(const project::ProjectPaths&, renderer::SceneRenderer&, std::string& error,
+        const LoadProgress& progress = {});
     // Apply the scene's authored opening view without modifying the bookmark.
     void applyStartupCamera(renderer::SceneSettings& settings);
     scene::ActorId createCameraActor(const renderer::SceneSettings&, bool fromView = true);
@@ -213,7 +215,7 @@ private:
     void activateAsset(const assets::AssetEntry& entry);
     void drawAssetDetails(renderer::SceneRenderer& renderer);
     void requestSceneOpen(const std::filesystem::path& path);
-    void refreshContent();
+    void refreshContent(const LoadProgress& progress = {});
     void drawMaterial();
     void drawShader(renderer::SceneRenderer&);
     void selectMaterial(assets::AssetId);

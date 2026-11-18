@@ -125,7 +125,8 @@ void AssetRegistry::setEngineContentRoot(std::filesystem::path root) {
     folders_.clear();
 }
 
-bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
+bool AssetRegistry::scan(std::string& error, bool loadPreviews, const LoadProgress& progress) {
+    progress.report(0, "Indexing Content", "Discovering asset folders");
     error.clear();
     entries_.clear();
     folders_.clear();
@@ -134,16 +135,22 @@ bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
         error = "The content root is not set.";
         return false;
     }
-    const auto scanRoot = [&](const std::filesystem::path& root, AssetOrigin origin) {
+    const auto scanRoot = [&](const std::filesystem::path& root, AssetOrigin origin, const LoadProgress& rootProgress) {
+        const std::string_view stage = origin == AssetOrigin::Engine ? "Indexing engine Content" : "Indexing project Content";
+        rootProgress.report(0, stage, "Discovering asset files");
         const std::string prefix = origin == AssetOrigin::Engine ? std::string(EngineContentPrefix) : std::string{};
         if (origin == AssetOrigin::Engine) folders_.push_back(prefix);
         std::error_code code;
-        if (!std::filesystem::is_directory(root, code)) return true;
+        if (!std::filesystem::is_directory(root, code)) {
+            rootProgress.report(1, stage, "No Content directory");
+            return true;
+        }
         if (detail::contentLink(root)) { error = "Content root must not be a linked directory."; return false; }
 
         std::filesystem::recursive_directory_iterator iterator(root,
             std::filesystem::directory_options::skip_permission_denied, code);
         const std::filesystem::recursive_directory_iterator end;
+        std::vector<std::filesystem::path> files;
         for (; iterator != end; iterator.increment(code)) {
             if (code) { code.clear(); continue; }
             const auto& path = iterator->path();
@@ -156,9 +163,23 @@ bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
             if (iterator->is_directory(code)) {
                 const auto relative = path.lexically_relative(root);
                 if (!relative.empty()) folders_.push_back(prefix + pathText(relative));
+                if (rootProgress) rootProgress.report(0, stage, "Finding files in " + pathText(relative));
                 continue;
             }
             if (!iterator->is_regular_file(code)) continue;
+            if (isAssetContainerFile(path) || assetTypeFromPath(path) != AssetType::Unknown) files.push_back(path);
+        }
+        rootProgress.report(.05f, stage, std::to_string(files.size()) + " candidate files");
+        std::size_t completed = 0;
+        const auto reportFile = [&](const std::filesystem::path& path, bool beginning) {
+            if (!rootProgress) return;
+            const auto text = std::to_string(beginning ? completed + 1 : completed) + "/" +
+                std::to_string(files.size()) + "  " + prefix + pathText(path.lexically_relative(root));
+            const float fraction = files.empty() ? 1.0f : static_cast<float>(completed) / static_cast<float>(files.size());
+            rootProgress.report(.05f + .90f * fraction, stage, text);
+        };
+        for (const auto& path : files) {
+            reportFile(path, true);
             const auto extension = path.extension();
             AssetEntry entry;
             entry.origin = origin;
@@ -184,7 +205,7 @@ bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
                 }
             } else {
                 entry.type = assetTypeFromPath(path);
-                if (entry.type == AssetType::Unknown) continue;
+                // File classification was filtered during discovery above.
             }
             if (loadPreviews && entry.type == AssetType::Scene) {
                 // A GPU-rendered sidecar wins; the CPU layout stays as a fallback.
@@ -205,17 +226,24 @@ bool AssetRegistry::scan(std::string& error, bool loadPreviews) {
                 entry.id = innerId;
             }
             entries_.push_back(std::move(entry));
+            ++completed;
+            reportFile(path, false);
         }
+        rootProgress.report(1, stage, loadPreviews ? "Asset metadata and previews ready" : "Asset metadata ready");
         return true;
     };
-    if (!scanRoot(contentRoot_, AssetOrigin::Project)) return false;
-    if (!engineContentRoot_.empty() && !scanRoot(engineContentRoot_, AssetOrigin::Engine)) return false;
+    const float projectEnd = engineContentRoot_.empty() ? .98f : .70f;
+    if (!scanRoot(contentRoot_, AssetOrigin::Project, progress.range(0, projectEnd))) return false;
+    if (!engineContentRoot_.empty() &&
+        !scanRoot(engineContentRoot_, AssetOrigin::Engine, progress.range(projectEnd, .98f))) return false;
+    progress.report(.98f, "Indexing Content", "Sorting asset folders and entries");
     std::sort(folders_.begin(), folders_.end());
     std::sort(entries_.begin(), entries_.end(), [](const AssetEntry& left, const AssetEntry& right) {
         if (left.folder != right.folder) return left.folder < right.folder;
         if (left.type != right.type) return static_cast<int>(left.type) < static_cast<int>(right.type);
         return left.name < right.name;
     });
+    progress.report(1, "Indexing Content", std::to_string(entries_.size()) + " assets indexed");
     return true;
 }
 

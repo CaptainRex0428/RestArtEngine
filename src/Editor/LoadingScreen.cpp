@@ -122,7 +122,7 @@ void LoadingScreen::release() noexcept {
     }
 }
 
-void LoadingScreen::draw(float progress, const char* text) const {
+void LoadingScreen::draw(float progress, const char* text, const char* detail) const {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float displayWidth = viewport->WorkSize.x, displayHeight = viewport->WorkSize.y;
     if (displayWidth < 1.0f || displayHeight < 1.0f) return;
@@ -144,16 +144,41 @@ void LoadingScreen::draw(float progress, const char* text) const {
     const float inset = displayWidth * 0.055f;
     const float right = displayWidth - inset;
     const float fontSize = std::clamp(displayHeight * 0.021f, 13.0f, 26.0f);
-    const float textTop = displayHeight * 0.872f;
+    const float detailSize = std::max(11.0f, fontSize * .85f);
+    const float detailTop = displayHeight * .921f - detailSize - 6;
+    const float textTop = std::min(displayHeight * .825f, detailTop - fontSize - 4);
     ImFont* font = ImGui::GetFont();
     const char* label = (text && *text) ? text : "Loading";
-    list->AddText(font, fontSize, position(inset, textTop), IM_COL32(228, 238, 248, 255), label);
 
     const float clamped = std::clamp(progress, 0.0f, 1.0f);
     char percent[16];
     std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(clamped * 100.0f + 0.5f));
     const ImVec2 percentSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, percent);
+    // Reserve the percentage column, including on the small borderless splash.
+    const ImVec4 labelClip(topLeft.x + inset, topLeft.y + textTop,
+        topLeft.x + right - percentSize.x - fontSize, topLeft.y + textTop + fontSize + 2);
+    list->AddText(font, fontSize, position(inset, textTop), IM_COL32(228, 238, 248, 255),
+        label, nullptr, 0.0f, &labelClip);
     list->AddText(font, fontSize, position(right - percentSize.x, textTop), IM_COL32(150, 205, 255, 255), percent);
+
+    if (detail && *detail) {
+        const float available = right - inset;
+        std::string visible(detail);
+        const char* ellipsis = "...";
+        const float ellipsisWidth = font->CalcTextSizeA(detailSize, FLT_MAX, 0, ellipsis).x;
+        if (font->CalcTextSizeA(detailSize, FLT_MAX, 0, visible.c_str()).x > available) {
+            // Keep the leading count/status and truncate only at UTF-8 boundaries.
+            const char* end = nullptr;
+            font->CalcTextSizeA(detailSize, std::max(1.0f, available - ellipsisWidth), 0,
+                visible.c_str(), nullptr, &end);
+            visible.resize(static_cast<std::size_t>(end - visible.c_str()));
+            visible += ellipsis;
+        }
+        const ImVec4 detailClip(topLeft.x + inset, topLeft.y + detailTop,
+            topLeft.x + right, topLeft.y + detailTop + detailSize + 2);
+        list->AddText(font, detailSize, position(inset, detailTop), IM_COL32(177, 193, 210, 255),
+            visible.c_str(), nullptr, 0, &detailClip);
+    }
 
     // Thin, minimal two-tone bar: light blue for the loaded portion, grey track.
     const float barTop = displayHeight * 0.921f;

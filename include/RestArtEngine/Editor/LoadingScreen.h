@@ -31,7 +31,7 @@ public:
 
     // Call after window chrome has reserved this frame's work area. Coordinates
     // follow the main viewport, including desktop offsets with multi-viewports.
-    void draw(float progress, const char* text) const;
+    void draw(float progress, const char* text, const char* detail = nullptr) const;
 
 private:
     ID3D11ShaderResourceView* texture_ = nullptr;

@@ -393,13 +393,31 @@ std::string AssetLibrary::materialAssetFileName(const MaterialAsset& material) {
 }
 
 namespace {
-std::vector<MaterialAsset> readMaterialFolder(const std::filesystem::path& folder, AssetOrigin origin) {
+void reportAssetFile(const LoadProgress& progress, std::string_view stage,
+    const std::filesystem::path& folder, const std::filesystem::path& path,
+    std::size_t completed, std::size_t total, bool beginning) {
+    if (!progress) return;
+    const auto text = std::to_string(beginning ? completed + 1 : completed) + "/" +
+        std::to_string(total) + "  " + detail::pathUtf8(path.lexically_relative(folder));
+    const float fraction = total ? static_cast<float>(completed) / static_cast<float>(total) : 1.0f;
+    progress.report(.05f + .85f * fraction, stage, text);
+}
+
+std::vector<MaterialAsset> readMaterialFolder(const std::filesystem::path& folder, AssetOrigin origin,
+    const LoadProgress& progress) {
         std::string error;
+        const std::string_view stage = origin == AssetOrigin::Engine ? "Loading engine materials" : "Loading project materials";
+        progress.report(0, stage, "Finding material files");
         if (!std::filesystem::is_directory(folder) || detail::contentLink(folder))
             throw std::runtime_error("Material directory does not exist or is linked: " + detail::pathUtf8(folder));
         std::vector<MaterialAsset> loaded;
         std::unordered_set<AssetId> ids;
         const auto files = detail::contentFiles(folder);
+        const auto total = static_cast<std::size_t>(std::count_if(files.begin(), files.end(), [](const auto& path) {
+            return isAssetContainerFile(path) || path.extension() == ".ramat";
+        }));
+        std::size_t completed = 0;
+        progress.report(.05f, stage, std::to_string(total) + " candidate files");
         // Process modern containers first; same-GUID legacy files are fallbacks.
         for (int pass = 0; pass < 3; ++pass) {
             const auto preferredIds = ids;
@@ -407,31 +425,36 @@ std::vector<MaterialAsset> readMaterialFolder(const std::filesystem::path& folde
                 const auto extension = path.extension();
                 if ((pass == 0 && extension != ".rasset") || (pass == 1 && extension != ".raasset") ||
                     (pass == 2 && extension != ".ramat")) continue;
-                MaterialAsset material;
-                if (pass < 2) {
-                    AssetFile file;
-                    if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
-                    if (file.type != AssetFileType::Material) continue;
-                    if (pass == 1 && preferredIds.contains(file.id)) continue;
-                    if (!readAssetFile(path, file, error) || !readMaterialAssetFile(file, material, error))
-                        throw std::runtime_error(error);
-                } else {
-                    const auto value = detail::readJson(path);
-                    if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
-                        throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(path));
-                    // A superseded JSON file is not the active material payload.
-                    if (preferredIds.contains(detail::readId(value.at("material").at("id")))) continue;
-                    material = detail::readMaterial(value.at("material"));
-                }
-                detail::validateMaterial(material);
-                if (isEngineAssetId(material.id) != (origin == AssetOrigin::Engine))
-                    throw std::runtime_error("Material GUID is not permitted in this " +
-                        std::string(origin == AssetOrigin::Engine ? "Engine" : "Project") +
-                        " Content mount: " + detail::pathUtf8(path));
-                material.origin = origin;
-                if (!ids.insert(material.id).second)
-                    throw std::runtime_error("Duplicate material GUID in directory: " + detail::pathUtf8(path));
-                loaded.push_back(std::move(material));
+                reportAssetFile(progress, stage, folder, path, completed, total, true);
+                const auto readCandidate = [&] {
+                    MaterialAsset material;
+                    if (pass < 2) {
+                        AssetFile file;
+                        if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+                        if (file.type != AssetFileType::Material) return;
+                        if (pass == 1 && preferredIds.contains(file.id)) return;
+                        if (!readAssetFile(path, file, error) || !readMaterialAssetFile(file, material, error))
+                            throw std::runtime_error(error);
+                    } else {
+                        const auto value = detail::readJson(path);
+                        if (value.at("format") != "RAEngine.Material" || value.at("version") != 1)
+                            throw std::runtime_error("Unsupported material format: " + detail::pathUtf8(path));
+                        // A superseded JSON file is not the active material payload.
+                        if (preferredIds.contains(detail::readId(value.at("material").at("id")))) return;
+                        material = detail::readMaterial(value.at("material"));
+                    }
+                    detail::validateMaterial(material);
+                    if (isEngineAssetId(material.id) != (origin == AssetOrigin::Engine))
+                        throw std::runtime_error("Material GUID is not permitted in this " +
+                            std::string(origin == AssetOrigin::Engine ? "Engine" : "Project") +
+                            " Content mount: " + detail::pathUtf8(path));
+                    material.origin = origin;
+                    if (!ids.insert(material.id).second)
+                        throw std::runtime_error("Duplicate material GUID in directory: " + detail::pathUtf8(path));
+                    loaded.push_back(std::move(material));
+                };
+                readCandidate();
+                reportAssetFile(progress, stage, folder, path, ++completed, total, false);
             }
         }
         std::sort(loaded.begin(), loaded.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
@@ -439,9 +462,10 @@ std::vector<MaterialAsset> readMaterialFolder(const std::filesystem::path& folde
 }
 } // namespace
 
-bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error) {
+bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress) {
     try {
-        auto loaded = readMaterialFolder(folder, AssetOrigin::Project);
+        auto loaded = readMaterialFolder(folder, AssetOrigin::Project, progress);
+        progress.report(.95f, "Loading project materials", "Validating material identities");
         std::unordered_set<AssetId> ids;
         for (const auto& material : loaded) ids.insert(material.id);
         for (const auto& material : materials) {
@@ -453,6 +477,7 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
         }
         materials = std::move(loaded);
         error.clear();
+        progress.report(1, "Loading project materials", "Materials ready");
         return true;
     } catch (const std::exception& e) {
         error = e.what();
@@ -460,9 +485,10 @@ bool AssetLibrary::loadMaterials(const std::filesystem::path& folder, std::strin
     }
 }
 
-bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std::string& error) {
+bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress) {
     try {
-        auto loaded = readMaterialFolder(folder, AssetOrigin::Engine);
+        auto loaded = readMaterialFolder(folder, AssetOrigin::Engine, progress);
+        progress.report(.95f, "Loading engine materials", "Validating engine material mount");
         if (std::none_of(loaded.begin(), loaded.end(), [](const auto& material) {
             return material.id == EngineDefaultMaterialId;
         })) throw std::runtime_error("Engine Content is missing DefaultMaterial (GUID 0010000000000001): " + detail::pathUtf8(folder));
@@ -477,6 +503,7 @@ bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std:
         }
         materials = std::move(loaded);
         error.clear();
+        progress.report(1, "Loading engine materials", "Engine materials ready");
         return true;
     } catch (const std::exception& e) {
         error = e.what();
@@ -484,25 +511,39 @@ bool AssetLibrary::loadEngineMaterials(const std::filesystem::path& folder, std:
     }
 }
 
-bool AssetLibrary::loadEngineMeshes(const std::filesystem::path& folder, std::string& error) {
+bool AssetLibrary::loadEngineMeshes(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress) {
     try {
+        constexpr std::string_view stage = "Loading engine meshes";
+        progress.report(0, stage, "Finding engine mesh files");
         if (!std::filesystem::is_directory(folder) || detail::contentLink(folder))
             throw std::runtime_error("Engine mesh directory is missing or linked: " + detail::pathUtf8(folder));
         std::vector<MeshAsset> loaded;
         std::unordered_set<AssetId> ids;
-        for (const auto& path : detail::contentFiles(folder)) {
+        const auto files = detail::contentFiles(folder);
+        const auto total = static_cast<std::size_t>(std::count_if(files.begin(), files.end(), [](const auto& path) {
+            return isAssetContainerFile(path);
+        }));
+        std::size_t completed = 0;
+        progress.report(.05f, stage, std::to_string(total) + " candidate files");
+        for (const auto& path : files) {
             if (!isAssetContainerFile(path)) continue;
-            AssetFile file;
-            if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
-            if (file.type != AssetFileType::StaticMesh) continue;
-            if (!isEngineAssetId(file.id)) throw std::runtime_error("Engine mesh must use a reserved identity.");
-            if (!ids.insert(file.id).second) throw std::runtime_error("Duplicate Engine mesh GUID.");
-            if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
-            MeshAsset mesh;
-            if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
-            mesh.origin = AssetOrigin::Engine;
-            loaded.push_back(std::move(mesh));
+            reportAssetFile(progress, stage, folder, path, completed, total, true);
+            const auto readCandidate = [&] {
+                AssetFile file;
+                if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+                if (file.type != AssetFileType::StaticMesh) return;
+                if (!isEngineAssetId(file.id)) throw std::runtime_error("Engine mesh must use a reserved identity.");
+                if (!ids.insert(file.id).second) throw std::runtime_error("Duplicate Engine mesh GUID.");
+                if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
+                MeshAsset mesh;
+                if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+                mesh.origin = AssetOrigin::Engine;
+                loaded.push_back(std::move(mesh));
+            };
+            readCandidate();
+            reportAssetFile(progress, stage, folder, path, ++completed, total, false);
         }
+        progress.report(.95f, stage, "Validating engine mesh mount");
         for (const auto id : {EngineCubeMeshId, EngineSphereMeshId, EngineCylinderMeshId, EngineConeMeshId, EngineTorusMeshId, EnginePlaneMeshId})
             if (!ids.contains(id)) throw std::runtime_error("Engine Content is missing built-in mesh " + assetIdText(id));
         for (const auto& mesh : meshes) {
@@ -513,6 +554,7 @@ bool AssetLibrary::loadEngineMeshes(const std::filesystem::path& folder, std::st
         }
         meshes = std::move(loaded);
         error.clear();
+        progress.report(1, stage, "Engine meshes ready");
         return true;
     } catch (const std::exception& e) {
         error = e.what();
@@ -599,40 +641,58 @@ std::string AssetLibrary::meshAssetFileName(const MeshAsset& mesh) {
     return sanitizeAssetName(mesh.name) + ".rasset";
 }
 
-bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& error) {
+bool AssetLibrary::loadMeshes(const std::filesystem::path& folder, std::string& error, const LoadProgress& progress) {
     try {
-        if (!std::filesystem::is_directory(folder)) { error.clear(); return true; }
+        constexpr std::string_view stage = "Loading project meshes";
+        progress.report(0, stage, "Finding project mesh files");
+        if (!std::filesystem::is_directory(folder)) {
+            error.clear();
+            progress.report(1, stage, "No project mesh directory");
+            return true;
+        }
         if (detail::contentLink(folder)) throw std::runtime_error("Mesh directory must not be linked.");
         auto staged = meshes;
         std::unordered_map<AssetId, std::filesystem::path> loadedPaths;
         std::unordered_set<AssetId> ids;
         const auto files = detail::contentFiles(folder);
+        const auto total = static_cast<std::size_t>(std::count_if(files.begin(), files.end(), [](const auto& path) {
+            return isAssetContainerFile(path);
+        }));
+        std::size_t completed = 0;
+        progress.report(.05f, stage, std::to_string(total) + " candidate files");
         for (int pass = 0; pass < 2; ++pass) {
             const auto preferredIds = ids;
             for (const auto& path : files) {
                 if (path.extension() != (pass == 0 ? ".rasset" : ".raasset")) continue;
-                AssetFile file;
-                if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
-                if (file.type != AssetFileType::StaticMesh) continue;
-                if (isEngineAssetId(file.id))
-                    throw std::runtime_error("Project mesh conflicts with a reserved Engine identity: " + detail::pathUtf8(path));
-                if (pass == 1 && preferredIds.contains(file.id)) continue;
-                if (!ids.insert(file.id).second)
-                    throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(path));
-                if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
-                MeshAsset mesh;
-                if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
-                loadedPaths.emplace(mesh.id, path);
-                const auto existing = std::find_if(staged.begin(), staged.end(),
-                    [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
-                if (existing != staged.end()) *existing = std::move(mesh);
-                else staged.push_back(std::move(mesh));
+                reportAssetFile(progress, stage, folder, path, completed, total, true);
+                const auto readCandidate = [&] {
+                    AssetFile file;
+                    if (!readAssetFileHeader(path, file, error)) throw std::runtime_error(error);
+                    if (file.type != AssetFileType::StaticMesh) return;
+                    if (isEngineAssetId(file.id))
+                        throw std::runtime_error("Project mesh conflicts with a reserved Engine identity: " + detail::pathUtf8(path));
+                    if (pass == 1 && preferredIds.contains(file.id)) return;
+                    if (!ids.insert(file.id).second)
+                        throw std::runtime_error("Duplicate mesh GUID in directory: " + detail::pathUtf8(path));
+                    if (!readAssetFile(path, file, error)) throw std::runtime_error(error);
+                    MeshAsset mesh;
+                    if (!readMeshAssetFile(file, mesh, error)) throw std::runtime_error(error);
+                    loadedPaths.emplace(mesh.id, path);
+                    const auto existing = std::find_if(staged.begin(), staged.end(),
+                        [&mesh](const MeshAsset& candidate) { return candidate.id == mesh.id; });
+                    if (existing != staged.end()) *existing = std::move(mesh);
+                    else staged.push_back(std::move(mesh));
+                };
+                readCandidate();
+                reportAssetFile(progress, stage, folder, path, ++completed, total, false);
             }
         }
+        progress.report(.95f, stage, "Finalizing mesh library");
         meshes = std::move(staged);
         pruneMeshPersistence();
         for (const auto& [id, path] : loadedPaths) rememberMeshPersisted(id, path);
         error.clear();
+        progress.report(1, stage, "Project meshes ready");
         return true;
     } catch (const std::exception& e) {
         error = e.what();

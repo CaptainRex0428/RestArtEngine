@@ -8,6 +8,7 @@
 
 #include "RestArtEngine/Assets/AssetLibrary.h"
 #include "RestArtEngine/Assets/AssetThumbnail.h"
+#include "RestArtEngine/Core/LoadProgress.h"
 
 namespace rae::assets {
 
@@ -70,7 +71,7 @@ public:
     // Full rescan of the content root. Missing roots are not an error: the
     // registry simply becomes empty.
     // Reference checks can request metadata only, without decoding or rendering previews.
-    bool scan(std::string& error, bool loadPreviews = true);
+    bool scan(std::string& error, bool loadPreviews = true, const LoadProgress& progress = {});
 
     [[nodiscard]] const std::vector<AssetEntry>& entries() const noexcept { return entries_; }
     // Every folder under the root, root ("") first, then sorted depth-first.

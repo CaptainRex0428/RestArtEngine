@@ -8,6 +8,10 @@
 
 工程管理器列出 `Projects/` 下的所有示例工程（`Sandbox`、`RayTracing_Simple`、`PathTracing_CornellBox`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。
 
+加载页显示当前阶段与资源详情：逐个 Shader 编译、图形管线组、可选硬件光追初始化、Engine 和工程材质／网格、场景读取、Content 索引及缩略图。资源阶段显示当前项／总数和文件名；长名称缩略显示，百分比保留独立位置。进度按实际完成的工作推进，工程和首个编辑器画面准备好后才完成；百分比表示阶段预算，不是剩余时间估算。工程管理器只初始化自身的图形设备与 UI，选择工程后再构建场景管线。
+
+诊断启动过程时可加 `--loading-report <文件路径>`，将完整阶段、资源详情、累计进度与加载页提交标志写为 JSONL；正常启动不生成该文件。
+
 引擎目录根部的 `Engine.raeengine` 保存引擎版本和 hash；工程描述中的 `engineVersion` / `engineHash` 绑定到该身份。工程管理器打开工程时先做兼容检查：匹配时直接进入编辑器；版本或 hash 不匹配时可更新绑定、切换到匹配的引擎，或者关闭；旧的 v1 工程没有绑定，首次打开后可升级保存。
 
 以下提到的 `Content/` 和材质 `Shaders/` 都是**当前工程内的目录**。默认 Sandbox 分别对应引擎仓库内的 `Projects/Sandbox/Content/` 和 `Projects/Sandbox/Shaders/`。引擎根目录只保留公共 Shader 管线与默认材质模板，编辑器不会将工程材质或导入网格保存到引擎根目录。

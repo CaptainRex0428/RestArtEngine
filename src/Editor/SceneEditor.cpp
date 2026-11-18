@@ -147,39 +147,51 @@ project::ProjectPaths resolveProject(const std::filesystem::path& explicitProjec
     }
     throw std::runtime_error("Cannot locate a project. Use --project <folder or .raproject file>.");
 }
-bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer, std::string& error) {
+bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::SceneRenderer& renderer,
+    std::string& error, const LoadProgress& progress) {
+    progress.report(0, "Opening project", project.name);
     project_ = project;
     projectRenderingDraft_ = project_.rendering;
     projectSettingsDirty_ = false;
     projectSettingsMessage_.clear();
+    progress.report(.01f, "Creating default assets", "Preparing built-in scene primitives");
     assets_.createDefaults();
-    if (!assets_.loadEngineMaterials(project_.engineRoot / "Content/Materials", error)) return false;
-    if (!assets_.loadEngineMeshes(project_.engineRoot / "Content/Meshes", error)) return false;
+    progress.report(.04f, "Creating default assets", "Default assets ready");
+    if (!assets_.loadEngineMaterials(project_.engineRoot / "Content/Materials", error, progress.range(.04f, .10f))) return false;
+    if (!assets_.loadEngineMeshes(project_.engineRoot / "Content/Meshes", error, progress.range(.10f, .22f))) return false;
     // Materials are the single source of truth for scene v2 references: load the
     // content folder first so the scene can resolve its GUIDs.
     {
         std::string materialError;
         const auto materialFolder = project_.contentRoot / "Materials";
-        if (std::filesystem::is_directory(materialFolder) && !assets_.loadMaterials(materialFolder, materialError)) {
+        progress.report(.22f, "Loading project materials", "Checking project material directory");
+        if (std::filesystem::is_directory(materialFolder) &&
+            !assets_.loadMaterials(materialFolder, materialError, progress.range(.22f, .40f))) {
             error = materialError;
             return false;
         }
+        progress.report(.40f, "Loading project materials", "Project material references ready");
     }
     {
         std::string meshError;
         // Legacy IDs remain available in memory for older scenes. New scenes
         // reference Engine without generating project-side copies.
-        if (!assets_.loadMeshes(project_.contentRoot, meshError)) {
+        if (!assets_.loadMeshes(project_.contentRoot, meshError, progress.range(.40f, .72f))) {
             error = meshError;
             return false;
         }
     }
     // Scene v3 refers to mesh GUIDs. Resolve the complete Content library first.
+    progress.report(.72f, "Loading scene", "Resolving scene asset references");
     world_.createDefaultScene(assets_);
     scenePath_ = project_.defaultScene;
+    if (progress) progress.report(.74f, "Loading scene", pathText(scenePath_.filename()));
     if (std::filesystem::exists(scenePath_) && !world_.load(scenePath_, assets_, error)) return false;
+    progress.report(.80f, "Loading scene", std::to_string(world_.actors.size()) + " actors loaded");
     startupCameraPending_ = true;
-    refreshContent();
+    refreshContent(progress.range(.80f, .96f));
+    progress.report(.96f, "Preparing editor", contentError_.empty() ?
+        "Restoring asset and Actor selection" : "Content index warning: " + contentError_);
     selectedActor_ = world_.actors.empty() ? 0 : world_.actors.front().id;
     sceneInspectorActor_ = selectedActor_;
     selection_.assign(selectedActor_ ? 1 : 0, selectedActor_);
@@ -193,8 +205,10 @@ bool SceneEditor::initialize(const project::ProjectPaths& project, renderer::Sce
     shaderDraft_ = shaderSaved_ = renderer.shaderSource();
     shaderDraft_.reserve(std::max<std::size_t>(65536, shaderDraft_.size() * 2));
     status_ = "Project loaded. Actor edits and material parameters preview live; Shader edits require Apply.";
+    progress.report(.98f, "Preparing editor", "Registering editor commands and console");
     registerCommands();
     registerConsole(renderer);
+    progress.report(1, "Opening project", "Project and editor state ready");
     return true;
 }
 
@@ -2114,10 +2128,10 @@ bool SceneEditor::navigateContentUp() {
     return true;
 }
 
-void SceneEditor::refreshContent() {
+void SceneEditor::refreshContent(const LoadProgress& progress) {
     registry_.setContentRoot(project_.contentRoot);
     registry_.setEngineContentRoot(project_.engineRoot / "Content");
-    registry_.scan(contentError_);
+    registry_.scan(contentError_, true, progress);
     if (!selectedAsset_.empty() && !registry_.find(selectedAsset_)) selectedAsset_.clear();
     if (std::find(registry_.folders().begin(), registry_.folders().end(), contentFolder_) == registry_.folders().end())
         selectContentFolder(std::string());

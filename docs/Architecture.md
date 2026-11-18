@@ -170,6 +170,8 @@ GUI 职责、交互和验收约定见 [GuiDevelopment.md](GuiDevelopment.md)。�
 
 启动 `LoadingScreen::draw` 同样在 chrome 布局之后读取主 viewport 的 `WorkPos / WorkSize`，显式向该 viewport 的 background draw list 提交，并将背景、遮罩、文字、百分比和进度条统一偏移到工作区，再裁剪到工作区边界。调用者只传进度与文案，避免把 `IO.DisplaySize` 的本地尺寸与多 viewport 的桌面绘制坐标混用。图片继续使用完整 UV 拉伸铺满，图片缺失时的纯色背景采用同一布局；不覆盖标题栏，不引入裁切图片的填充策略。`LoadingScreenTests`（CMake `BUILD_TESTING=ON`）覆盖图片解码与无图回退、完整 UV、标题栏排除、三种尺寸及正负桌面坐标下的几何一致性；实际跨屏 DPI 不由这些坐标测试证明。
 
+加载反馈通过 `Core/LoadProgress.h` 的可选同步观察者传递：子加载器报告自身 `[0,1]` 的真实进度、阶段与借用的详情文字，调用方用 `range` 映射至总进度。Renderer 的 Shader／管线／DXR、AssetLibrary 的逐文件读取、AssetRegistry 的索引／缩略图和 SceneEditor 初始化共用这一接口，Core／Assets 不依赖 ImGui。启动方只在初始化操作之间执行 clear／UI／present；观察者不能重入场景渲染或 resize。相同阶段的展示刷新节流，不对耗时工作增加人为等待。无边框加载窗口涵盖工程初始化，主窗口完成首帧后才报告 Ready；发生失败不报告完成。普通调用与 Shader 热编译默认不绑定启动观察者。`--loading-report` 可记录未经展示节流删减的 JSONL 事件。加载页使用两行状态／详情，并为百分比保留空间；文件名过长时按 UTF-8 字符边界缩略。
+
 F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态，进入时隐藏标题栏和面板，退出时恢复；切换窗口样式之前同步 chrome 状态，保证 `WM_NCCALCSIZE` 和最大化工作区处理不会裁剪全屏尺寸。普通最大化适配显示器工作区，F11 覆盖整个显示器；两者均不启用多窗口渲染。
 
 ## 编辑命令、事务与主题

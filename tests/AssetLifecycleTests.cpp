@@ -419,6 +419,90 @@ void boundaries(const fs::path& root) {
             "A linked Content root is also refused.");
     } else std::cout << "SKIP symbolic-link lifecycle fixture: " << code.message() << '\n';
 }
+
+void loadingProgress(const fs::path& root) {
+    struct Event { float fraction; std::string stage, detail; };
+    std::vector<Event> events;
+    const rae::LoadProgress progress([&](float fraction, std::string_view stage, std::string_view detail) {
+        require(events.empty() || fraction >= events.back().fraction, "Loading progress never goes backwards.");
+        events.push_back({fraction, std::string(stage), std::string(detail)});
+    });
+    const auto complete = [&] {
+        require(events.size() >= 2 && events.front().fraction == 0 && events.back().fraction == 1,
+            "Successful loading reports both start and completion.");
+    };
+    const auto incomplete = [&] {
+        require(!events.empty() && std::none_of(events.begin(), events.end(), [](const auto& event) {
+            return event.fraction == 1;
+        }), "Failed loading never reports completion.");
+    };
+    const auto includes = [&](std::string_view text) {
+        return std::any_of(events.begin(), events.end(), [&](const auto& event) {
+            return event.detail.find(text) != std::string::npos;
+        });
+    };
+
+    Fixture f(root);
+    const auto firstMaterial = f.addMaterial();
+    const auto secondMaterial = f.library.createMaterial("Second material");
+    std::string error;
+    require(f.library.saveMaterials(f.content / "Materials", error), "Save loading progress material fixture: " + error);
+    const auto originalMaterial = f.content / "Materials" / AssetLibrary::materialAssetFileName(*f.library.findMaterial(firstMaterial));
+    const auto unicodeMaterial = f.content / "Materials" / fs::path(u8"加载材质.rasset");
+    fs::rename(originalMaterial, unicodeMaterial);
+    auto legacyMaterial = unicodeMaterial;
+    legacyMaterial.replace_extension(".raasset");
+    fs::copy_file(unicodeMaterial, legacyMaterial);
+
+    AssetLibrary loaded;
+    require(loaded.loadMaterials(f.content / "Materials", error, progress), "Material loading with progress: " + error);
+    complete();
+    require(loaded.materials.size() == 2 && loaded.findMaterial(firstMaterial) && loaded.findMaterial(secondMaterial),
+        "Progress does not change same-GUID legacy fallback resolution.");
+    require(includes(utf8(unicodeMaterial.filename())) && includes("3/3"),
+        "Material progress owns UTF-8 filenames and real candidate counters.");
+    const auto materialBytes = bytes(unicodeMaterial);
+    const auto broken = f.content / "Materials/Zbroken.rasset";
+    writeText(broken, "invalid asset container");
+    events.clear();
+    require(!loaded.loadMaterials(f.content / "Materials", error, progress), "Malformed material fails with progress enabled.");
+    incomplete();
+    require(loaded.materials.size() == 2 && loaded.findMaterial(firstMaterial) && loaded.findMaterial(secondMaterial) &&
+        bytes(unicodeMaterial) == materialBytes, "Failed loading retains the published library and source files.");
+    fs::remove(broken);
+
+    events.clear();
+    require(loaded.loadMeshes(f.content, error, progress), "Mesh loading with progress: " + error);
+    complete();
+    require(loaded.findMesh(f.id) && includes(f.relative) && includes("4/4"),
+        "Mesh progress accounts for every candidate while preserving mesh identity.");
+    events.clear();
+    require(loaded.loadMeshes(root / "Missing", error, progress), "Missing optional mesh directory is empty.");
+    complete();
+    fs::create_directories(root / "Empty");
+    events.clear();
+    require(loaded.loadMaterials(root / "Empty", error, progress), "Empty material directory loads successfully.");
+    complete();
+
+    events.clear();
+    require(!loaded.loadEngineMaterials(root / "Empty", error, progress), "Empty engine material mount lacks its required asset.");
+    incomplete();
+    events.clear();
+    require(!loaded.loadEngineMeshes(root / "Empty", error, progress), "Empty engine mesh mount lacks its required assets.");
+    incomplete();
+
+    AssetRegistry registry;
+    registry.setContentRoot(f.content);
+    events.clear();
+    require(registry.scan(error, true, progress), "Registry loading with previews and progress: " + error);
+    complete();
+    require(registry.entries().size() == 4 && includes(utf8(unicodeMaterial.filename())) && includes("4/4"),
+        "Registry reports real filenames and counters while loading metadata and previews.");
+    events.clear();
+    registry.setContentRoot({});
+    require(!registry.scan(error, false, progress), "Unset Content root remains an error.");
+    incomplete();
+}
 } // namespace
 
 int main() {
@@ -430,6 +514,7 @@ int main() {
         deletionReferencesAndFailures(temporary.root / "References");
         depthOfFieldSceneReferences(temporary.root / "DepthOfFieldReferences");
         boundaries(temporary.root / "Boundaries");
+        loadingProgress(temporary.root / "LoadingProgress");
         std::cout << "Asset lifecycle tests passed: " << checks << " checks\n";
         return 0;
     } catch (const std::exception& failure) {
