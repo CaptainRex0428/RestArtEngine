@@ -94,9 +94,9 @@
 | 管线组合 | `RenderPipeline` 声明 Pass 顺序与资源读写边，`SceneRenderer` 按声明执行并驱动诊断标签；`RenderFeatures` 提供构建可用性／设备能力／帧前置条件三层状态与阻塞原因。首轮仅抽出阴影阶段。 | 其余 Pass 仍在执行器的 `switch` 中。主场景已有实际 RHI 附件／加载与采样声明，资源由渲染器持有；完整生命周期声明、自动屏障与 Render Graph 未实现，见 [RenderPipeline](RenderPipeline.md)。 |
 | 原生诊断 | 两后端的 Pass 资源快照／GPU 时间戳、详细 RHI Draw 状态与逐次常量、离线 `.raframe`，CPU 多线程时间线及 Runtime 日志／内存，见 [Diagnostics](Diagnostics.md)。 | Native 调用的完整绑定历史、任意 Draw 图片、命令回放／Pixel History／Shader 单步、CPU 源码断点与采样分析未实现；GPU 时间不包含全部队列与 UI。 |
 | PBR／NPR 体系 | 已有 metallic／roughness 材质与 PBR 着色基础；编辑器 outline 用于选择／拖放反馈。 | 完整 PBR 能力清单仍需明确；NPR 材质模型、专属 Feature 与双体系组合机制尚未实现。 |
-| 后端接口 | `IRenderBackend` 仍为生命周期占位；真实 App 已接入[启动选择／回退](RenderBackends.md)，严格 D3D11 不初始化 DX12，混合模式保留 DXR 共享通道，原生 D3D12 独立创建设备。 | `Rhi.h` 的 D3D11／D3D12 实现承接主场景资源与绘制；原生 D3D12 特性覆盖仍有限。Vulkan／OpenGL 未实现；生命周期与范围见[后端说明](RenderBackends.md#实际-rhi-执行范围)。 |
-| 硬件光追 | 项目配置总开关及独立反射／阴影开关；实际 DXR RayQuery、BLAS／TLAS、共享材质与实时草稿。 | 当前仅 Windows 同适配器 DX11／DX12 组合；能力与限制见 [HardwareRayTracing](HardwareRayTracing.md)。 |
-| 全局光照 | 共用算法／模式／贡献请求与状态契约；DXR 路径采样支持渐进累积和实时间接光，Forward／Deferred 消费共享 HDR，漫反射与镜面贡献独立可配。 | 当前仅 PathTracing 算法及 Disabled；实时模式有空间滤波，无运动重投影，其他算法和后端尚未实现。 |
+| 后端接口 | `IRenderBackend` 仍为生命周期占位；真实 App 已接入[启动选择／回退](RenderBackends.md)，严格 D3D11 不初始化 DX12，混合模式保留 DXR 共享通道，原生 D3D12 独立创建设备并在同一 device/queue 上执行光栅与 DXR。 | `Rhi.h` 的 D3D11／D3D12 实现承接主场景资源与绘制；原生 D3D12 特性覆盖仍有限。Vulkan／OpenGL 未实现；生命周期与范围见[后端说明](RenderBackends.md#实际-rhi-执行范围)。 |
+| 硬件光追 | 项目配置总开关及独立反射／阴影开关；实际 DXR RayQuery、BLAS／TLAS、共享材质与实时草稿。混合模式由 D3D11 消费共享结果，原生 D3D12 直接消费 DXR 纹理。 | 当前仅 Windows；原生与混合两条 DXR 通道的设备能力、回退和视觉验收见 [HardwareRayTracing](HardwareRayTracing.md)。 |
+| 全局光照 | 共用算法／模式／贡献请求与状态契约；DXR 路径采样支持渐进累积和实时间接光，Forward／Deferred 消费 HDR，漫反射与镜面贡献独立可配；原生与混合 DXR 共用算法实现。 | 当前仅 PathTracing 算法及 Disabled；实时模式有空间滤波，无运动重投影，其他算法和后端尚未实现。 |
 | Shader 热编译 | 候选编译 2 个 VS、7 个 PS 与支持的材质图形管线，混合模式同时准备可用的硬件管线；失败保留活动版本。光栅专属材质允许在硬件关闭时更新并明确禁用不兼容硬件管线。 | 文件监听、异步编译与编译缓存尚未实现。 |
 | 选中描边 | 独立遮罩与合成通道，深度区分可见实线和遮挡虚线，前方物体描边可选。 | 最终遮挡形态、多选及缩放需定向画面验证；无选中时跳过 pass 和 mask 分配，但初始化仍创建 Shader 和状态。 |
 | 工具预览 | 材质球、网格和场景复用离屏渲染；材质窗口、资产详情、场景缩略图各持有独立纹理和读回入口。 | 工具取景距离上限 80，不保证任意尺度场景完整入镜。 |

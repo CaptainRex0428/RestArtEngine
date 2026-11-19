@@ -7,11 +7,15 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
+struct ID3D12Device;
+struct ID3D12CommandQueue;
+struct ID3D12Resource;
 namespace rae::scene { class World; }
 namespace rae::assets { class AssetLibrary; struct MaterialAsset; }
 
@@ -45,6 +49,15 @@ public:
     HardwareRayTracing& operator=(const HardwareRayTracing&) = delete;
 
     bool initialize(ID3D11Device*, ID3D11DeviceContext*, std::string& error);
+    // Native D3D12 mode: use an existing raster device/queue and expose D3D12
+    // resources instead of DX11 shared textures. No D3D11 device is created.
+    bool initializeNative(ID3D12Device*, ID3D12CommandQueue*, std::string& error);
+    [[nodiscard]] bool nativeMode() const;
+    // Valid after the first successful native render. Resources are owned by
+    // this module and remain alive until resize/shutdown.
+    [[nodiscard]] ID3D12Resource* nativeOutput() const;
+    [[nodiscard]] ID3D12Resource* nativeIndirect() const;
+    [[nodiscard]] std::pair<std::uint32_t, std::uint32_t> nativeOutputSize() const;
     [[nodiscard]] bool supported() const;
     // Builds, reflects and creates a complete candidate before publishing it.
     // The exact in-memory scene/material sources participate in this compile.

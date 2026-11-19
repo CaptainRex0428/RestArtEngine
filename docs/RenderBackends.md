@@ -1,6 +1,6 @@
 # 主渲染后端选择
 
-引擎提供三种实际执行方式：严格 D3D11、D3D11 光栅＋D3D12/DXR 混合模式，以及**实验性的独立 D3D12 光栅后端**。Forward／Deferred 的场景绘制通过共享 RHI 执行；原生 D3D12 成功启动时不创建 D3D11 device，也不依赖 D3D11On12 或旧 DXR bridge。实验后端仍存在下文列出的功能缺口，Auto 暂不优先选择它。
+引擎提供三种实际执行方式：严格 D3D11、D3D11 光栅＋D3D12/DXR 混合模式，以及**实验性的独立 D3D12 后端（原生光栅 + 原生 DXR）**。Forward／Deferred 的场景绘制通过共享 RHI 执行；原生 D3D12 成功启动时不创建 D3D11 device，也不依赖 D3D11On12 或旧 DXR bridge，硬件光追直接使用同一 D3D12 device/queue。实验后端仍存在下文列出的功能缺口，Auto 暂不优先选择它。
 
 ## 工程配置与界面
 
@@ -23,13 +23,13 @@ Project → Project Settings → Rendering 中配置主后端及回退。保存�
 | `d3d11Dxr` | 正式混合模式：D3D11 主渲染，D3D12/DXR 执行请求的硬件光追；缺少此字段的工程保持此行为 |
 | `auto` | 选择已验收的严格 D3D11；不尝试实验性的原生 D3D12，不初始化 DXR bridge |
 | `d3d11` | 严格 D3D11，不创建 D3D12 device 或 DXR bridge |
-| `d3d12` | 真正尝试独立 D3D12 设备与目标初始化；成功后使用原生 D3D12，只有启动失败且允许回退时才转用严格 D3D11 |
+| `d3d12` | 真正尝试独立 D3D12 设备与目标初始化；成功后使用原生 D3D12，并在 DXR 1.1 可用的适配器上执行原生硬件光追／GI；只有启动失败且允许回退时才转用严格 D3D11 |
 
 Auto 当前直接选择 11，属于初始选择，因此回退开关关闭也可启动。`allowFallbackToD3D11` 必须是布尔值，后端字段接受上述字符串，以及混合模式的兼容别名 `legacyHybrid`（保存时统一为 `d3d11Dxr`）；非法设置报告错误。保存只写请求值，不以实际后端覆盖它们，并保留未知工程字段。
 
 此回退开关只控制原生 D3D12 device／窗口目标初始化失败时转用 D3D11。系统或设备不支持、原生设备／目标创建失败时，先清理失败实例，再按策略选择严格 D3D11；禁止回退时直接报告错误。Shader 编译、资产及普通渲染错误继续报告，不能因换 API 而被吞掉。混合模式已经以 D3D11 为主后端，DXR 不可用时继续光栅属于 Feature 降级，具体原因另行报告。
 
-格式仍允许严格 11 工程保存 `hardwareRayTracing=true` 及 GI 配置；仅打开工程或设备能力不足不清空这些请求，界面说明其未激活。用户在设置中主动选择 Auto、严格 11 或当前原生 12 后端时，联动取消该版本不支持的硬件光追、独立反射／阴影和 GI 算法请求；相关控件禁用且不显示为已激活。切回混合模式后可重新配置，启动模式变化仍需保存重启。解析式 D3D11 光追不等于 DXR，不受“禁止创建 D3D12”限制。具体能力要求见 [HardwareRayTracing.md](HardwareRayTracing.md)。
+格式仍允许严格 11 工程保存 `hardwareRayTracing=true` 及 GI 配置；仅打开工程或设备能力不足不清空这些请求，界面说明其未激活。用户在设置中主动选择 Auto 或严格 11 时，联动取消该版本不支持的硬件光追、独立反射／阴影和 GI 算法请求；原生 D3D12 与混合模式允许这些请求，实际执行取决于设备 DXR 支持。切回混合模式后可重新配置，启动模式变化仍需保存重启。解析式 D3D11 光追不等于 DXR，不受“禁止创建 D3D12”限制。具体能力要求见 [HardwareRayTracing.md](HardwareRayTracing.md)。
 
 混合模式中，显式关闭硬件光追同时取消其独立反射／阴影和 GI；重新开启选择默认反射／阴影。选择 Path Tracing 自动开启硬件光追并取消竞争的独立反射；Realtime GI 再取消独立光追阴影。退出 GI 不自动恢复刚取消的效果；GI 质量、贡献参数保留。硬件光追开启时取消本会话的解析式反射，避免同时勾选竞争路径。这些是显式编辑规则，不是设备探测或文件加载时的规范化。
 
@@ -47,14 +47,14 @@ Auto 当前直接选择 11，属于初始选择，因此回退开关关闭也可
 | 工具预览、缩略图与视口图像 | D3D11 离屏纹理 | 原生 D3D12 离屏纹理、UI 采样与像素回读 |
 | 用户截图／F9 | 保存当前 backbuffer | 原生 D3D12 backbuffer 回读；与 Frame Inspector 资源快照不同 |
 | 解析／软件射线效果 | D3D11 Shader 路径可用 | 尚未迁移，保留请求并报告不可用 |
-| 硬件光追与渐进／实时 GI | 仅混合模式可使用 D3D12/DXR | 原生 DXR 尚未接入，不能使用旧混合 bridge 冒充 |
+| 硬件光追与渐进／实时 GI | 混合模式：D3D11 消费 D3D12/DXR 共享结果 | 原生 D3D12：同一 device/queue 执行 DXR 1.1，硬件图像复制回光栅场景；DXR 不可用时保留请求并报告原因 |
 | 景深与选中描边 | 现有 D3D11 路径 | 尚未迁移，保留请求并报告不可用 |
 | Frame Inspector 资源捕获／冻结纹理 | 终帧或选定 Pass 边界，实际 RHI Draw/常量状态、raw 像素与离线包 | 原生 D3D12 资源复制及分层阴影快照，按需回读/显示，复用 `.raframe` 离线包；不依赖 D3D11 纹理 |
 | GPU Pass 计时 | D3D11 timestamp/disjoint，异步关联原帧 | 主队列 timestamp query heap、频率与提交 fence，完成后回读；不是 CPU submit 耗时 |
 | GPU primitive 统计查询 | D3D11 主几何查询，范围见诊断说明 | 尚未迁移；拓扑数量和 RHI 提交统计不冒充 GPU 裁剪结果 |
 | CPU Trace / Runtime 调试信息 | 线程时间线、Scope 聚合、结构化消息、后端/图形 Debug 消息和内存分类 | 共享 CPU 工具及 D3D12 InfoQueue；非 CPU 断点、Shader 单步或全分配分析 |
 
-不支持的 Feature 不会改写工程中的请求。选择 D3D12 本身不要求开启光追；需要目前的 DXR／GI 功能时使用混合模式。原生 D3D12 首阶段使用同步 fence 提交与资源退役，以生命周期正确性为先；尚未提供异步多帧并行优化，不能据 API 名称推断性能更快。
+不支持的 Feature 不会改写工程中的请求。选择 D3D12 本身不要求开启光追；开启后由原生 DXR 执行，DXR 1.1 不可用时回退光栅并报告原因。原生 D3D12 使用同步 fence 提交与资源退役，以生命周期正确性为先；尚未提供异步多帧并行优化，不能据 API 名称推断性能更快。
 
 Inspector 和 GPU 计时属于已接入的诊断契约，具体后端仍须按[诊断验收](Diagnostics.md#验收要求)取得实际结果。GPU Pass 样本只覆盖主场景队列，不自动包含 ImGui 副窗口、Present 或独立混合 DXR 队列。CPU 时间、进程 working set/private memory、逻辑 GPU 缓存估算和驱动驻留是不同数据，不能混标为同一性能或显存读数。
 
@@ -85,7 +85,7 @@ RestArtEngine.exe --project Projects/RayTracing_Simple --backend d3d11Dxr --hard
 
 光线追踪算法可以由普通 GPU Shader 计算，因此 D3D11 可以实现自行编写的射线求交与遍历。本引擎现有解析／三角形光追运行在 D3D11 像素 Shader 中；D3D11 的 Compute Shader 也可用于通用计算，但不等于本引擎已经以 Compute 实现此路径。[微软 Compute Shader 说明](https://learn.microsoft.com/en-us/windows/win32/direct3d11/direct3d-11-advanced-stages-compute-shader)。
 
-D3D11 没有 DXR 接口；DXR 是 D3D12 的光追 API。我们混合模式中的硬件光追由 D3D12 RayQuery 与加速结构执行，D3D11 消费共享结果。严格 D3D11 不使用这条硬件通道；原生 D3D12 当前只接通光栅，后续可在同一原生设备上接入可选 DXR。[微软 D3D12 Raytracing 文档](https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-12-raytracing)。
+D3D11 没有 DXR 接口；DXR 是 D3D12 的光追 API。混合模式中的硬件光追由独立 D3D12 Device5 执行，D3D11 消费共享结果；原生 D3D12 复用其光栅 device/queue 执行 DXR 1.1，并把硬件图像作为 RHI 纹理复制回场景，不再需要 D3D11 或共享纹理。严格 D3D11 不使用硬件通道。[微软 D3D12 Raytracing 文档](https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-12-raytracing)。
 
 ## 实际 RHI 执行范围
 
@@ -100,13 +100,13 @@ D3D11 没有 DXR 接口；DXR 是 D3D12 的光追 API。我们混合模式中的
 
 每次常量上传必须让此前提交的 Draw 保留其数据，直到 GPU 消费完毕。D3D11 后端使用有序 `UpdateSubresource`；D3D12 为更新保留上传分配和资源引用，提交后等待 fence 完成再回收，不能重复覆盖尚未消费的 GPU 地址。Pass 结束释放附件和绘制绑定；新 Pass 重新绑定，不依赖 native 调用后的状态缓存。`DontCare` 允许后端保留或丢弃，不能假设初始化或内容保留。
 
-窗口／设备、ImGui、加载图片、截图及 Inspector 资源复制/读回按实际后端执行；D3D11 的 Outline、DOF、解析光追结构化缓冲及 DXR 共享桥仍保留独立实现，未作为原生 D3D12 已支持能力。旧 `IRenderBackend` 生命周期骨架不参与上述实际 RHI 执行。
+窗口／设备、ImGui、加载图片、截图及 Inspector 资源复制/读回按实际后端执行；D3D11 的 Outline、DOF、解析光追结构化缓冲及 DXR 共享桥仍保留独立实现，原生 D3D12 另外拥有自己的 DXR transport（不经过该桥），但 Outline、DOF 和解析光追仍未迁移。旧 `IRenderBackend` 生命周期骨架不参与上述实际 RHI 执行。
 
 D3D12 后端根据实际附件／采样／复制／UI／呈现用途记录资源状态转换与同步。共享 Pass 声明已绑定真实资源，但尚未统一覆盖所有上传、copy、UI 和 present 的图依赖；没有完整 Render Graph 编译、瞬态别名或多队列调度。后端执行资源屏障不能等同于已经实现通用 Render Graph。
 
 验证入口：`RhiTests` 使用 D3D11 WARP 实际绘制并 staging 回读；`D3D12RhiTests` 仅链接原生 D3D12 后端，离屏回读验证逐 Draw 常量版本、单层阴影数组采样、Load/Clear、无效绑定和无 present 的 UI 退役。后者需要可用 D3D12 设备（硬件或 WARP），设备不可用直接失败，不将跳过算作通过。
 
-`--native-d3d12-self-test --project <隔离示例路径> --capture-dir <输出目录>` 强制原生 D3D12 且禁止回退，验证场景/预览像素、参数变化、热编译失败保留、resize、GC、独立 UI 窗口与主窗最小化提交，生成 JSON 与 BMP。该专项不会把未迁移功能标为通过，也没有副窗口 GUI 像素验收。旧 `--editor-self-test`、相机/材质等专项仍依赖 D3D11 原生读回，不能用于原生12。D3D11 场景回归使用 `scripts/Validate-Render.ps1`，启动策略使用后端矩阵，见 [渲染开发规范](RenderingDevelopment.md)；各后端结果不能相互代替。
+`--native-d3d12-self-test --project <隔离示例路径> --capture-dir <输出目录>` 强制原生 D3D12 且禁止回退，验证场景/预览像素、参数变化、热编译失败保留、resize、GC、独立 UI 窗口与主窗最小化提交；DXR 1.1 可用时还会开启原生硬件预览与 Realtime GI，断言 HardwareTransport 实际执行并输出 BMP。该专项不会把未迁移功能标为通过，也没有副窗口 GUI 像素验收。旧 `--editor-self-test`、相机/材质等专项仍依赖 D3D11 原生读回，不能用于原生12。D3D11 场景回归使用 `scripts/Validate-Render.ps1`，启动策略使用后端矩阵，见 [渲染开发规范](RenderingDevelopment.md)；各后端结果不能相互代替。
 
 `--inspector-self-test --backend <d3d11|d3d12> --project <隔离示例路径> --capture-dir <输出目录>` 面向所选后端的详细捕获、离线载荷、Pass 前后/阴影层、冻结与失败保留、实际 GPU 计时。它使用公共读回接口，不将 D3D12 descriptor 强转为 D3D11 SRV。该专项的实际执行结果、原生 UI 视觉验收和 RenderDoc 外部抓帧分别判断。
 

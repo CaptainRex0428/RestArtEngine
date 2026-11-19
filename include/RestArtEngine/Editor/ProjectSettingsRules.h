@@ -8,8 +8,10 @@ enum class ProjectRenderingEdit { Backend, HardwareRayTracing, GiMethod, GiMode 
 
 // These are current build capabilities, not a probe of the user's adapter.
 // Apply dependencies only after an explicit edit, never while loading a project.
+// Native D3D12 now owns a DXR path; the adapter check happens at runtime.
 [[nodiscard]] inline bool projectBackendAllowsHardware(renderer::MainRenderBackend backend) noexcept {
-    return backend == renderer::MainRenderBackend::D3D11Dxr;
+    return backend == renderer::MainRenderBackend::D3D11Dxr ||
+        backend == renderer::MainRenderBackend::D3D12;
 }
 
 inline void applyProjectRenderingEdit(project::RenderingSettings& settings, ProjectRenderingEdit edit) noexcept {

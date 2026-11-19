@@ -67,7 +67,7 @@ struct MainBackendSelection {
     case MainRenderBackend::D3D12:
         result.effective = MainRenderBackend::D3D12;
         result.startupAllowed = true;
-        result.reason = "Experimental independent D3D12 scene rendering; no D3D11 device or DXR bridge.";
+        result.reason = "Experimental native D3D12 rendering; raster and DXR share the same device, no D3D11 bridge.";
         break;
     default:
         result.reason = "Invalid main render backend preference.";

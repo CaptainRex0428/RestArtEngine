@@ -561,6 +561,11 @@ struct HardwareRayTracing::Impl {
     std::uint64_t positionHash = 0, triangleHash = 0, normalHash = 0, uvVertexHash = 0, uvTriangleHash = 0;
     std::uint32_t triangleCount = 0;
     bool geometryReady = false, capable = false;
+    // Native D3D12 mode shares the raster device/queue and exposes D3D12
+    // resources directly; no DX11 objects or shared handles exist.
+    bool native = false;
+    D3D12_RESOURCE_STATES nativeOutputState = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES nativeIndirectState = D3D12_RESOURCE_STATE_COMMON;
     std::vector<SceneInput> cachedSceneInputs;
     bool sceneInputsValid = false;
     std::uint64_t dispatches = 0;
@@ -572,6 +577,11 @@ struct HardwareRayTracing::Impl {
     std::string message = "Hardware ray tracing has not been initialized.";
 
     ~Impl() {
+        if (native) {
+            // The shared raster device waits for idle during shutdown; the
+            // native queue is not owned here, so do not submit extra work.
+            return;
+        }
         // A module owns all its DX12 submissions. Drain DX11 copies as well,
         // before shared resources/fences and the compiler library are released.
         if (queue && fence && context11 && fence11 && event.value) {
@@ -631,6 +641,57 @@ struct HardwareRayTracing::Impl {
         const D3D12_RANGE writtenRange{0, size}; resource->Unmap(0, &writtenRange); return true;
     }
     bool prepareOutput(std::uint32_t w, std::uint32_t h, UINT64 dx11Done, std::string& error) {
+        if (native) {
+            if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
+                width == w && height == h) return true;
+            // Native resources are consumed through the shared raster queue; no
+            // cross-device ownership is involved, so only the previous native
+            // submission must complete before replacing the image set.
+            if (!wait(submitted, error)) return false;
+            const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
+            const auto makeImage = [&](DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
+                D3D12_RESOURCE_STATES initialState, ComPtr<ID3D12Resource>& resource, const char* operation) {
+                D3D12_RESOURCE_DESC description{};
+                description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                description.Width = w; description.Height = h;
+                description.DepthOrArraySize = description.MipLevels = 1;
+                description.Format = format; description.SampleDesc.Count = 1;
+                description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+                description.Flags = flags;
+                return !failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &description,
+                    initialState, nullptr, IID_PPV_ARGS(&resource)), operation, error);
+            };
+            ComPtr<ID3D12Resource> candidateOutput, accumulationCandidate, normalCandidate, albedoCandidate, indirectCandidate;
+            if (!makeImage(DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COMMON, candidateOutput, "Create native DXR image") ||
+                !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, accumulationCandidate, "Create native HDR path accumulation image") ||
+                !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, normalCandidate, "Create native realtime GI normal/depth guide") ||
+                !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, albedoCandidate, "Create native realtime GI material guide") ||
+                !makeImage(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COMMON, indirectCandidate, "Create native HDR indirect lighting image")) return false;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            auto descriptor = descriptors->GetCPUDescriptorHandleForHeapStart();
+            const auto descriptorStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            for (auto* resource : {candidateOutput.Get(), accumulationCandidate.Get(), normalCandidate.Get(),
+                     indirectCandidate.Get(), albedoCandidate.Get()}) {
+                view.Format = resource->GetDesc().Format;
+                device->CreateUnorderedAccessView(resource, nullptr, &view, descriptor);
+                descriptor.ptr += descriptorStride;
+            }
+            outputTexture = std::move(candidateOutput);
+            accumulationTexture = std::move(accumulationCandidate);
+            normalGuide = std::move(normalCandidate); albedoGuide = std::move(albedoCandidate);
+            indirectTexture = std::move(indirectCandidate);
+            width = w; height = h;
+            nativeOutputState = nativeIndirectState = D3D12_RESOURCE_STATE_COMMON;
+            indirectReady = false;
+            historyValid = false; accumulatedSamples = 0; sampleSequence = 0;
+            return true;
+        }
         if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
             indirectView && width == w && height == h) return true;
         // Previous DX11 reads must finish before replacing a shared allocation
@@ -856,6 +917,83 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
     impl_ = std::move(candidate); return true;
 }
 
+bool HardwareRayTracing::initializeNative(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& error) {
+    error.clear();
+    if (impl_->capable) return true;
+    auto candidate = std::make_unique<Impl>();
+    const auto fail = [&]() { impl_->message = error; return false; };
+    if (!device || !queue) { error = "Native hardware ray tracing requires the raster D3D12 device and queue."; return fail(); }
+    if (failed(device->QueryInterface(IID_PPV_ARGS(&candidate->device)), "Query DXR-native device", error)) return fail();
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options)),
+            "Query native DXR tier", error)) return fail();
+    if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) {
+        error = "This adapter does not support DXR 1.1 hardware ray queries."; return fail();
+    }
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{D3D_SHADER_MODEL_6_5};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel)),
+            "Query native DXR Shader Model", error)) return fail();
+    if (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_5) {
+        error = "Hardware ray tracing requires Shader Model 6.5."; return fail();
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT outputFormat{DXGI_FORMAT_R8G8B8A8_UNORM};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &outputFormat, sizeof(outputFormat)),
+            "Query native DXR output format", error)) return fail();
+    if (!(outputFormat.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
+        error = "The adapter cannot write the native DXR image format."; return fail();
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT accumulationFormat{DXGI_FORMAT_R32G32B32A32_FLOAT};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &accumulationFormat,
+               sizeof(accumulationFormat)), "Query native HDR path accumulation format", error)) return fail();
+    constexpr auto accumulationSupport = D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+    if ((accumulationFormat.Support2 & accumulationSupport) != accumulationSupport ||
+        !(accumulationFormat.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D)) {
+        error = "The adapter cannot read and write native FP32 HDR GI images."; return fail();
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT indirectFormat{DXGI_FORMAT_R16G16B16A16_FLOAT};
+    if (failed(candidate->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &indirectFormat,
+            sizeof(indirectFormat)), "Query native HDR indirect lighting format", error)) return fail();
+    if (!(indirectFormat.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) ||
+        !(indirectFormat.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET)) {
+        error = "The adapter cannot write the native FP16 HDR GI image."; return fail();
+    }
+    std::wstring executable(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (!length || length >= executable.size()) { error = "Cannot locate the DXR shader compiler beside the executable."; return fail(); }
+    executable.resize(length);
+    const auto compilerPath = std::filesystem::path(executable).parent_path() / "dxcompiler.dll";
+    candidate->compilerLibrary.handle = LoadLibraryExW(compilerPath.c_str(), nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!candidate->compilerLibrary.handle) {
+        error = "Hardware ray tracing requires dxcompiler.dll and dxil.dll beside RestArtEngine.exe."; return fail();
+    }
+    const auto create = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(candidate->compilerLibrary.handle, "DxcCreateInstance"));
+    if (!create) { error = "The installed DXC library has no DxcCreateInstance entry point."; return fail(); }
+    if (failed(create(CLSID_DxcUtils, IID_PPV_ARGS(&candidate->utils)), "Create DXC utilities", error) ||
+        failed(create(CLSID_DxcCompiler, IID_PPV_ARGS(&candidate->compiler)), "Create DXC compiler", error)) return fail();
+    candidate->queue = queue;
+    if (failed(candidate->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&candidate->allocator)), "Create native DXR command allocator", error) ||
+        failed(candidate->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, candidate->allocator.Get(),
+            nullptr, IID_PPV_ARGS(&candidate->list)), "Create native DXR command list", error) ||
+        failed(candidate->list->Close(), "Close initial native DXR command list", error) ||
+        failed(candidate->device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(&candidate->fence)), "Create native DXR fence", error)) return fail();
+    candidate->event.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!candidate->event.value) { error = "Cannot create native DXR completion event."; return fail(); }
+    D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
+    descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    descriptors.NumDescriptors = 5; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)),
+            "Create native DXR descriptors", error)) return fail();
+    candidate->device.As(&candidate->infoQueue);
+    candidate->native = true;
+    candidate->capable = true;
+    candidate->message = "Native D3D12 DXR 1.1 supported; hardware pipeline has not been compiled.";
+    impl_ = std::move(candidate);
+    return true;
+}
+
 bool HardwareRayTracing::supported() const { return impl_->capable; }
 
 bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot,
@@ -974,12 +1112,18 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     bool recording = false;
     try {
         if (!state.wait(state.submitted, error)) return fail();
-        // Release the prior DX11 copy/read before the DX12 queue writes again.
-        const UINT64 dx11Done = ++state.nextFence;
-        if (failed(state.context11->Signal(state.fence11.Get(), dx11Done), "Signal DX11-to-DXR fence", error)) return fail();
-        state.context11->Flush();
-        if (failed(state.queue->Wait(state.fence.Get(), dx11Done), "Wait for DX11 DXR image consumer", error) ||
-            !state.prepareOutput(frame.width, frame.height, dx11Done, error)) return fail();
+        if (state.native) {
+            // Same device/queue as raster: the previous DXR submission already
+            // completed; the raster list will be submitted after this one.
+            if (!state.prepareOutput(frame.width, frame.height, 0, error)) return fail();
+        } else {
+            // Release the prior DX11 copy/read before the DX12 queue writes again.
+            const UINT64 dx11Done = ++state.nextFence;
+            if (failed(state.context11->Signal(state.fence11.Get(), dx11Done), "Signal DX11-to-DXR fence", error)) return fail();
+            state.context11->Flush();
+            if (failed(state.queue->Wait(state.fence.Get(), dx11Done), "Wait for DX11 DXR image consumer", error) ||
+                !state.prepareOutput(frame.width, frame.height, dx11Done, error)) return fail();
+        }
         std::vector<RayTriangle> triangles;
         std::vector<XMFLOAT3> positions, normals;
         meshAttributes::RayUvData uvData;
@@ -1081,14 +1225,24 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (rebuild && !state.buildGeometry(positions, error)) {
             state.list->Close(); recording = false; state.geometryReady = false; return fail();
         }
-        D3D12_RESOURCE_BARRIER transition{};
-        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transition.Transition.pResource = state.outputTexture.Get();
-        transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        transition.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-        transition.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        D3D12_RESOURCE_BARRIER transitions[] = {transition, transition};
-        transitions[1].Transition.pResource = state.indirectTexture.Get();
+        D3D12_RESOURCE_BARRIER transitions[2]{};
+        const auto makeTransition = [](D3D12_RESOURCE_BARRIER& barrier, ID3D12Resource* resource,
+            D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resource;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = before;
+            barrier.Transition.StateAfter = after;
+        };
+        // Native resources return to the states consumed by the raster pipeline:
+        // the hardware image is copied to scene colour, the indirect image is
+        // sampled by deferred/forward lighting.
+        makeTransition(transitions[0], state.outputTexture.Get(),
+            state.native ? state.nativeOutputState : D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        makeTransition(transitions[1], state.indirectTexture.Get(),
+            state.native ? state.nativeIndirectState : D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
         ID3D12DescriptorHeap* heaps[] = {state.descriptors.Get()}; state.list->SetDescriptorHeaps(1, heaps);
         state.list->SetComputeRootSignature(state.rootSignature.Get());
@@ -1113,7 +1267,14 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         }
         for (auto& barrier : transitions)
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        // Both shared images return to COMMON before the DX11 ownership wait.
+        if (state.native) {
+            transitions[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            transitions[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            state.nativeOutputState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            state.nativeIndirectState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        // Shared bridge images return to COMMON before the DX11 ownership wait;
+        // native images return to raster-consumable states.
         state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
         const HRESULT closeResult = state.list->Close(); recording = false;
         if (failed(closeResult, "Close DXR command list", error)) { state.geometryReady = false; return fail(); }
@@ -1122,8 +1283,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         // Even a failed signal must prevent allocator/upload reuse on a retry.
         // Waiting for the unsignaled value will fail safely or time out.
         state.submitted = completed;
-        if (failed(state.queue->Signal(state.fence.Get(), completed), "Signal DXR-to-DX11 fence", error)) return fail();
-        if (failed(state.context11->Wait(state.fence11.Get(), completed), "Wait for hardware ray tracing in DX11", error)) return fail();
+        if (failed(state.queue->Signal(state.fence.Get(), completed), "Signal DXR completion fence", error)) return fail();
+        if (!state.native &&
+            failed(state.context11->Wait(state.fence11.Get(), completed), "Wait for hardware ray tracing in DX11", error)) return fail();
         if (failed(state.device->GetDeviceRemovedReason(), "Hardware ray tracing device status", error)) return fail();
         state.positionHash = positionHash; state.triangleHash = triangleHash; state.normalHash = normalHash;
         state.uvVertexHash = uvVertexHash; state.uvTriangleHash = uvTriangleHash;
@@ -1170,6 +1332,16 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
 ID3D11Texture2D* HardwareRayTracing::output() const { return impl_->sharedOutput.Get(); }
 ID3D11ShaderResourceView* HardwareRayTracing::indirectLighting() const {
     return impl_->indirectReady ? impl_->indirectView.Get() : nullptr;
+}
+bool HardwareRayTracing::nativeMode() const { return impl_->native; }
+ID3D12Resource* HardwareRayTracing::nativeOutput() const {
+    return impl_->native ? impl_->outputTexture.Get() : nullptr;
+}
+ID3D12Resource* HardwareRayTracing::nativeIndirect() const {
+    return impl_->native && impl_->indirectReady ? impl_->indirectTexture.Get() : nullptr;
+}
+std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::nativeOutputSize() const {
+    return {impl_->width, impl_->height};
 }
 std::string HardwareRayTracing::status() const { return impl_->message; }
 std::uint64_t HardwareRayTracing::dispatchCount() const { return impl_->dispatches; }

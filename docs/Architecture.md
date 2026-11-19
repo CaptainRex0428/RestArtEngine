@@ -2,7 +2,7 @@
 
 本工程面向技术美术的材质与渲染实验。编辑器通过 D3D11 或实验性的独立 D3D12 后端绘制 Actor 场景，使用对应 Dear ImGui 后端提供编辑界面。场景数据、资产数据、编辑器和渲染器分层组织，便于继续扩展与替换界面。
 
-真实启动流程支持[后端选择与回退策略](RenderBackends.md)：严格 D3D11、D3D11＋D3D12/DXR 正式混合模式，以及实验性的独立 D3D12 光栅；Auto 保留严格 D3D11。原生 D3D12 成功时不创建 D3D11 device；设备／目标初始化失败时按配置回退或报错，Shader／资产错误不作为通用回退理由。已实现范围与尚未迁移的 Feature 统一见后端文档，选择器和旧生命周期占位仍不构成功能证据。
+真实启动流程支持[后端选择与回退策略](RenderBackends.md)：严格 D3D11、D3D11＋D3D12/DXR 正式混合模式，以及实验性的独立 D3D12（原生光栅＋原生 DXR）；Auto 保留严格 D3D11。原生 D3D12 成功时不创建 D3D11 device，DXR 与光栅共用 device/queue；设备／目标初始化失败时按配置回退或报错，Shader／资产错误不作为通用回退理由。已实现范围与尚未迁移的 Feature 统一见后端文档，选择器和旧生命周期占位仍不构成功能证据。
 
 ![编辑器工作区](images/editor.png)
 
@@ -227,7 +227,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<项目>/Content/**`：场景 `.rascene`、材质与网格 `.rasset`（旧 `.ramat`/`.raasset` 只读兼容）、着色器 `.hlsl/.hlsli`。注册表缓存类型、显示名、GUID、相对路径、所在文件夹、字节数与缩略图：材质和网格读容器清单里的 64×64 缩略图，场景读保存时生成的 GPU sidecar `<scene>.rthumb`，缺失则按 Actor 位置生成 CPU 布局图。编辑器在每次文件操作后重建，不解码几何；内置网格从引擎 `Content/Meshes/` 只读挂载，不再向项目生成 `Meshes/Builtin/`；旧图元 ID 保留内存兼容。自包含资产格式见 [AssetFormat.md](AssetFormat.md)（已实现）。
 
-`Rhi.h` 的资源／图形命令已有 D3D11 与实验性原生 D3D12 实现；实际启动切换由 SceneRenderer 管理，不经过 `RenderBackend.h` 的旧生命周期骨架。D3D12 的窗口、UI、共享光栅场景、预览、截图、Inspector 资源捕获和 GPU Pass 时间戳已经接入；解析光追、DOF、Outline、原生 DXR／GI 与 GPU 裁剪计数尚未迁移，具体矩阵见 [RenderBackends](RenderBackends.md)。混合模式仍通过共享图像把 DX12／DXR 1.1 结果交给 D3D11，资源、编译、加速结构和同步收敛在 `src/Renderer/D3D12/HardwareRayTracing.*`，与原生光栅后端分开；细节见 [HardwareRayTracing](HardwareRayTracing.md)。Scene / Assets 不依赖具体图形 API；Vulkan／OpenGL、完整后端热切和设备丢失恢复尚未实现。
+`Rhi.h` 的资源／图形命令已有 D3D11 与实验性原生 D3D12 实现；实际启动切换由 SceneRenderer 管理，不经过 `RenderBackend.h` 的旧生命周期骨架。D3D12 的窗口、UI、共享光栅场景、预览、截图、Inspector 资源捕获、GPU Pass 时间戳和原生 DXR／GI 已经接入；解析光追、DOF、Outline 与 GPU 裁剪计数尚未迁移，具体矩阵见 [RenderBackends](RenderBackends.md)。混合模式通过共享图像把 DX12／DXR 1.1 结果交给 D3D11；原生 D3D12 复用光栅 device/queue 直接把硬件图像交给 RHI。两条 DXR 路径共用 `src/Renderer/D3D12/HardwareRayTracing.*` 的场景/编译/调度实现；细节见 [HardwareRayTracing](HardwareRayTracing.md)。Scene / Assets 不依赖具体图形 API；Vulkan／OpenGL、完整后端热切和设备丢失恢复尚未实现。
 
 解析式兼容模式使用 GPU Shader 求交：内置 Sphere / Plane / Cube 使用精确解析路径，其余网格使用 `StructuredBuffer<RayTriangle>` 遍历。硬件模式将全部可见网格纳入 GPU BLAS／TLAS，提供逐帧预览及渐进／实时路径采样，保留材质草稿与双面语义。`GlobalIlluminationSettings`／`Status` 分开表达算法、更新模式、间接贡献与实际能力。渐进模式累积完整路径追踪画面；实时模式持续输出线性 HDR 间接光，由 Forward／Deferred 的光照 Shader 与各自直接光合成。间接漫反射／GGX 镜面贡献独立控制，曝光在显示阶段处理。配置入口为 `Project → Project Settings... → Rendering`，请求值存于 `.raproject` 的可选 `rendering` 对象；历史失效及预算见 [GlobalIllumination](GlobalIllumination.md)。实时模式有边缘感知空间滤波，尚无运动重投影、发光／透明材质及其他后端 GI。
 

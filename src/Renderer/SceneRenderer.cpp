@@ -461,6 +461,10 @@ struct SceneRenderer::Impl {
     std::string diagnosticVS, diagnosticPS;
     std::shared_ptr<d3d12::D3D12RhiDevice> native12;
     rhi::TextureHandle swapchainImage, sceneColorImage, sceneDepthImage, shadowImage;
+    // The native DXR module owns and transitions its HDR indirect image; the
+    // raster lighting samples an RHI-owned copy so both state machines stay
+    // independent.
+    rhi::TextureHandle nativeIndirectCopy;
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
@@ -1219,9 +1223,23 @@ bool SceneRenderer::initializePipeline(std::string& error, const LoadProgress& p
     if (!state.createPipeline(error, progress.range(0.05f, rasterEnd))) return false;
     state.revision = 1;
     if (state.native12) {
-        state.hardwareStatus = "Native D3D12 raster backend; native DXR integration is not available yet. "
-            "Ray tracing and GI requests are retained.";
-        progress.report(1.0f, "Native D3D12 pipeline ready");
+        // Native D3D12 owns the raster device/queue; the DXR transport reuses
+        // them and exposes D3D12 images instead of the DX11 shared bridge.
+        state.hardwareRayTracing = std::make_unique<d3d12::HardwareRayTracing>();
+        state.d3d12InitializationAttempted = true;
+        std::string hardwareError;
+        progress.report(0.75f, "Initializing native D3D12 ray tracing", "DXR 1.1 device and command list");
+        if (state.hardwareRayTracing->initializeNative(state.native12->device(), state.native12->queue(), hardwareError)) {
+            progress.report(0.82f, "Compiling native DXR pipeline", "HardwareRayTracing.hlsl::CSMain");
+            state.hardwarePipelineReady = state.hardwareRayTracing->preparePipeline(state.shaderRoot,
+                state.materialPath(), state.sceneSource, state.materialSource, hardwareError);
+            state.hardwareStatus = state.hardwarePipelineReady
+                ? "Native D3D12 DXR 1.1 ready; disabled by project settings."
+                : "Native DXR pipeline unavailable: " + hardwareError;
+        } else {
+            state.hardwareStatus = "Native D3D12 ray tracing unavailable: " + hardwareError;
+        }
+        progress.report(1.0f, "Native D3D12 pipeline ready", state.hardwareStatus);
         return true;
     }
     if (!state.backendSelection.allowD3D12Bridge) {
@@ -1889,10 +1907,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         });
         if (!hardwareDepthCompatible) break;
     }
+    const bool hardwareBackendAllowed = state.native12
+        ? (state.hardwareRayTracing && state.hardwareRayTracing->nativeMode())
+        : state.backendSelection.allowD3D12Bridge;
     if (diagnosticMainScene) {
         if (hardwareDepthCompatible != state.hardwareDepthWasCompatible) ++state.giHistoryEpoch;
         state.hardwareDepthWasCompatible = hardwareDepthCompatible;
-        if (settings.hardwareRayTracing && state.backendSelection.allowD3D12Bridge && !hardwareDepthCompatible) {
+        if (settings.hardwareRayTracing && hardwareBackendAllowed && !hardwareDepthCompatible) {
             state.hardwareStatus = "Hardware ray tracing inactive: material '" + incompatibleDepthMaterial->name +
                 "' uses a raster-only depth state. Use ZTest Less/LessEqual and ZWrite On for DXR/GI.";
             if (settings.globalIllumination.method != GlobalIlluminationMethod::Disabled)
@@ -1907,7 +1928,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const bool rasterShadowMap = settings.shadowMethod != ShadowMethod::AnalyticRay &&
         settings.shadowMethod != ShadowMethod::Disabled &&
         (lighting.info[1] < .5f || lighting.info[2] >= 0);
-    const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible &&
+    const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible && hardwareBackendAllowed &&
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested && settings.debugView == 0;
@@ -2074,19 +2095,41 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             }
             frame.historyEpoch = state.giHistoryEpoch;
             frame.viewId = settings.viewId;
-            state.context->OMSetRenderTargets(0, nullptr, nullptr);
-            state.context->PSSetShaderResources(0, 5, emptyViews);
+            if (state.context) {
+                state.context->OMSetRenderTargets(0, nullptr, nullptr);
+                state.context->PSSetShaderResources(0, 5, emptyViews);
+            }
             std::string hardwareError;
             if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
                 hardwareFrameReady = true;
                 thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
                     settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
                     !realtimeGiRequested;
-                if (realtimeIndirect) indirectView = state.hardwareRayTracing->indirectLighting();
+                if (realtimeIndirect) {
+                    if (state.native12) {
+                        if (auto* indirect = state.hardwareRayTracing->nativeIndirect()) {
+                            const auto dimensions = state.hardwareRayTracing->nativeOutputSize();
+                            if (!state.nativeIndirectCopy ||
+                                state.nativeIndirectCopy->description().width != dimensions.first ||
+                                state.nativeIndirectCopy->description().height != dimensions.second)
+                                state.nativeIndirectCopy = state.rhiDevice->createTexture(
+                                    rhi::TextureDesc{dimensions.first, dimensions.second, 1,
+                                        rhi::Format::RGBA16Float, true, "Native DXR indirect copy"});
+                            const auto imported = state.native12->importTexture(indirect,
+                                rhi::TextureDesc{dimensions.first, dimensions.second, 1,
+                                    rhi::Format::RGBA16Float, false, "Native DXR indirect source"},
+                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                            state.native12->copyTextureRegion(state.nativeIndirectCopy, imported, 0, 0,
+                                dimensions.first, dimensions.second);
+                        }
+                    } else {
+                        indirectView = state.hardwareRayTracing->indirectLighting();
+                    }
+                }
                 state.hardwareActive = true;
                 state.hardwareStatus = state.hardwareRayTracing->status();
                 state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
-                if (indirectView) {
+                if (!state.native12 && indirectView) {
                     giData.viewport = XMFLOAT4(1.0f, static_cast<float>(viewportWidth),
                         static_cast<float>(viewportHeight), 0.0f);
                     state.uploadConstants(state.giBuffer, giData);
@@ -2122,6 +2165,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.gbufferImages[2], 2}};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
+            if (contains(pass.reads, PipelineResource::IndirectLighting) && state.nativeIndirectCopy)
+                rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(2, false);
             commands.endRenderPass();
@@ -2137,6 +2182,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Clear};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
+            if (contains(pass.reads, PipelineResource::IndirectLighting) && state.nativeIndirectCopy)
+                rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(3, true);
             break;
@@ -2149,6 +2196,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
+            if (contains(pass.reads, PipelineResource::IndirectLighting) && state.nativeIndirectCopy)
+                rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
             commands.beginRenderPass(rasterPass);
             if (!drawMainGeometry(0)) return false;
             commands.endRenderPass();
@@ -2159,6 +2208,18 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             // keeps the raster image and reports the reason separately.
             if (!hardwareFrameReady || realtimeGiRequested) break;
             state.beginDiagnosticPass(pass.name);
+            if (state.native12) {
+                if (auto* output = state.hardwareRayTracing->nativeOutput()) {
+                    const auto dimensions = state.hardwareRayTracing->nativeOutputSize();
+                    const auto image = state.native12->importTexture(output,
+                        rhi::TextureDesc{dimensions.first, dimensions.second, 1,
+                            rhi::Format::RGBA8Unorm, false, "Native DXR output"},
+                        D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    state.native12->copyTextureRegion(rasterDestinationImage, image, 0, 0,
+                        static_cast<std::uint32_t>(viewportWidth), static_cast<std::uint32_t>(viewportHeight));
+                }
+                break;
+            }
             state.context->OMSetRenderTargets(0, nullptr, nullptr);
             ComPtr<ID3D11Resource> destination;
             backbuffer->GetResource(&destination);
@@ -2257,7 +2318,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         featureCapabilities.shaderPipelineReady = state.revision != 0;
         // The module is linked even when strict D3D11 intentionally never creates it.
         featureCapabilities.hardwareRayTracingBuilt = true;
-        featureCapabilities.hardwareRayTracingBackendAllowed = state.backendSelection.allowD3D12Bridge;
+        featureCapabilities.hardwareRayTracingBackendAllowed = hardwareBackendAllowed;
         featureCapabilities.hardwareRayTracingDevice =
             state.hardwareRayTracing && state.hardwareRayTracing->supported();
         featureCapabilities.hardwarePipelineReady = state.hardwarePipelineReady;

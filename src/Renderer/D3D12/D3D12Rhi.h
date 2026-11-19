@@ -34,6 +34,11 @@ public:
     // with external surface owners is rejected without discarding the old set.
     virtual void resize(std::uint32_t width, std::uint32_t height) = 0;
     [[nodiscard]] virtual rhi::TextureHandle backbuffer() const = 0;
+    // Wrap a D3D12 resource owned by another module (for example the native DXR
+    // output image) for sampling/copying through the RHI. The wrapper keeps its
+    // own resource-state bookkeeping, so the owner must pass the current state.
+    [[nodiscard]] virtual rhi::TextureHandle importTexture(ID3D12Resource* resource,
+        const rhi::TextureDesc& description, D3D12_RESOURCE_STATES currentState) = 0;
     virtual void beginFrame() = 0;
     virtual void present(bool vsync) = 0;
     virtual void waitIdle() = 0;

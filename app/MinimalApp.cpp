@@ -1424,6 +1424,11 @@ int wmain(int argc, wchar_t** argv) {
         const auto validationErrors = renderer.validationErrorCount();
         std::cout << mainGraphicsApiName(renderer) << " debug layer: " << (renderer.validationEnabled() ? "enabled" : "unavailable")
             << "; validation errors: " << validationErrors << '\n';
+        if (validationErrors) {
+            const auto messages = renderer.debugMessages();
+            for (std::size_t index = 0; index < messages.size() && index < 20; ++index)
+                std::cerr << "D3D12 validation: " << messages[index] << '\n';
+        }
         if (validationErrors) throw std::runtime_error(std::string(mainGraphicsApiName(renderer)) + " validation reported errors");
         if (frameLimit > 0 && settings.globalIllumination.method != GlobalIlluminationMethod::Disabled) {
             const auto gi = renderer.globalIlluminationStatus();

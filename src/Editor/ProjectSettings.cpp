@@ -84,7 +84,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::TextUnformatted("Main backend (next launch)");
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (ImGui::Combo("##MainBackend", &backend,
-            "D3D11 + D3D12 ray tracing\0Auto\0D3D11 (strict)\0D3D12 (experimental raster)\0")) {
+            "D3D11 + D3D12 ray tracing\0Auto\0D3D11 (strict)\0D3D12 (native DXR)\0")) {
             projectRenderingDraft_.backendPreference = static_cast<renderer::MainRenderBackend>(backend);
             applyEdit(ProjectRenderingEdit::Backend);
         }
@@ -104,9 +104,9 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::TextWrapped("%s", activeBackend.reason);
         if (!renderer.backendInitializationError().empty())
             ImGui::TextWrapped("D3D12 initialization failed: %s", renderer.backendInitializationError().c_str());
-        ImGui::TextWrapped("Auto uses strict D3D11. Native D3D12 is an experimental raster backend. Hybrid mode uses D3D11 raster and optional D3D12/DXR ray tracing.");
+        ImGui::TextWrapped("Auto uses strict D3D11. Native D3D12 executes native DXR on capable adapters (experimental raster otherwise). Hybrid mode uses D3D11 raster and optional D3D12/DXR ray tracing.");
         if (activeBackend.effective == renderer::MainRenderBackend::D3D12)
-            ImGui::TextWrapped("Native D3D12 currently keeps requests for ray tracing, GI, depth of field and selection outlines without executing those features.");
+            ImGui::TextWrapped("Native D3D12 executes DXR ray tracing/GI when the device supports DXR 1.1; depth of field and selection outlines remain raster-only for now.");
         ImGui::Spacing();
         ImGui::SeparatorText("Anti-aliasing");
         int aaMethod = static_cast<int>(settings.antiAliasing.method);
@@ -132,9 +132,11 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::Spacing();
         const bool hardwareEditable = projectBackendAllowsHardware(projectRenderingDraft_.backendPreference);
         if (!hardwareEditable)
-            ImGui::TextWrapped("Hardware ray tracing and path-traced GI require D3D11 + D3D12 ray tracing in this build. These controls are disabled for the selected next-launch backend.");
-        else if (!activeBackend.allowD3D12Bridge)
-            ImGui::TextWrapped("Lighting requests can be configured now, but require a restart into the hybrid backend to execute.");
+            ImGui::TextWrapped("Hardware ray tracing and path-traced GI require the native D3D12 or D3D11 + D3D12 ray tracing backend. These controls are disabled for the selected next-launch backend.");
+        else if (!renderer.hardwareRayTracingSupported())
+            ImGui::TextWrapped("DXR is unavailable on the active adapter or pipeline; lighting requests are retained but inactive.");
+        else if (projectRenderingDraft_.backendPreference != activeBackend.requested.preference)
+            ImGui::TextWrapped("Requests apply live after restarting into the selected backend.");
         ImGui::Spacing();
         ImGui::SeparatorText("Lighting features");
         auto& gi = settings.globalIllumination;

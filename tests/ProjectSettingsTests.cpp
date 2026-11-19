@@ -475,7 +475,7 @@ void editingDependenciesAndRestart() {
     applyProjectRenderingEdit(draft, ProjectRenderingEdit::GiMethod);
     require(!draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows,
         "Leaving GI does not silently re-enable effects the user did not select.");
-    for (auto backend : {MainRenderBackend::Auto, MainRenderBackend::D3D11, MainRenderBackend::D3D12}) {
+    for (auto backend : {MainRenderBackend::Auto, MainRenderBackend::D3D11}) {
         draft.backendPreference = backend;
         draft.hardwareRayTracing = draft.hardwareRayTracingReflections = draft.hardwareRayTracingShadows = true;
         draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
@@ -483,9 +483,17 @@ void editingDependenciesAndRestart() {
         require(!draft.hardwareRayTracing && !draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows &&
             draft.globalIllumination.method == GlobalIlluminationMethod::Disabled,
             "An explicit incompatible backend choice clears hardware feature requests.");
-        require(!projectBackendAllowsHardware(backend), "Only the hybrid backend exposes hardware/GI editing.");
+        require(!projectBackendAllowsHardware(backend), "Strict D3D11 variants do not expose hardware/GI editing.");
     }
     require(projectBackendAllowsHardware(MainRenderBackend::D3D11Dxr), "The hybrid backend allows feature requests.");
+    require(projectBackendAllowsHardware(MainRenderBackend::D3D12),
+        "The native D3D12 backend exposes native DXR hardware/GI requests.");
+    draft.backendPreference = MainRenderBackend::D3D12;
+    draft.hardwareRayTracing = draft.hardwareRayTracingReflections = draft.hardwareRayTracingShadows = true;
+    draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
+    require(draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::PathTracing,
+        "Selecting native D3D12 preserves compatible hardware requests for native DXR.");
 
     RenderingSettings saved;
     const auto launched = projectBackendRequest(saved);

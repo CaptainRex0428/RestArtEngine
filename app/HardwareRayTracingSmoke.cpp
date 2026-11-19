@@ -652,12 +652,16 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             click(itemRect(popup, label, ImGuiNavLayer_Main, id).GetCenter());
         };
         const bool nativeLaunch = launchBackend.preference == renderer::MainRenderBackend::D3D12;
-        selectBackend(nativeLaunch ? "D3D11 (strict)" : "D3D12 (experimental raster)", nativeLaunch ? 2 : 3);
+        selectBackend(nativeLaunch ? "D3D11 (strict)" : "D3D12 (native DXR)", nativeLaunch ? 2 : 3);
         require(!uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections &&
             !uiSettings.hardwareRayTracingShadows &&
             uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::Disabled,
             "Choosing native12 did not clear unsupported dependent requests.");
-        require(uiText.find("Restart required: save project settings") != std::string::npos,
+        // The suite may launch with a CLI backend override, so the persisted
+        // backend can already equal the newly selected one. Both the saved and
+        // unsaved restart notices are valid; require one, not a specific form.
+        require(uiText.find("Restart required: save project settings") != std::string::npos ||
+            uiText.find("Restart required: settings are saved.") != std::string::npos,
             "Unsaved backend edits do not request saving and restarting.");
         if (!nativeLaunch)
             click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());
@@ -700,7 +704,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         case renderer::MainRenderBackend::D3D11Dxr: selectBackend("D3D11 + D3D12 ray tracing", 0); break;
         case renderer::MainRenderBackend::Auto: selectBackend("Auto", 1); break;
         case renderer::MainRenderBackend::D3D11: selectBackend("D3D11 (strict)", 2); break;
-        case renderer::MainRenderBackend::D3D12: selectBackend("D3D12 (experimental raster)", 3); break;
+        case renderer::MainRenderBackend::D3D12: selectBackend("D3D12 (native DXR)", 3); break;
         }
         if (nativeLaunch && launchBackend.allowFallbackToD3D11)
             click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());

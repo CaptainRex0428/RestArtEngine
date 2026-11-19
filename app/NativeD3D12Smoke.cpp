@@ -296,7 +296,8 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
     error.clear();
     Json report{{"format", "RestArtEngine.NativeD3D12Smoke"}, {"version", 1},
         {"adapter", renderer.adapterName()}, {"passed", false}, {"checks", Json::array()},
-        {"notCovered", {"DXR", "depth of field", "selection outline", "Frame Inspector frozen resources"}}};
+        {"notCovered", {"depth of field", "selection outline", "Frame Inspector frozen resources",
+            "DXR hardware preview on adapters without DXR 1.1"}}};
     const auto persist = [&] {
         std::ofstream stream(artifactDirectory / "native-d3d12-report.json", std::ios::trunc);
         stream << report.dump(2) << '\n';
@@ -501,6 +502,38 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
 
         runUiSmoke(renderer, ui, world, assets, artifactDirectory, report);
         pass("Native secondary UI, image replacement and minimized-main submissions complete without GPU validation errors.");
+
+        if (renderer.hardwareRayTracingSupported()) {
+            const auto savedSettings = settings;
+            settings.path = Path::Deferred;
+            settings.shadowMethod = Shadow::Disabled;
+            settings.hardwareRayTracing = true;
+            settings.hardwareRayTracingReflections = true;
+            settings.hardwareRayTracingShadows = true;
+            settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
+            settings.debugView = 0;
+            renderMain("native-dxr-preview.bmp");
+            require(renderer.hardwareRayTracingActive() &&
+                hasPass(renderer.activePipeline(), renderer::RenderPassKind::HardwareTransport),
+                "Native DXR did not execute the hardware transport pass: " + renderer.hardwareRayTracingStatus());
+            settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
+            settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
+            settings.globalIllumination.indirectDiffuse = true;
+            settings.globalIllumination.indirectSpecular = true;
+            settings.globalIllumination.samplesPerFrame = 1;
+            settings.globalIllumination.targetSamples = 8;
+            settings.globalIllumination.maxBounces = 2;
+            for (int frame = 0; frame < 4; ++frame) renderMain(frame == 3 ? "native-dxr-realtime-gi.bmp" : nullptr);
+            const auto gi = renderer.globalIlluminationStatus();
+            require(gi.effective == renderer::GlobalIlluminationMethod::PathTracing,
+                "Native realtime GI did not become effective: " + gi.reason);
+            report["dxr"] = {{"active", true}, {"status", renderer.hardwareRayTracingStatus()},
+                {"realtimeGiSamples", gi.accumulatedSamples}, {"realtimeGiReason", gi.reason}};
+            settings = savedSettings;
+            pass("Native DXR hardware preview and realtime GI render on the raster D3D12 device.");
+        } else {
+            report["dxr"] = {{"active", false}, {"reason", renderer.hardwareRayTracingStatus()}};
+        }
 
         const auto statistics = renderer.rhiStatistics();
         require(statistics.renderPasses > 0 && statistics.indexedDrawCalls > 0 && statistics.bufferUploads > 0,

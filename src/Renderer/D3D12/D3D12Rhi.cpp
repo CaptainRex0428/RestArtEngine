@@ -223,6 +223,7 @@ public:
     void detachWindow() override;
     void resize(std::uint32_t, std::uint32_t) override;
     TextureHandle backbuffer() const override;
+    TextureHandle importTexture(ID3D12Resource*, const TextureDesc&, D3D12_RESOURCE_STATES) override;
     void beginFrame() override;
     void present(bool) override;
     void waitIdle() override;
@@ -254,6 +255,7 @@ private:
     void createRootSignature();
     void acquireBackbuffers();
     std::shared_ptr<Texture12> wrapTexture(const TextureDesc&, ComPtr<ID3D12Resource>, D3D12_RESOURCE_STATES);
+    std::shared_ptr<Texture12> wrapImportedTexture(const TextureDesc&, ComPtr<ID3D12Resource>, D3D12_RESOURCE_STATES);
     void transition(Texture12&, D3D12_RESOURCE_STATES, UINT layer = UINT_MAX);
     void waitFence(UINT64);
     void signalAndWait();
@@ -482,6 +484,29 @@ std::shared_ptr<Texture12> Device12::wrapTexture(const TextureDesc& desc,
     }
     return result;
 }
+std::shared_ptr<Texture12> Device12::wrapImportedTexture(const TextureDesc& desc,
+    ComPtr<ID3D12Resource> allocation, D3D12_RESOURCE_STATES initial) {
+    auto result = std::make_shared<Texture12>();
+    result->desc = desc; result->owner = identity_; result->allocation = std::move(allocation);
+    result->states.assign(desc.arrayLayers, initial);
+    nameObject(result->allocation.Get(), desc.name);
+    if (desc.sampled) {
+        result->sampled = std::make_shared<DescriptorRange>(sampledPool_, 1);
+        result->sampledSource = std::make_shared<DescriptorRange>(sourcePool_, 1);
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = format(desc.format);
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.ViewDimension = desc.arrayLayers > 1 ? D3D12_SRV_DIMENSION_TEXTURE2DARRAY : D3D12_SRV_DIMENSION_TEXTURE2D;
+        if (desc.arrayLayers > 1) { view.Texture2DArray.MipLevels = 1; view.Texture2DArray.ArraySize = desc.arrayLayers; }
+        else view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(result->allocation.Get(), &view, result->sampledSource->cpu());
+        device_->CopyDescriptorsSimple(1, result->sampled->cpu(), result->sampledSource->cpu(),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        sampledTextures_.push_back(result);
+    }
+    return result;
+}
+
 TextureHandle Device12::createTexture(const TextureDesc& desc) {
     require(desc.width && desc.height && desc.width <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
         desc.height <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, "Invalid texture dimensions.");
@@ -943,6 +968,13 @@ TextureHandle Device12::backbuffer() const {
     const UINT index = swapchain_->GetCurrentBackBufferIndex();
     require(index < backbuffers_.size(), "Swapchain returned an invalid image index.");
     return backbuffers_[index];
+}
+TextureHandle Device12::importTexture(ID3D12Resource* resource, const TextureDesc& desc,
+    D3D12_RESOURCE_STATES currentState) {
+    require(resource != nullptr, "Cannot import a null D3D12 texture.");
+    require(desc.width && desc.height && desc.arrayLayers, "Imported texture description is invalid.");
+    ComPtr<ID3D12Resource> held(resource);
+    return wrapImportedTexture(desc, std::move(held), currentState);
 }
 void Device12::present(bool vsync) {
     require(swapchain_ != nullptr, "Present requires an attached window.");

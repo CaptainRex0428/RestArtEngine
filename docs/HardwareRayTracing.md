@@ -10,7 +10,7 @@
 
 ## 项目格式
 
-主后端选择与光追请求分开，见 [主渲染后端选择](RenderBackends.md)。缺少 `backendPreference` 的工程保持原有混合路径；明确选择 `d3d11`、当前 `auto` 或从未实现的 `d3d12` 回退后，不初始化 DXR bridge，保留硬件／GI 请求并显示后端限制。`--no-hardware-rt` 仅关闭 Feature 执行；要完全不初始化 D3D12，使用 `--backend d3d11`。
+主后端选择与光追请求分开，见 [主渲染后端选择](RenderBackends.md)。缺少 `backendPreference` 的工程保持原有混合路径；明确选择 `d3d11` 或 `auto` 后不初始化 DXR，保留硬件／GI 请求并显示后端限制。选择 `d3d12` 时由原生 D3D12 设备执行 DXR 1.1（与光栅共用 device/queue，DXR 不可用时保留请求并回退光栅）；选择 `d3d11Dxr` 时走原混合 bridge。`--no-hardware-rt` 仅关闭 Feature 执行；要完全不初始化 D3D12，使用 `--backend d3d11`。
 
 工程版本 1／2／3 均可省略以下对象，默认关闭硬件光追及 GI，两个独立预览效果默认开启：
 
@@ -36,6 +36,8 @@
 ## 渲染实现与边界
 
 Windows 实现位于 `src/Renderer/D3D12/HardwareRayTracing.*`，在现有 DX11 设备的同一适配器上创建 DX12 设备。需要 DXR 1.1、Shader Model 6.5、DX11 共享 fence 接口和可写共享图像格式。DXC 的 `dxcompiler.dll` 与匹配的 `dxil.dll` 随程序放置；CMake 从 Windows SDK 自动复制，也可配置 `DXC_RUNTIME_DIRECTORY`。Premake 构建调用 `scripts/Copy-DxcRuntime.ps1`；CMake install 同步分发 DLL。缺失时配置页报告原因。
+
+原生 D3D12 后端走同一模块的 native 模式：不再创建第二套 DX12 设备，而是把光栅 device/queue 交给 DXR transport，输出为普通 D3D12 UAV 图像；RHI 以 `importTexture` 采样/复制，硬件预览复制到场景颜色，Realtime 间接光复制到 RHI 纹理后由光照 Pass 采样。native 模式不创建 D3D11 device、共享纹理或共享 fence；混合模式继续保留原 DX11/DX12 共享桥。
 
 全部可见有效网格，包括内置图元和导入模型，转换为世界空间三角形，构建 GPU BLAS／TLAS。几何内容变化重建加速结构，材质或平滑法线变化更新各自数据。双面材质、镜像缩放和只读材质草稿沿用场景契约；阴影射线从受光点指向光源，按相反面规则筛选单面遮挡物。
 
@@ -82,10 +84,12 @@ RestArtEngine.exe --hardware-rt-self-test --capture-dir artifacts/hardware-rt
 RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi
 RestArtEngine.exe --project Projects/Sandbox --path-tracing
 RestArtEngine.exe --project Projects/Sandbox --hardware-rt
+RestArtEngine.exe --project Projects/Sandbox --backend d3d12 --no-backend-fallback --hardware-rt
+RestArtEngine.exe --native-d3d12-self-test --capture-dir artifacts/native-dxr
 RestArtEngine.exe --project Projects/Sandbox --no-hardware-rt
 ```
 
-命令行总开关仅覆盖本次启动值；需要持久化时从配置页保存。自测使用临时工程副本，报告实际 dispatch 数、GPU 像素变化、Shader 成功／失败恢复和配置交互；设备不满足条件时明确记录硬件执行跳过原因，不能把跳过当作实际 DXR 验证。
+命令行总开关仅覆盖本次启动值；需要持久化时从配置页保存。自测使用临时工程副本，报告实际 dispatch 数、GPU 像素变化、Shader 成功／失败恢复和配置交互；`--native-d3d12-self-test` 在 DXR 1.1 可用时额外执行原生 HardwareTransport 与 Realtime GI。设备不满足条件时明确记录硬件执行跳过原因，不能把跳过当作实际 DXR 验证。
 
 
 多材质网格按 section 的 Slot 填入有效材质，Actor override 和只读草稿同样参与。`RayTriangle.color.w` 为 UV 查询索引的位模式（零表示无 UV），不是 alpha；CPU/HLSL 必须用位转换保持一致。四套 UV 在命中点重心插值后进入 `Surface.uv0..uv3` 与 `uvMask`，工程 `EvaluateMaterial` 入口不变。UV 资源上传、反射、根签名和历史签名随整套候选一起更新；Shader 失败仍保留上次有效管线。
@@ -94,6 +98,6 @@ RestArtEngine.exe --project Projects/Sandbox --no-hardware-rt
 
 新增一个硬件效果通常只动这条通道：`HardwareRayTracing.cpp` 的常量打包（b5，208 字节）、`HardwareRayTracing.hlsl` 的 `CSMain` 分支、共享图像的用途位，以及 `RenderFeatures` 的条目。GI 的算法枚举、项目配置和 UI 在这里汇合，新增算法时不要绕过 `GlobalIlluminationMethod` 直接加开关，否则诊断面板无法告诉你它为什么没生效。
 
-风险最高的是资源与同步：共享图像格式、fence 等待、命令 allocator 复用都在 `HardwareRayTracing.cpp`。改完要跑 `--hardware-rt-self-test` 和 `--gi-self-test`，并确认降级路径仍然保留光栅画面——真实故障里最常见的不是花屏，而是黑屏或挂起。加速结构目前每次几何变化整场重建，按 Mesh BLAS 实例化的优化还没做。
+风险最高的是资源与同步：共享图像格式、fence 等待、命令 allocator 复用都在 `HardwareRayTracing.cpp`；原生模式还要保证 DXR 队列提交顺序与 RHI 导入纹理的 resource state 一致（HardwareResolve 复制输出，Realtime 间接光复制到 RHI 纹理后再采样）。改完要跑 `--hardware-rt-self-test`、`--native-d3d12-self-test` 和 `--gi-self-test`，并确认降级路径仍然保留光栅画面——真实故障里最常见的不是花屏，而是黑屏或挂起。加速结构目前每次几何变化整场重建，按 Mesh BLAS 实例化的优化还没做。
 
 没做的清单单独列出来：DispatchRays/SBT（当前是内联 `RayQuery`）、运动重投影、透明与 alpha-test、蒙皮、Vulkan 光追、多视图历史。这些不是配置项，每一项都要单独设计，别在提交说明里写成「已支持」。
