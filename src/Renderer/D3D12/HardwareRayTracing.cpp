@@ -574,20 +574,25 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             }
         }
         else if (binding.Type == D3D_SIT_RTACCELERATIONSTRUCTURE && binding.BindPoint == 7) acceleration = true;
-        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 7 &&
+        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 8 &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
             uavMask |= 1u << binding.BindPoint;
         }
-        else if (binding.Type == D3D_SIT_TEXTURE && (binding.BindPoint == 12 || binding.BindPoint == 13) &&
+        else if (binding.Type == D3D_SIT_TEXTURE && (binding.BindPoint == 12 || binding.BindPoint == 13 ||
+                     binding.BindPoint == 14) &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
-            historySrvs |= 1u << binding.BindPoint;
+            historySrvs |= 1u << (binding.BindPoint - 12);
         }
         else { error = std::string("Unexpected DXR shader resource: ") + binding.Name; return false; }
     }
     UINT x = 0, y = 0, z = 0; reflection->GetThreadGroupSize(&x, &y, &z);
     if (!(scene && hardware && lighting && acceleration && triangles && normals && denoise) ||
-        uavMask != 0xffu || historySrvs != ((1u << 12) | (1u << 13)) || x != 8 || y != 8 || z != 1) {
-        error = "DXR shader must preserve b0/b5/b7/b8, t4/t7/t8/t12/t13, u0..u7 and the 8x8x1 thread-group contract.";
+        uavMask != 0x1ffu || historySrvs != 0x7u || x != 8 || y != 8 || z != 1) {
+        error = "DXR shader must preserve b0/b5/b7/b8, t4/t7/t8/t12/t13/t14, u0..u8 and the 8x8x1 thread-group contract. (uavMask=" +
+            std::to_string(uavMask) + ", historySrvs=" + std::to_string(historySrvs) +
+            ", flags=" + std::to_string(scene) + std::to_string(hardware) + std::to_string(lighting) +
+            std::to_string(acceleration) + std::to_string(triangles) + std::to_string(normals) +
+            std::to_string(denoise) + ")";
         return false;
     }
     return true;
@@ -623,9 +628,13 @@ struct HardwareRayTracing::Impl {
     // read<-write after each resolve so descriptors never need swapping.
     ComPtr<ID3D12Resource> historyIndirectRead, historyIndirectWrite;
     ComPtr<ID3D12Resource> historyGeometryRead, historyGeometryWrite;
+    // Previous-frame ReSTIR indirect reservoir estimate (rgb, confidence).
+    ComPtr<ID3D12Resource> restirReservoirRead, restirReservoirWrite;
     std::array<float, 16> previousViewProjection{};
     HistoryKey denoiseKey{};
+    HistoryKey restirKey{};
     bool denoiseHistoryValid = false;
+    bool restirHistoryValid = false;
     ComPtr<ID3D11Texture2D> sharedOutput, sharedIndirect;
     ComPtr<ID3D11ShaderResourceView> indirectView;
     bool indirectReady = false;
@@ -716,7 +725,7 @@ struct HardwareRayTracing::Impl {
     }
     bool prepareDenoiseHistory(std::uint32_t w, std::uint32_t h, std::string& error) {
         if (historyIndirectRead && historyIndirectWrite && historyGeometryRead && historyGeometryWrite &&
-            width == w && height == h) return true;
+            restirReservoirRead && restirReservoirWrite && width == w && height == h) return true;
         const auto properties = heap(D3D12_HEAP_TYPE_DEFAULT);
         const auto makeImage = [&](DXGI_FORMAT format, D3D12_RESOURCE_STATES initialState,
             ComPtr<ID3D12Resource>& resource, const char* operation) {
@@ -737,7 +746,11 @@ struct HardwareRayTracing::Impl {
             !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 geometryRead, "Create GI history geometry read image") ||
             !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                geometryWrite, "Create GI history geometry write image")) return false;
+                geometryWrite, "Create GI history geometry write image") ||
+            !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                restirReservoirRead, "Create ReSTIR reservoir read image") ||
+            !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                restirReservoirWrite, "Create ReSTIR reservoir write image")) return false;
         const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         auto descriptor = descriptors->GetCPUDescriptorHandleForHeapStart();
         descriptor.ptr += stride * 5;
@@ -751,6 +764,9 @@ struct HardwareRayTracing::Impl {
         descriptor.ptr += stride;
         // u7 is the primary previous-position image, written by prepareOutput.
         descriptor.ptr += stride;
+        uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        device->CreateUnorderedAccessView(restirReservoirWrite.Get(), nullptr, &uav, descriptor);
+        descriptor.ptr += stride;
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -760,16 +776,20 @@ struct HardwareRayTracing::Impl {
         descriptor.ptr += stride;
         srv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         device->CreateShaderResourceView(geometryRead.Get(), &srv, descriptor);
+        descriptor.ptr += stride;
+        device->CreateShaderResourceView(restirReservoirRead.Get(), &srv, descriptor);
         historyIndirectRead = std::move(indirectRead); historyIndirectWrite = std::move(indirectWrite);
         historyGeometryRead = std::move(geometryRead); historyGeometryWrite = std::move(geometryWrite);
         denoiseHistoryValid = false;
+        restirHistoryValid = false;
         return true;
     }
     bool prepareOutput(std::uint32_t w, std::uint32_t h, UINT64 dx11Done, std::string& error) {
         if (native) {
             if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
                 primaryPreviousPosition && historyIndirectRead && historyIndirectWrite &&
-                historyGeometryRead && historyGeometryWrite && width == w && height == h) return true;
+                historyGeometryRead && historyGeometryWrite && restirReservoirRead && restirReservoirWrite &&
+                width == w && height == h) return true;
             // Native resources are consumed through the shared raster queue; no
             // cross-device ownership is involved, so only the previous native
             // submission must complete before replacing the image set.
@@ -827,7 +847,8 @@ struct HardwareRayTracing::Impl {
         }
         if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
             primaryPreviousPosition && historyIndirectRead && historyIndirectWrite &&
-            historyGeometryRead && historyGeometryWrite && indirectView && width == w && height == h) return true;
+            historyGeometryRead && historyGeometryWrite && restirReservoirRead && restirReservoirWrite &&
+            indirectView && width == w && height == h) return true;
         // Previous DX11 reads must finish before replacing a shared allocation
         // or its descriptor. Normal frame reuse remains GPU ordered.
         if (!wait(dx11Done, error)) return false;
@@ -1049,7 +1070,7 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
     if (!candidate->event.value) { error = "Cannot create DXR completion event."; return fail(); }
     D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
     descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 10; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    descriptors.NumDescriptors = 12; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)), "Create DXR descriptors", error)) return fail();
     candidate->device.As(&candidate->infoQueue);
     candidate->capable = true;
@@ -1123,7 +1144,7 @@ bool HardwareRayTracing::initializeNative(ID3D12Device* device, ID3D12CommandQue
     if (!candidate->event.value) { error = "Cannot create native DXR completion event."; return fail(); }
     D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
     descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 10; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    descriptors.NumDescriptors = 12; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)),
             "Create native DXR descriptors", error)) return fail();
     candidate->device.As(&candidate->infoQueue);
@@ -1183,11 +1204,11 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     parameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[8].Descriptor.ShaderRegister = 11;
     parameters[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[9].Descriptor.ShaderRegister = 8;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 8; range.BaseShaderRegister = 0;
+    range.NumDescriptors = 9; range.BaseShaderRegister = 0;
     parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[5].DescriptorTable.NumDescriptorRanges = 1; parameters[5].DescriptorTable.pDescriptorRanges = &range;
     D3D12_DESCRIPTOR_RANGE srvs{}; srvs.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvs.NumDescriptors = 2; srvs.BaseShaderRegister = 12;
+    srvs.NumDescriptors = 3; srvs.BaseShaderRegister = 12;
     parameters[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[10].DescriptorTable.NumDescriptorRanges = 1;
     parameters[10].DescriptorTable.pDescriptorRanges = &srvs;
@@ -1210,7 +1231,7 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     state.pipeline = std::move(candidate); state.rootSignature = std::move(rootCandidate);
     ++state.pipelineRevision;
     state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
-    state.denoiseHistoryValid = false; state.previousViewProjection.fill(0.0f);
+    state.denoiseHistoryValid = false; state.restirHistoryValid = false; state.previousViewProjection.fill(0.0f);
     state.indirectReady = false;
     state.giStatus.accumulatedSamples = 0;
     state.giStatus.effective = GlobalIlluminationMethod::Disabled;
@@ -1236,6 +1257,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         // synchronization fails. The next safe render must start from scratch.
         state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
         state.denoiseHistoryValid = false;
+        state.restirHistoryValid = false;
         // Uploads/acceleration structures may already have changed before a
         // later failure. Rebuild their identities on a safe retry as well.
         state.positionHash = state.triangleHash = state.normalHash = state.uvVertexHash = state.uvTriangleHash = 0;
@@ -1356,6 +1378,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         const std::uint32_t denoiseMode = frame.globalIllumination.denoiser == GlobalIlluminationDenoiser::Off ? 0u
             : frame.globalIllumination.denoiser == GlobalIlluminationDenoiser::Spatial ? 1u : 2u;
         const bool temporalDenoise = realtimeLit && denoiseMode == 2;
+        const bool restirIndirectCopy = realtimeLit &&
+            frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir &&
+            frame.globalIllumination.restirIndirect;
         // Camera pose is deliberately excluded from the temporal-history key so
         // reprojection can reuse history across camera motion; geometry,
         // lighting, materials and projection changes still reset it.
@@ -1399,6 +1424,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             restirPacked = std::clamp(frame.globalIllumination.restirCandidates, 1u, kGiMaxRestirCandidates);
             if (frame.globalIllumination.restirDirect) restirPacked += 100u;
             if (frame.globalIllumination.restirIndirect) restirPacked += 1000u;
+            if (state.restirHistoryValid) restirPacked += 10000u;
         }
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
@@ -1450,7 +1476,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.list->SetComputeRootShaderResourceView(8, state.uvTriangleData->GetGPUVirtualAddress());
         state.list->SetComputeRootConstantBufferView(9, state.constants->GetGPUVirtualAddress() + denoiseOffset);
         const auto historySrvOffset = static_cast<UINT64>(state.device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 8;
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 9;
         auto historyTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
         historyTable.ptr += historySrvOffset;
         state.list->SetComputeRootDescriptorTable(10, historyTable);
@@ -1494,6 +1520,28 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             historyTransition(historyBarriers[3], state.historyGeometryRead.Get(),
                 D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             state.list->ResourceBarrier(4, historyBarriers);
+        }
+        if (restirIndirectCopy) {
+            const auto transitionReservoir = [](D3D12_RESOURCE_BARRIER& barrier, ID3D12Resource* resource,
+                D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = resource;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                barrier.Transition.StateBefore = before;
+                barrier.Transition.StateAfter = after;
+            };
+            D3D12_RESOURCE_BARRIER reservoirBarriers[2]{};
+            transitionReservoir(reservoirBarriers[0], state.restirReservoirWrite.Get(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transitionReservoir(reservoirBarriers[1], state.restirReservoirRead.Get(),
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            state.list->ResourceBarrier(2, reservoirBarriers);
+            state.list->CopyResource(state.restirReservoirRead.Get(), state.restirReservoirWrite.Get());
+            transitionReservoir(reservoirBarriers[0], state.restirReservoirWrite.Get(),
+                D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transitionReservoir(reservoirBarriers[1], state.restirReservoirRead.Get(),
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            state.list->ResourceBarrier(2, reservoirBarriers);
         }
         for (auto& barrier : transitions)
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
@@ -1562,6 +1610,10 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.previousViewProjection = currentViewProjection;
         state.denoiseKey = nextDenoiseKey;
         state.denoiseHistoryValid = temporalDenoise;
+        state.restirKey = nextDenoiseKey;
+        state.restirHistoryValid = realtimeLit &&
+            frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir &&
+            frame.globalIllumination.restirIndirect;
         if (realtimeLit)
             state.message += std::string(" Denoiser: ") + (denoiseMode == 2 ? "temporal+spatial" :
                 denoiseMode == 1 ? "spatial" : "off") + ".";

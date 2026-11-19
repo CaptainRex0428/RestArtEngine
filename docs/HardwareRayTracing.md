@@ -73,6 +73,7 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | t11 | 仅有 UV 三角形的 uint4：三个 UV 顶点索引与通道存在 mask。 |
 | t12 | 上一帧间接光历史（RGBA16_FLOAT）。 |
 | t13 | 上一帧主表面几何历史：法线与射线距离（RGBA32_FLOAT）。 |
+| t14 | ReSTIR 上一帧间接 reservoir 估计（RGBA32_FLOAT；w=0 表示无历史）。 |
 | u0 | RGBA8 硬件输出。 |
 | u1 | 非共享 RGBA32_FLOAT 线性 HDR 样本均值。 |
 | u2 | 非共享 RGBA32_FLOAT 主表面法线与射线距离引导。 |
@@ -81,8 +82,9 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | u5 | 时域重建间接光写入历史（RGBA16_FLOAT）。 |
 | u6 | 时域重建几何写入历史（RGBA32_FLOAT）。 |
 | u7 | 主表面上一帧世界位置（RGBA32_FLOAT；w=0 表示背景），用于逐物体重投影。 |
+| u8 | 当前帧 ReSTIR 间接 reservoir 写入（RGBA32_FLOAT）。 |
 
-DX11 光照入口另使用 b6 的 16 字节 `GlobalIlluminationConstants` 和 t9 的共享间接光 SRV。实时采样完成后执行独立解析 Dispatch，使空间滤波只读取已完成的历史与引导；UAV barrier 及共享 fence 保护阶段和 API 之间的依赖。`Temporal + spatial` 在同一解析 Dispatch 内用上一帧 ViewProjection 与 u7 的主表面上一帧世界位置做相机/逐物体重投影，读取 t12/t13，写 u3 与 u5/u6，随后在 DXR 队列内 `CopyResource` 到固定读取历史，避免每帧换 descriptor；重建历史键不包含相机位姿和 Actor 世界矩阵，拓扑／材质／光照变化才重置。
+DX11 光照入口另使用 b6 的 16 字节 `GlobalIlluminationConstants` 和 t9 的共享间接光 SRV。实时采样完成后执行独立解析 Dispatch，使空间滤波只读取已完成的历史与引导；UAV barrier 及共享 fence 保护阶段和 API 之间的依赖。`Temporal + spatial` 在同一解析 Dispatch 内用上一帧 ViewProjection 与 u7 的主表面上一帧世界位置做相机/逐物体重投影，读取 t12/t13，写 u3 与 u5/u6，随后在 DXR 队列内 `CopyResource` 到固定读取历史，避免每帧换 descriptor；重建历史键不包含相机位姿和 Actor 世界矩阵，拓扑／材质／光照变化才重置。ReSTIR 间接 reservoir 使用 t14 读取上一帧估计、u8 写入当前估计，trace pass 后用同一 `CopyResource` 模式回读；直接光 reservoir 仅当前帧空间采样。
 
 开启硬件模式时，Shader Apply／Reload 将全部光栅阶段与硬件计算管线视为一次候选，编译、反射或管线创建失败保留上一版。关闭硬件模式时，合法像素 Shader 材质仍可使用 `ddx`／`ddy`／`fwidth`；若该源码不兼容计算 Shader，光栅更新正常生效，硬件管线被明确标为不可用，不能使用旧硬件源码渲染新材质。修复并重新 Apply 后恢复。运行时数值和材质草稿不重新编译 Shader。
 

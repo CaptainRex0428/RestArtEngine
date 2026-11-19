@@ -28,8 +28,10 @@ cbuffer DenoiseConstants : register(b8)
 };
 Texture2D<float4> denoisePreviousIndirect : register(t12);
 Texture2D<float4> denoisePreviousGeometry : register(t13);
+Texture2D<float4> restirPreviousReservoir : register(t14);
 RWTexture2D<float4> denoiseHistoryIndirect : register(u5);
 RWTexture2D<float4> denoiseHistoryGeometry : register(u6);
+RWTexture2D<float4> restirReservoir : register(u8);
 
 float3 RealtimePosition(uint2 pixel, float distance)
 {
@@ -171,8 +173,10 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
             uint restirPacked = (uint)traceOptions.w;
             uint restirCandidates = min(restirPacked % 100u, 16u);
             bool restirIndirect = realtime && ((restirPacked / 1000u) % 10u) > 0u;
+            bool restirHistory = ((restirPacked / 10000u) % 10u) > 0u;
             uint effectiveSamples = batchSamples;
             float3 batchMean = 0.0;
+            float3 reservoirPreviousPosition = 0.0;
             if (restirIndirect && restirCandidates > 0u)
             {
                 // Weighted-reservoir sampling over several indirect path
@@ -193,6 +197,7 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
                         primaryGeometry[thread.xy] = geometry;
                         primaryMaterial[thread.xy] = material;
                         primaryPreviousPosition[thread.xy] = float4(previousPosition, 1.0);
+                        reservoirPreviousPosition = previousPosition;
                     }
                     float weight = dot(sample, float3(0.2126, 0.7152, 0.0722));
                     totalWeight += weight;
@@ -206,6 +211,22 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
                 }
                 batchMean = selectedWeight > 0.0
                     ? selected * (totalWeight / (selectedWeight * float(restirCandidates))) : 0.0;
+                if (restirHistory)
+                {
+                    float4 clip = mul(float4(reservoirPreviousPosition, 1.0), denoisePreviousViewProjection);
+                    if (clip.w > 0.0001)
+                    {
+                        float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+                        if (all(uv > 0.0) && all(uv < 1.0))
+                        {
+                            float4 previousReservoir = restirPreviousReservoir.Load(
+                                int3(int2(uv * float2(outputInfo.xy)), 0));
+                            if (previousReservoir.w > 0.0)
+                                batchMean = lerp(previousReservoir.rgb, batchMean, 0.2);
+                        }
+                    }
+                }
+                restirReservoir[thread.xy] = float4(batchMean, 1.0);
             }
             else
             {
