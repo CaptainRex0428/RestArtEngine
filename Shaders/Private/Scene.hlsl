@@ -446,15 +446,27 @@ float ShadowMapVisibility(float3 position, float3 normal)
     float2 texel = float2(shadowParameters.x, shadowParameters.x);
     float depth = shadowNdc.z - shadowParameters.y;
     // shadowParameters.w selects the raster filter: 0 is the default 2x2
-    // PCF, 1 is a single hard comparison, 2 is a 3x3 PCF kernel, and 3 is
-    // PCSS. Keeping the filter in the existing constant buffer lets Forward
-    // and Deferred share the same shadow-map pass and makes the mode switch
-    // inexpensive.
+    // PCF, 1 is a single hard comparison, 2 is a 3x3 PCF kernel, 3 is
+    // PCSS, 4 marks the two-cascade path (which uses the 2x2 kernel) and 5
+    // is the 4x4 soft PCF kernel. Keeping the filter in the existing
+    // constant buffer lets Forward and Deferred share the same shadow-map
+    // pass and makes the mode switch inexpensive.
     if (shadowParameters.w > 2.5 && shadowParameters.w < 3.5)
         return ShadowMapPCSSVisibility(uv, depth, texel, cascade);
     if (shadowParameters.w > 0.5 && shadowParameters.w < 1.5)
         return shadowMap.SampleCmpLevelZero(shadowSampler, float3(uv, cascade), depth);
     float visibility = 0.0;
+    if (shadowParameters.w > 4.5 && shadowParameters.w < 5.5)
+    {
+        // Deterministic 4x4 grid. Each comparison is already bilinear (2x2
+        // hardware PCF), so the effective footprint is eight texels wide;
+        // fixed offsets avoid temporal shimmer on still shadows.
+        [unroll] for (int y = 0; y < 4; ++y)
+            [unroll] for (int x = 0; x < 4; ++x)
+                visibility += shadowMap.SampleCmpLevelZero(shadowSampler,
+                    float3(uv + texel * float2(x - 1.5, y - 1.5), cascade), depth);
+        return visibility / 16.0;
+    }
     if (shadowParameters.w > 1.5 && shadowParameters.w < 2.5)
     {
         // The fixed loop bounds compile to nine taps on the D3D11 shader

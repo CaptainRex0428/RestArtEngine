@@ -33,6 +33,7 @@ enum class ShadowMethod {
     Disabled,
     ShadowMapHard,
     ShadowMapPCF9,
+    ShadowMapPCF16,
     ShadowMapPCSS,
     ShadowMapCSM2,
     GTAO,

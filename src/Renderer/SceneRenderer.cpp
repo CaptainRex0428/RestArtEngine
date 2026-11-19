@@ -546,7 +546,10 @@ struct SceneRenderer::Impl {
     ComPtr<ID3D11RasterizerState> rasterizer;
     ComPtr<ID3D11DepthStencilState> depthDisabled;
     ComPtr<ID3D11SamplerState> sampler, shadowSampler;
-    static constexpr UINT shadowMapSize = 2048;
+    // Doubled from the original 2048 so a texel covers half the world distance;
+    // combined with the 4x4 PCF option this removes the hard stair-step edges
+    // that survived the old 2x2 kernel. Two cascades cost ~128 MiB of depth.
+    static constexpr UINT shadowMapSize = 4096;
     static constexpr UINT shadowCascadeCount = 2;
     std::uint32_t width = 0, height = 0;
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
@@ -1773,6 +1776,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const float shadowFilter = settings.shadowMethod == ShadowMethod::ShadowMapHard ? 1.0f :
         settings.shadowMethod == ShadowMethod::ShadowMapPCF9 ? 2.0f :
         settings.shadowMethod == ShadowMethod::ShadowMapPCSS ? 3.0f :
+        settings.shadowMethod == ShadowMethod::ShadowMapPCF16 ? 5.0f :
         useCsm ? 4.0f : 0.0f;
     shadowData.parameters = XMFLOAT4(1.0f / static_cast<float>(Impl::shadowMapSize), 0.0015f, 0.008f, shadowFilter);
     const float shadowFeature = settings.shadowMethod == ShadowMethod::GTAO ? 1.0f :

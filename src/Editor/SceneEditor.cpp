@@ -1577,10 +1577,10 @@ void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
     ImGui::TextDisabled("Ray tracing: all mesh actors");
     ImGui::Text("Shadow method");
     int shadowMethod = static_cast<int>(settings.shadowMethod);
-    shadowMethod = std::clamp(shadowMethod, 0, 8);
+    shadowMethod = std::clamp(shadowMethod, 0, 9);
     ImGui::SetNextItemWidth(-1);
     if (ImGui::Combo("##shadowMethod", &shadowMethod,
-        "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
+        "Shadow map (2x2 PCF)\0Analytic rays (all mesh actors)\0Disabled\0Shadow map (hard)\0Shadow map (3x3 PCF)\0Shadow map (4x4 PCF soft)\0Shadow map (PCSS soft)\0Shadow map (2-cascade CSM)\0GTAO (deferred ambient occlusion)\0Contact shadow (deferred screen space)\0")) {
         settings.shadowMethod = static_cast<renderer::ShadowMethod>(shadowMethod);
     }
     if (settings.shadowMethod == renderer::ShadowMethod::ShadowMap)
@@ -1589,6 +1589,8 @@ void SceneEditor::drawSceneLighting(renderer::SceneSettings& settings) {
         ImGui::TextWrapped("Raster shadow map with one comparison sample for the sharpest edge.");
     else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF9)
         ImGui::TextWrapped("Raster shadow map with a 3x3 PCF filter for softer edges.");
+    else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCF16)
+        ImGui::TextWrapped("Raster shadow map with a 4x4 PCF filter at 4096 square texels; the default for smooth shadow edges.");
     else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapPCSS)
         ImGui::TextWrapped("Raster shadow map with blocker search and percentage-closer soft shadows.");
     else if (settings.shadowMethod == renderer::ShadowMethod::ShadowMapCSM2)

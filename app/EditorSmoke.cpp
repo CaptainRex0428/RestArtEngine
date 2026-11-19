@@ -1189,6 +1189,10 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     capture("deferred_shadows_map");
     require(contents(output / "deferred_shadows_disabled.bmp") != contents(output / "deferred_shadows_map.bmp"),
         "Deferred Shadow Map mode did not change the direct-light result.");
+    settings.shadowMethod = renderer::ShadowMethod::ShadowMapPCF16;
+    capture("deferred_shadows_pcf16");
+    require(contents(output / "deferred_shadows_disabled.bmp") != contents(output / "deferred_shadows_pcf16.bmp"),
+        "Deferred 4x4 PCF shadow mode did not change the direct-light result.");
     settings.shadowMethod = renderer::ShadowMethod::ShadowMapPCSS;
     capture("deferred_shadows_pcss");
     require(contents(output / "deferred_shadows_disabled.bmp") != contents(output / "deferred_shadows_pcss.bmp"),

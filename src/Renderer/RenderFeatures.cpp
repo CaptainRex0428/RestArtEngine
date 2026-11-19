@@ -11,6 +11,7 @@ const char* toString(RenderFeature feature) noexcept {
     case RenderFeature::ShadowMapPCF: return "Shadow map (2x2 PCF)";
     case RenderFeature::ShadowMapHard: return "Shadow map (hard)";
     case RenderFeature::ShadowMapPCF9: return "Shadow map (3x3 PCF)";
+    case RenderFeature::ShadowMapPCF16: return "Shadow map (4x4 PCF)";
     case RenderFeature::ShadowMapPCSS: return "Shadow map (PCSS)";
     case RenderFeature::ShadowMapCSM2: return "Shadow map (2-cascade CSM)";
     case RenderFeature::AmbientOcclusionGTAO: return "GTAO";
@@ -86,6 +87,7 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
     case ShadowMethod::ShadowMap: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapPCF; break;
     case ShadowMethod::ShadowMapHard: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapHard; break;
     case ShadowMethod::ShadowMapPCF9: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapPCF9; break;
+    case ShadowMethod::ShadowMapPCF16: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapPCF16; break;
     case ShadowMethod::ShadowMapPCSS: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapPCSS; break;
     case ShadowMethod::ShadowMapCSM2: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapCSM2; break;
     case ShadowMethod::GTAO: rasterShadowMap = true; rasterVariant = RenderFeature::ShadowMapPCF; break;

@@ -55,7 +55,7 @@ struct SceneSettings {
     // Conservative per-mesh bounds culling for each raster camera/light view.
     // Never removes offscreen reflection/GI contributors from the DXR scene.
     bool frustumCulling = true;
-    ShadowMethod shadowMethod = ShadowMethod::ShadowMap;
+    ShadowMethod shadowMethod = ShadowMethod::ShadowMapPCF16;
     // Analytic GPU ray tracing for every visible MeshAsset (exact built-in
     // intersections plus structured mesh triangles), not hardware DXR.
     bool rayTracing = false;
