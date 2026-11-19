@@ -221,7 +221,7 @@ F11 全屏由 `MinimalApp` 管理 Win32 窗口样式、位置及 UI 显示状态
 
 前向和延迟两条路径共享材质表达。延迟路径写入三个 G-buffer：Albedo / Roughness、World Normal / Metallic、World Position / Coverage，再进行光照。Lit、Unlit 和调试视图均从该基础上工作。
 
-光照深度图支持 2x2 PCF、单点硬比较、3x3 PCF、PCSS 软阴影和两级 CSM。PCSS 在阴影深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享 RHI 绘制和切换入口。
+光照深度图使用 4096² 分辨率，支持 2x2 PCF、单点硬比较、3x3 PCF、4x4 PCF（默认，16 次双线性比较、约 8×8 texel 覆盖）、PCSS 软阴影和两级 CSM。PCSS 在阴影深度图上先搜索 blocker，再按估计半影半径执行比较采样；CSM 将两个相机距离切片渲染到 Texture2DArray，并在延迟光照中按距离选择切片。GTAO 使用 Deferred G-buffer 的世界位置/法线做屏幕空间环境遮蔽，Deferred Contact Shadow 沿光线方向在位置缓冲中做短距离步进；前向路径对这两种模式使用普通深度阴影回退。这些模式共享 RHI 绘制和切换入口。
 
 渲染器为工具窗口提供离屏预览：`SceneSettings::offscreenTarget` 把绘制定向到场景目标而不是交换链，`renderMaterialPreview` 用临时单球场景渲染工具预览并复制到独立纹理供材质编辑器显示（支持轨道相机参数），`Asset Details` 复用同一预览目标渲染网格/材质大图，场景与未知文件回退到缩略图；`renderScenePreview` 用场景包围盒自动取景渲染真实场景缩略图，通过带 renderer 的保存路径写到同目录 `<scene>.rthumb`（普通 Save Scene／Ctrl+S 不刷新），Content 浏览器优先读它、缺失时回退 CPU 布局图。启动流程分两个窗口：无边框加载窗口（主屏 28% 宽、按 `load.png` 比例、居中）只承载加载页，加载完成后销毁；后续准备窗口先保持同一无边框小窗口的大小、比例和居中位置，GPU 场景资源准备完毕后再隐藏并切换到主屏 80% 大小的常规编辑器框架；在完整目标尺寸建立 Dock 布局并呈现首帧后才显示编辑器，加载图不在大窗口中绘制。两者共用当前后端的 D3D11 或 D3D12 设备与已编译管线，`SceneRenderer::attachWindow` 只为新窗口重建交换链与窗口尺寸相关的渲染目标；加载图片、UI 及 swapchain 在旧 HWND 销毁前按 GPU 生命周期顺序释放。自测仍使用固定 1440×900 单窗口以保证截图可比。
 
