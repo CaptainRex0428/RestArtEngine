@@ -2167,6 +2167,8 @@ void SceneEditor::activateAsset(const assets::AssetEntry& entry) {
 
 void SceneEditor::showAssetDetails(std::string relativePath) {
     assetDetailsMeshValid_ = false;
+    assetDetailsMeshSlotsDirty_ = false;
+    assetDetailsPreviewYaw_ = assetDetailsPreviewYawCached_ = 0.65f; assetDetailsPreviewPitch_ = assetDetailsPreviewPitchCached_ = 0.32f; assetDetailsPreviewZoom_ = assetDetailsPreviewZoomCached_ = 1.0f;
     if (relativePath.empty()) { closeAssetDetails(); return; }
     assetDetailsError_.clear();
     assetDetailsPath_ = std::move(relativePath);
@@ -2177,6 +2179,8 @@ void SceneEditor::showAssetDetails(std::string relativePath) {
 
 void SceneEditor::openAssetDetails(const assets::AssetEntry& entry) {
     assetDetailsMeshValid_ = false;
+    assetDetailsMeshSlotsDirty_ = false;
+    assetDetailsPreviewYaw_ = assetDetailsPreviewYawCached_ = 0.65f; assetDetailsPreviewPitch_ = assetDetailsPreviewPitchCached_ = 0.32f; assetDetailsPreviewZoom_ = assetDetailsPreviewZoomCached_ = 1.0f;
     assetDetailsError_.clear();
     assetDetailsPath_ = entry.relativePath;
     assetDetailsOpen_ = true;
@@ -2194,10 +2198,11 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
     }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const auto* inspectedMesh = entry->type == assets::AssetType::Mesh ? assets_.findMesh(entry->id) : nullptr;
-    const bool meshAttributes = inspectedMesh && (!inspectedMesh->materialSlots.empty() || inspectedMesh->uvChannelMask());
+    const bool meshAttributes = inspectedMesh != nullptr;
     const ImVec2 preferredSize{std::min(meshAttributes ? 700.0f : 560.0f, std::max(320.0f, viewport->WorkSize.x - 32.0f)),
-        std::min(meshAttributes ? 600.0f : 330.0f, std::max(240.0f, viewport->WorkSize.y - 32.0f))};
+        std::min(meshAttributes ? 720.0f : 330.0f, std::max(240.0f, viewport->WorkSize.y - 32.0f))};
     ImGui::SetNextWindowSize(preferredSize, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints({560.0f, 400.0f}, {FLT_MAX, FLT_MAX});
     if (assetDetailsFocusRequested_) {
         // This shared window may previously have inspected a small material.
         // Fit an attributed mesh once on open, then respect manual resizing.
@@ -2265,17 +2270,46 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
                 assetDetailsMaterialGrid_ != grid || assetDetailsMaterialTwoSided_ != twoSided ||
                 assetDetailsMaterialCullFront_ != cullFront || assetDetailsMaterialDepthWrite_ != depthWrite ||
                 assetDetailsMaterialDepthTest_ != depthTest || assetDetailsSlotMaterials_ != slotMaterials ||
+                assetDetailsPreviewYawCached_ != assetDetailsPreviewYaw_ ||
+                assetDetailsPreviewPitchCached_ != assetDetailsPreviewPitch_ ||
+                assetDetailsPreviewZoomCached_ != assetDetailsPreviewZoom_ ||
                 !renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 scene::World previewWorld;
                 previewWorld.createActor(mesh->name, mesh->id, assets::EngineDefaultMaterialId);
                 assetDetailsMeshValid_ = renderer.renderScenePreview(previewWorld, assets_,
-                    static_cast<std::uint32_t>(previewSize), assetDetailsError_, renderer::PreviewSlot::AssetDetails);
+                    static_cast<std::uint32_t>(previewSize), assetDetailsError_,
+                    renderer::PreviewSlot::AssetDetails, assetDetailsPreviewYaw_,
+                    assetDetailsPreviewPitch_, assetDetailsPreviewZoom_);
                 assetDetailsMeshId_ = mesh->id; assetDetailsMeshKey_ = key;
                 assetDetailsShaderRevision_ = renderer.shaderRevision(); assetDetailsMaterialValues_ = values;
                 assetDetailsMaterialGrid_ = grid; assetDetailsMaterialTwoSided_ = twoSided;
                 assetDetailsMaterialCullFront_ = cullFront; assetDetailsMaterialDepthWrite_ = depthWrite;
                 assetDetailsMaterialDepthTest_ = depthTest;
                 assetDetailsSlotMaterials_ = std::move(slotMaterials);
+                assetDetailsPreviewYawCached_ = assetDetailsPreviewYaw_;
+                assetDetailsPreviewPitchCached_ = assetDetailsPreviewPitch_;
+                assetDetailsPreviewZoomCached_ = assetDetailsPreviewZoom_;
+            }
+            // Orbit around the mesh bounds centre. The renderer keeps the target
+            // fixed, so drag/wheel never moves the object out of frame.
+            const ImVec2 previewMin = previewOrigin;
+            const ImVec2 previewMax{previewOrigin.x + previewSize, previewOrigin.y + previewSize};
+            if (ImGui::IsMouseHoveringRect(previewMin, previewMax, false)) {
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    const ImVec2 delta = ImGui::GetIO().MouseDelta;
+                    assetDetailsPreviewYaw_ -= delta.x * 0.01f;
+                    assetDetailsPreviewPitch_ = std::clamp(
+                        assetDetailsPreviewPitch_ + delta.y * 0.01f, -1.3f, 1.3f);
+                }
+                if (const float wheel = ImGui::GetIO().MouseWheel; wheel != 0.0f)
+                    assetDetailsPreviewZoom_ = std::clamp(
+                        assetDetailsPreviewZoom_ * (1.0f - wheel * 0.1f), 0.4f, 3.0f);
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    assetDetailsPreviewYaw_ = 0.65f;
+                    assetDetailsPreviewPitch_ = 0.32f;
+                    assetDetailsPreviewZoom_ = 1.0f;
+                }
+                ImGui::SetTooltip("Drag to orbit, wheel to zoom, double-click to reset.");
             }
             if (auto* texture = renderer.previewTexture(renderer::PreviewSlot::AssetDetails)) {
                 draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture)),
@@ -2310,18 +2344,86 @@ void SceneEditor::drawAssetDetails(renderer::SceneRenderer& renderer) {
     ImGui::Text("Size: %s", sizeLabel(entry->sizeBytes, sizeBuffer, sizeof(sizeBuffer)));
 
     if (entry->type == assets::AssetType::Mesh) {
-        if (const auto* mesh = assets_.findMesh(entry->id)) {
+        if (auto* mesh = assets_.findMesh(entry->id)) {
             ImGui::TextDisabled("Geometry");
             ImGui::Text("%zu vertices / %zu triangles", mesh->vertices.size(), mesh->indices.size() / 3);
-            ImGui::Text("Material slots: %zu", mesh->materialSlotCount());
-            for (std::size_t slot = 0; slot < mesh->materialSlots.size(); ++slot)
-                ImGui::TextWrapped("  %zu: %s", slot, mesh->materialSlots[slot].name.c_str());
-            if (!mesh->uvChannelMask()) ImGui::TextDisabled("UV channels: none");
-            for (std::size_t channel = 0; channel < assets::MaxMeshUvChannels; ++channel)
+            const std::size_t displayedSlots = mesh->materialSlots.empty() ? 1 : mesh->materialSlots.size();
+            ImGui::Text("Material slots: %zu", displayedSlots);
+            ImGui::TextDisabled("Slot materials (actors inherit these defaults):");
+            const bool editableSlotMaterials = !entry->readOnly();
+            if (!editableSlotMaterials)
+                ImGui::TextDisabled("Engine Content slot materials are read-only.");
+            const auto setSlotMaterial = [&](std::size_t slot, assets::AssetId id) {
+                if (!editableSlotMaterials) return;
+                if (mesh->materialSlots.empty()) mesh->materialSlots.push_back({});
+                auto& target = mesh->materialSlots[slot];
+                if (target.name.empty()) target.name = "Default";
+                if (target.sourceKey.empty()) target.sourceKey = target.name;
+                target.defaultMaterialId = id;
+                assetDetailsMeshSlotsDirty_ = true;
+                assetDetailsMeshValid_ = false;
+            };
+            ImGui::BeginDisabled(!editableSlotMaterials);
+            for (std::size_t slot = 0; slot < displayedSlots; ++slot) {
+                const assets::AssetId sourceId = mesh->materialSlots.empty()
+                    ? assets::EngineDefaultMaterialId : mesh->materialSlots[slot].defaultMaterialId;
+                const auto resolved = sourceId ? sourceId : assets::EngineDefaultMaterialId;
+                const auto* bound = assets_.findMaterial(resolved);
+                const char* current = sourceId == 0
+                    ? "Actor fallback" : (bound ? bound->name.c_str() : "<missing material>");
+                const std::string slotName = mesh->materialSlots.empty()
+                    ? "Default (whole mesh)" : (mesh->materialSlots[slot].name.empty()
+                        ? "Unnamed" : mesh->materialSlots[slot].name);
+                ImGui::PushID(static_cast<int>(slot));
+                ImGui::TextDisabled("%zu: %s", slot, slotName.c_str());
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##slot-material", current)) {
+                    if (ImGui::Selectable("Actor fallback", sourceId == 0)) setSlotMaterial(slot, 0);
+                    for (const auto& material : assets_.materials) {
+                        if (material.id == 0) continue;
+                        ImGui::PushID(static_cast<int>(material.id));
+                        if (ImGui::Selectable(material.name.c_str(), sourceId == material.id))
+                            setSlotMaterial(slot, material.id);
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopID();
+            }
+            if (assetDetailsMeshSlotsDirty_)
+                ImGui::TextDisabled("Slot materials changed; saving rewrites the mesh container (large meshes may pause).");
+            ImGui::BeginDisabled(!assetDetailsMeshSlotsDirty_);
+            if (ImGui::Button("Save slot materials")) {
+                // refreshContent() rebuilds the registry and asset library, so the
+                // entry/mesh pointers must not be used after it.
+                const auto savedId = entry->id;
+                const auto savedPath = entry->relativePath;
+                const auto path = project_.contentRoot / std::filesystem::path(savedPath);
+                assets::Thumbnail thumbnail;
+                std::string thumbnailError;
+                (void)assets::readAssetThumbnail(path, thumbnail, thumbnailError);
+                auto file = assets::makeMeshAssetFile(*mesh);
+                assets::attachThumbnail(file, thumbnail);
+                std::string saveError;
+                if (assets::writeAssetFile(path, file, saveError)) {
+                    assetDetailsMeshSlotsDirty_ = false;
+                    assetDetailsMeshValid_ = false;
+                    status_ = "Saved mesh slot materials: " + pathText(path);
+                    refreshContent();
+                    mesh = assets_.findMesh(savedId);
+                } else {
+                    status_ = "Mesh slot save failed: " + saveError;
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            if (mesh && !mesh->uvChannelMask()) ImGui::TextDisabled("UV channels: none");
+            if (mesh) for (std::size_t channel = 0; channel < assets::MaxMeshUvChannels; ++channel)
                 if (!mesh->uvChannels[channel].empty())
                     ImGui::TextWrapped("UV%zu: %s (%zu vertices)", channel,
                         mesh->uvNames[channel].empty() ? "Unnamed" : mesh->uvNames[channel].c_str(), mesh->uvChannels[channel].size());
-            if (!mesh->sourcePath.empty()) ImGui::TextWrapped("Source file: %s", mesh->sourcePath.c_str());
+            if (mesh && !mesh->sourcePath.empty()) ImGui::TextWrapped("Source file: %s", mesh->sourcePath.c_str());
         }
     } else if (entry->type == assets::AssetType::Material) {
         if (const auto* material = assets_.findMaterial(entry->id)) {

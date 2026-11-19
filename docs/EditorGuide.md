@@ -271,6 +271,8 @@ Apply 编译当前在内存里的编辑内容，外部编辑器保存的内容�
 
 材质球使用所选材质的实际 ID。材质窗口、Asset Details 和场景缩略图分别保留 GPU 纹理，同帧打开或调整其他预览尺寸不会覆盖已有图像。场景取景距离仍有上限，大型场景不保证完整入镜；普通保存不一定刷新场景 sidecar，具体边界见 [AssetFormat](AssetFormat.md#当前使用限制)。
 
+Asset Details 打开网格时，预览可拖拽环绕、滚轮缩放、双击复位；相机目标固定为网格包围盒中心，缩放不会把物体移出画面。预览下方列出网格声明的材质 Slot（含名称与当前默认材质），可为每个 Slot 选择 Actor fallback 或工程／引擎材质，再点 **Save slot materials** 写回该网格的 `.rasset`（会重写容器并保留缩略图；大型网格可能停顿）。Engine Content 网格只读，只能查看分配。新增或删除 Slot 需要的三角形区间重划分仍属于导入／几何编辑，不在本窗口内。
+
 场景 GPU 缩略图只在带 renderer 的保存路径（如 `Save All`）刷新；普通 `Save Scene`／Ctrl+S 不刷新 sidecar。资产加载与移动限制见 [AssetFormat.md](AssetFormat.md)。
 
 ## 预览与验证

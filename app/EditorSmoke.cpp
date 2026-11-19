@@ -479,6 +479,7 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
     std::string error;
     ImGuiContext* context = nullptr;
     std::string renderedUiText;
+    SmokeInput input;
     bool smokeMainSurfaceVisible = true;
     const auto capture = [&](const char* name, bool drawEditor = false, bool recordUiText = false,
                              bool useMaterialPreview = true, bool useOutline = true) {
@@ -620,9 +621,65 @@ void runEditorSmoke(rae::renderer::SceneRenderer& renderer, rae::imgui::ImGuiLay
             // Double-click equivalent: the asset details window previews the file.
             editor.showAssetDetails("engine://Meshes/Sphere.rasset");
             capture("asset_details_mesh_preroll", true);
-            capture("asset_details_mesh", true);
+            capture("asset_details_mesh", true, true);
             { ImGuiContextScope active(context); require(ImGui::FindWindowByName("Asset Details - Sphere###AssetDetails") != nullptr,
                 "The asset details window did not open for a mesh asset."); }
+            require(renderedUiText.find("Slot materials") != std::string::npos,
+                "Asset Details did not show material slot assignments for the mesh.");
+            {
+                // The orbit preview must keep the mesh as its target and change
+                // pixels when the yaw changes; this exercises the renderer camera
+                // path used by the drag interaction in the details window.
+                const auto* sphere = editor.assetRegistry().find("engine://Meshes/Sphere.rasset");
+                assets::AssetId sphereId = sphere ? sphere->id : 0;
+                if (!sphereId)
+                    for (const auto& mesh : editor.assets().meshes) if (mesh.name == "Sphere") sphereId = mesh.id;
+                require(sphereId != 0, "The engine Sphere mesh is not registered.");
+                scene::World orbitWorld;
+                orbitWorld.createActor("Orbit Sphere", sphereId, assets::EngineDefaultMaterialId);
+                std::string orbitError;
+                require(renderer.renderScenePreview(orbitWorld, editor.assets(), 64, orbitError,
+                    renderer::PreviewSlot::AssetDetails, 0.65f, 0.32f, 1.0f), orbitError);
+                std::vector<std::uint8_t> orbitA, orbitB;
+                std::uint32_t orbitWidth = 0, orbitHeight = 0;
+                require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, orbitA, orbitWidth, orbitHeight, orbitError), orbitError);
+                require(renderer.renderScenePreview(orbitWorld, editor.assets(), 64, orbitError,
+                    renderer::PreviewSlot::AssetDetails, 1.85f, 0.32f, 1.0f), orbitError);
+                require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, orbitB, orbitWidth, orbitHeight, orbitError), orbitError);
+                require(orbitA != orbitB, "Orbiting the Asset Details mesh preview did not change pixels.");
+            }
+            {
+                // Real input path: drag inside the Asset Details preview rect and
+                // require the editor's orbit camera to redraw the preview. The
+                // preview origin is the window content cursor, so the upper-left
+                // quadrant of the details window is a safe hit area.
+                ImGuiWindow* details = nullptr;
+                { ImGuiContextScope active(context);
+                  details = ImGui::FindWindowByName("Asset Details - Sphere###AssetDetails"); }
+                require(details != nullptr, "The asset details window is missing for the orbit drag test.");
+                input.attach(context);
+                std::vector<std::uint8_t> dragBefore, dragAfter;
+                std::uint32_t dragWidth = 0, dragHeight = 0;
+                std::string dragError;
+                require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, dragBefore,
+                    dragWidth, dragHeight, dragError), dragError);
+                input.mouse = ImVec2(details->Pos.x + 60.0f, details->Pos.y + 100.0f);
+                input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, true); };
+                capture("asset_details_mesh_orbit_start", true);
+                input.events = nullptr;
+                const ImVec2 dragStart = input.mouse;
+                for (int step = 1; step <= 4; ++step) {
+                    input.mouse = ImVec2(dragStart.x + step * 12.0f, dragStart.y + step * 5.0f);
+                    capture("asset_details_mesh_orbit", true);
+                }
+                input.events = [](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); };
+                capture("asset_details_mesh_orbit_end", true);
+                input.mouse = ImVec2(-100, -100);
+                require(renderer.readPreviewPixels(renderer::PreviewSlot::AssetDetails, dragAfter,
+                    dragWidth, dragHeight, dragError), dragError);
+                require(dragBefore != dragAfter,
+                    "Dragging inside the Asset Details preview did not orbit the mesh.");
+            }
             editor.showAssetDetails("Scenes/Default.rascene");
             capture("asset_details_scene_preroll", true);
             capture("asset_details_scene", true, true);
@@ -1337,8 +1394,6 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
         renderedUiText.find("Shadow method") != std::string::npos &&
         renderedUiText.find("Ray tracing: all mesh actors") != std::string::npos,
         "Editor viewport does not expose the selectable shadow method control.");
-    SmokeInput input;
-    input.attach(context);
     const auto findWindow = [&](const char* name) {
         for (auto* window : context->Windows)
             if (window->ID == ImHashStr(name)) return window;
@@ -3003,11 +3058,17 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
                 capture("material_slots_many_top", true, true);
                 metadata = metadataWindow();
                 require(metadata && metadata->ScrollMax.y > 100, "A long mesh slot list has no scrollable metadata region.");
-                ImGui::SetScrollY(metadata, metadata->ScrollMax.y);
+                // The first frame reserves the vertical scrollbar, which narrows
+                // wrapped text by one line. Scroll once after that layout settles
+                // so the capture reaches the true end of the list.
                 capture("material_slots_many_scroll_preroll", true);
+                ImGui::SetScrollY(metadata, metadata->ScrollMax.y);
                 capture("material_slots_many_bottom", true, true);
                 require(metadata->Scroll.y > 100 && std::abs(metadata->Scroll.y - metadata->ScrollMax.y) < 1,
-                    "The end of a long mesh slot list could not be reached.");
+                    "The end of a long mesh slot list could not be reached (scroll " +
+                        std::to_string(metadata->Scroll.y) + "/" + std::to_string(metadata->ScrollMax.y) +
+                        ", inner " + std::to_string(metadata->InnerRect.GetHeight()) + ", content " +
+                        std::to_string(metadata->ContentSize.y) + ").");
                 splitMesh->materialSlots = savedSlots;
                 splitMesh->markGeometryModified();
                 editor.closeAssetDetails();

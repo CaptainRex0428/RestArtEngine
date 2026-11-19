@@ -287,6 +287,11 @@ private:
     bool assetDetailsMaterialCullFront_ = false, assetDetailsMaterialDepthWrite_ = true;
     assets::MaterialDepthTest assetDetailsMaterialDepthTest_ = assets::MaterialDepthTest::Less;
     float materialPreviewYaw_ = 0.65f, materialPreviewPitch_ = 0.18f, materialPreviewDistance_ = 3.0f;
+    // Orbit camera for the Asset Details mesh preview; the target is always the
+    // mesh bounds centre, so dragging only changes yaw/pitch and the wheel zoom.
+    float assetDetailsPreviewYaw_ = 0.65f, assetDetailsPreviewPitch_ = 0.32f, assetDetailsPreviewZoom_ = 1.0f;
+    float assetDetailsPreviewYawCached_ = 0.65f, assetDetailsPreviewPitchCached_ = 0.32f, assetDetailsPreviewZoomCached_ = 1.0f;
+    bool assetDetailsMeshSlotsDirty_ = false;
     std::string contentError_;
     scene::World world_;
     ViewportInteraction viewport_;

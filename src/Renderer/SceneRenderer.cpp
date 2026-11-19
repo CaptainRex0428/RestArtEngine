@@ -1494,7 +1494,8 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
 }
 
 bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
-                                       std::uint32_t size, std::string& error, PreviewSlot slot) {
+                                       std::uint32_t size, std::string& error, PreviewSlot slot,
+                                       float yaw, float pitch, float zoom) {
     error.clear();
     float minimum[3] = {1e30f, 1e30f, 1e30f};
     float maximum[3] = {-1e30f, -1e30f, -1e30f};
@@ -1540,9 +1541,9 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
     settings.cameraTarget[0] = (minimum[0] + maximum[0]) * 0.5f;
     settings.cameraTarget[1] = (minimum[1] + maximum[1]) * 0.5f;
     settings.cameraTarget[2] = (minimum[2] + maximum[2]) * 0.5f;
-    settings.cameraYaw = 0.65f;
-    settings.cameraPitch = 0.32f;
-    settings.cameraDistance = std::clamp(radius * 2.6f, 1.5f, 80.0f);
+    settings.cameraYaw = yaw;
+    settings.cameraPitch = std::clamp(pitch, -1.45f, 1.45f);
+    settings.cameraDistance = std::clamp(radius * 2.6f * std::clamp(zoom, 0.35f, 4.0f), 1.5f, 80.0f);
     settings.cameraLens.farClip = std::max(100.0f, settings.cameraDistance*2.0f);
     return renderPreviewFrame(settings, world, assets, nullptr, size, error, slot);
 }

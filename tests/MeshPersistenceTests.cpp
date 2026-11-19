@@ -198,6 +198,26 @@ void invalidGeometryDoesNotOverwrite(const fs::path& root) {
     require(library.saveMeshes(folder, error), "Repaired dirty geometry can retry asset persistence.");
     require(readMesh(path).indices == mesh.indices, "Repaired geometry is readable on disk.");
 }
+void slotMaterialsRoundTrip(const fs::path& root) {
+    MeshAsset mesh = triangle();
+    mesh.indices = {0, 1, 2, 0, 2, 1};
+    mesh.materialSlots = {{"Paint", "paint", 42}, {"Glass", "glass", 0}};
+    mesh.sections = {{0, 3, 0}, {3, 3, 1}};
+    mesh.markGeometryModified();
+    const auto folder = root / "Slots";
+    fs::create_directories(folder);
+    const auto path = folder / "Slotted.rasset";
+    std::string error;
+    auto file = makeMeshAssetFile(mesh);
+    require(writeAssetFile(path, file, error), "Write slotted mesh: " + error);
+    const auto loaded = readMesh(path);
+    require(loaded.materialSlots.size() == 2 &&
+        loaded.materialSlots[0].defaultMaterialId == 42 &&
+        loaded.materialSlots[1].defaultMaterialId == 0 &&
+        loaded.materialSlots[0].sourceKey == "paint" && loaded.sections.size() == 2,
+        "Slot default material ids round-trip through the mesh container.");
+    ++checks;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -205,6 +225,7 @@ int main(int argc, char** argv) {
         TemporaryTree files;
         checksForPersistence(files.root);
         invalidGeometryDoesNotOverwrite(files.root);
+        slotMaterialsRoundTrip(files.root);
         if (argc > 1) benchmark(fs::path(argv[1]), files.root);
         std::cout << "Mesh persistence: " << checks << " checks passed.\n";
         return 0;

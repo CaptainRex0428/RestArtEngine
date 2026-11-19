@@ -172,10 +172,12 @@ public:
                                float yaw, float pitch, float distance, std::string& error,
                                PreviewSlot slot = PreviewSlot::MaterialEditor);
     // Renders the given scene into the preview target with a camera framed to the
-    // visible actors; used to produce scene thumbnails.
+    // visible actors; used for thumbnails and the orbitable mesh preview. The
+    // target remains the bounds centre, so yaw/pitch always orbit the object.
     bool renderScenePreview(const scene::World& world, const assets::AssetLibrary& assets,
                             std::uint32_t size, std::string& error,
-                            PreviewSlot slot = PreviewSlot::SceneThumbnail);
+                            PreviewSlot slot = PreviewSlot::SceneThumbnail,
+                            float yaw = 0.65f, float pitch = 0.32f, float zoom = 1.0f);
     // Borrowed backend-specific ImGui texture ID until replacement/shutdown.
     // Requested size is bounded to the available scene target dimensions.
     [[nodiscard]] void* previewTexture(PreviewSlot slot) const;
