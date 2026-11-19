@@ -22,6 +22,12 @@
 
 导入容错可在 Content → `Import options...` 配置。`Skip degenerate triangles` 默认开启，FBX 零面积三角形跳过并警告；关闭后严格拒绝。选择文件和外部拖入共用设置，并保存为本机编辑器偏好。全部面退化时仍拒绝，源文件保持原样；细节见 [导入选项](Importing.md#导入选项)。
 
+## 工程渲染设置
+
+`Project > Project Settings...` 中，主后端及 native D3D12 回退策略需要保存后重启。窗口底部持续显示未保存待重启、已保存待重启，或改回当前启动设置但尚未保存的撤回提示；关闭再打开窗口不会丢掉待重启状态。照明参数在受支持的当前后端即时更新，不因此要求重启。
+
+硬件光追关闭时联动取消独立反射、独立阴影和 GI；开启时选择默认反射／阴影。选择 Path Tracing 自动开启硬件光追并取消独立反射，选择 Realtime 再取消独立光追阴影；GI 的间接贡献和质量参数保留。Auto／严格 D3D11／当前原生 D3D12 禁用不支持的硬件光追设置；主动选择这些后端会清除对应特性请求。仅打开旧工程或设备能力不足不会自动改写请求。完整生效与降级边界见[主后端说明](RenderBackends.md)。
+
 ## 保存场景初始视角与照明
 
 Scene 面板的 `Store current view` 把当前轨道相机与曝光记录为场景初始视角，`Restore view` 恢复，`Clear opening view` 清除；Save Scene 将其写入场景，普通相机导航不会自动修改这份书签。打开／重新加载场景时自动应用；旧场景没有书签则保持现有视角。
@@ -274,6 +280,8 @@ F11 进入视口全屏：主窗口无边框覆盖所在显示器，隐藏主工�
 F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板；右键拖动视口旋转相机，滚轮缩放；F9 截图。Lit 显示完整光照，Unlit 显示不受光照影响的材质本色并保留曝光和色调映射，Albedo 用于检查不经过曝光和色调映射的基础颜色。Scene 的 Shadow method 可选择 2x2 PCF、硬比较、3x3 PCF、PCSS 软阴影、两级 CSM、GTAO、Deferred Contact Shadow、解析光追或禁用阴影；这些控制光栅直接光；实时 GI 同样沿用这些设置，硬件预览与渐进模式单独控制方向光阴影。PCSS 复用现有深度图并执行 blocker search 与百分比渐进滤波，CSM 使用两个方向光级联切片改善近景和远景的深度分配，GTAO 与接触阴影使用延迟 G-buffer，前向路径回退到普通深度阴影。
 
 `Project → Project Settings...` 打开独立配置窗，左侧 Rendering 导航提供硬件光追总开关、反射和阴影选项。修改实时生效，`Save project settings`／`Save All` 保存到当前工程；未保存配置参与退出提示。设备支持、用户请求和实际生效状态分别显示，不支持时保留请求并说明原因。顶部原 `Ray tracing` 复选框已移除，解析式反射位于配置页的 Compatibility preview，作为会话选项保留。硬件要求、源码和边界见 [硬件光追](HardwareRayTracing.md)。
+
+同页 `Anti-aliasing` 提供 Off、FXAA、TAA，旧工程默认 FXAA。FXAA 在当前图像上平滑边缘，TAA 结合投影抖动与历史帧改善细小轮廓的稳定性。TAA 的 `Current frame weight` 越低越偏向稳定，越高越快响应运动和光照变化；拖动后实时生效。界面显示请求方案、实际方案、TAA 历史帧数及降级原因，保存与其他工程渲染配置一致。配置格式见 [工程管理](ProjectManagement.md#抗锯齿配置)。
 
 同页通过 `GI method → Path tracing` 开启 GI 和硬件依赖，`GI mode` 独立选择 Progressive accumulation 或 Realtime。`Indirect diffuse (color bleeding)` 与 `Indirect specular (reflections)` 分别控制颜色传递和间接反射，直接光保持独立。实时模式持续采样并将间接光交给 Forward／Deferred，`History samples` 限制历史权重；渐进模式到 `Target samples` 停止。每帧样本、反弹数和贡献开关立即生效，Restart accumulation 可重建历史；曝光不重置累积。实时模式带边缘感知空间滤波，运动时清除旧历史，尚无运动重投影。完整行为和项目字段见 [全局光照](GlobalIllumination.md)。
 

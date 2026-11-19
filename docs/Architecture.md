@@ -264,6 +264,7 @@ Content 资产由 `AssetRegistry`（`src/Assets/AssetRegistry.cpp`）扫描 `<�
 | 网格导入、材质资产与资产文件格式 | `src/Assets/AssetLibrary.cpp`、`src/Assets/AssetSerialization.h` |
 | 工程格式、引擎身份、引擎注册表 | `src/Project/Project.cpp` |
 | 主后端生命周期、共享 G-buffer／阴影／光照 | `src/Renderer/SceneRenderer.cpp` + `Shaders/Private/Scene.hlsl` |
+| 光栅抗锯齿、相机采样与历史 | `include/RestArtEngine/Renderer/AntiAliasing.h`、`src/Renderer/AntiAliasing.inl`、`Shaders/Private/AntiAliasing.hlsli`；用法与兼容边界见 [AntiAliasing.md](AntiAliasing.md) |
 | 实际资源／管线与绘制 RHI | `include/RestArtEngine/Renderer/Rhi.h`、`src/Renderer/D3D11/`、`src/Renderer/D3D12/D3D12Rhi.*` |
 | 渲染管线组合、Pass 顺序与资源依赖 | `include/RestArtEngine/Renderer/RenderPipeline.h`、`src/Renderer/Pipelines/ScenePipeline.cpp`；声明同时驱动诊断标签、文档表格与 CPU 测试 |
 | 单个渲染阶段的实现 | `src/Renderer/Passes/`；执行分支仍在 `src/Renderer/SceneRenderer.cpp` |

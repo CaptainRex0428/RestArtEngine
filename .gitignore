@@ -91,6 +91,7 @@ RestArtEngine.panels.ini
 !/docs/Architecture.md
 !/docs/AssetFormat.md
 !/docs/Camera.md
+!/docs/AntiAliasing.md
 !/docs/Importing.md
 !/docs/EditorGuide.md
 !/docs/EngineDistribution.md

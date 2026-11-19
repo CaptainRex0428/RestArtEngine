@@ -20,6 +20,8 @@
 #include "MaterialRenderStateSmoke.h"
 #include "LightingSmoke.h"
 #include "CameraSmoke.h"
+#include "AntiAliasingSmoke.h"
+#include "AntiAliasingUiSmoke.h"
 #include "NativeD3D12Smoke.h"
 #include "InspectorSmoke.h"
 #include "InspectorUiSmoke.h"
@@ -741,8 +743,8 @@ bool runProjectManager(const std::filesystem::path& engineRoot, rae::project::Pr
 
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false, editorSelfTest = false, gcSelfTest = false, showUI = true, vsync = true;
-    bool native12SelfTest = false, inspectorSelfTest = false, inspectorUiSelfTest = false;
-    bool hardwareRtSelfTest = false;
+    bool native12SelfTest = false, inspectorSelfTest = false, inspectorUiSelfTest = false, aaSelfTest = false, aaUiSelfTest = false;
+    bool hardwareRtSelfTest = false, projectSettingsSelfTest = false;
     bool quadView = false;
     bool giSelfTest = false, pathTracingOverride = false;
     bool renderScaleTest = false, materialRenderStateTest = false, lightingSelfTest = false, meshAttributesSelfTest = false, cameraSelfTest = false;
@@ -771,10 +773,13 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--editor-self-test") editorSelfTest = true;
             else if (arg == "--gc-self-test") gcSelfTest = true;
             else if (arg == "--hardware-rt-self-test") hardwareRtSelfTest = true;
+            else if (arg == "--project-settings-self-test") hardwareRtSelfTest = projectSettingsSelfTest = true;
             else if (arg == "--gi-self-test") giSelfTest = true;
             else if (arg == "--render-scale-test") renderScaleTest = true;
             else if (arg == "--material-render-state-self-test") materialRenderStateTest = true;
             else if (arg == "--camera-self-test") cameraSelfTest = true;
+            else if (arg == "--aa-self-test") aaSelfTest = true;
+            else if (arg == "--aa-ui-self-test") aaSelfTest = aaUiSelfTest = true;
             else if (arg == "--quad-view") quadView = true;
             else if (arg == "--lighting-self-test") lightingSelfTest = true;
             else if (arg == "--mesh-attributes-self-test") meshAttributesSelfTest = true;
@@ -828,10 +833,12 @@ int wmain(int argc, wchar_t** argv) {
                     "--backend auto|d3d11|d3d12|d3d11Dxr (session only; native D3D12 is experimental)\n"
                     "--allow-backend-fallback | --no-backend-fallback (D3D12 to strict D3D11)\n"
                     "--forward | --deferred   --rt (analytic)   --hardware-rt | --no-hardware-rt\n"
-                    "--hardware-rt-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
+                    "--hardware-rt-self-test   --project-settings-self-test   --gi-self-test   --path-tracing   --no-ui   --frames N\n"
                     "--render-scale-test (10M triangles, 1080p hardware realtime GI benchmark)\n"
                     "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
                     "--camera-self-test (projection, depth of field, previews and GI validation)\n"
+                    "--aa-self-test (FXAA/TAA image quality and history validation on the selected backend)\n"
+                    "--aa-ui-self-test (live anti-aliasing controls and project persistence validation)\n"
                     "--native-d3d12-self-test (independent native D3D12 GPU validation; no fallback)\n"
                     "--inspector-self-test (frame capture, offline resources and profiling validation on the selected backend)\n"
                     "--inspector-ui-self-test (native inspector/profiler/runtime UI validation on the selected backend)\n"
@@ -856,9 +863,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (projectPath.empty() && !arg.starts_with("--")) projectPath = argv[i];
             else throw std::runtime_error("Unsupported argument: " + arg + ". Use --help.");
         }
-        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest))
+        if (temporaryCaptures && (frameLimit <= 0 || explicitCaptureDir || selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest || aaSelfTest))
             throw std::runtime_error("--capture-temp requires --frames and cannot be combined with --capture-dir or self-tests.");
-        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest) && !explicitCaptureDir)
+        if ((selfTest || editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest || aaSelfTest) && !explicitCaptureDir)
             captureDir = std::filesystem::temp_directory_path() / "RestArtEngine/Validation";
         rae::GarbageCollector gc;
         std::string gcError;
@@ -870,7 +877,7 @@ int wmain(int argc, wchar_t** argv) {
         if (disableGc) gcSettings.enabled = false;
         if (!gc.setSettings(gcSettings, gcError)) throw std::runtime_error(gcError);
         // Validation outputs are durable evidence; self-tests use isolated GC services.
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) {
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest && !aaSelfTest) {
             std::error_code tempError;
             const auto root = std::filesystem::temp_directory_path(tempError) / "RestArtEngine/Captures";
             if (tempError || !gc.initializeTemporaryCaptures(root, gcError)) {
@@ -901,7 +908,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::filesystem::remove_all(path, cleanupCode);
             }
         } tempProjectCleanup;
-        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) {
+        if (projectPath.empty() && !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest && !aaSelfTest) {
             const auto engineRoot = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             const MainBackendRequest launcherBackend{
                 backendOverride.value_or(MainRenderBackend::D3D11), backendFallbackOverride.value_or(true)};
@@ -914,7 +921,7 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
-            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest) {
+            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest || aaSelfTest) {
                 std::error_code copyCode;
                 isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
                     ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
@@ -932,6 +939,8 @@ int wmain(int argc, wchar_t** argv) {
         settings.hardwareRayTracingReflections = project.rendering.hardwareRayTracingReflections;
         settings.hardwareRayTracingShadows = project.rendering.hardwareRayTracingShadows;
         settings.globalIllumination = project.rendering.globalIllumination;
+        settings.antiAliasing = project.rendering.antiAliasing;
+        if (selfTest) settings.antiAliasing.method = AntiAliasingMethod::Disabled;
         if (pathTracingOverride) settings.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
         const MainBackendRequest backendRequest{
             backendOverride.value_or(project.rendering.backendPreference),
@@ -947,7 +956,7 @@ int wmain(int argc, wchar_t** argv) {
         wc.hIcon = loadEngineIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         wc.hIconSm = loadEngineIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (!RegisterClassExW(&wc)) throw std::runtime_error("RegisterClassEx failed");
-        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest;
+        const bool interactive = !selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest && !aaSelfTest;
         const auto title = windowTitle(project.name);
         const RECT monitor = primaryMonitorRect();
         RECT loadingBounds{};
@@ -1073,7 +1082,7 @@ int wmain(int argc, wchar_t** argv) {
         ui.setWindowChrome(&windowState.chrome);
         reportMainBackend(renderer);
         if (renderer.mainBackendSelection().effective == MainRenderBackend::D3D12 &&
-            (editorSelfTest || gcSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest ||
+            (editorSelfTest || gcSelfTest || (hardwareRtSelfTest && !projectSettingsSelfTest) || giSelfTest || renderScaleTest ||
              materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest))
             throw std::runtime_error("This validation suite requires D3D11 native readback. Use --native-d3d12-self-test for native D3D12.");
         if (!interactive && !editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
@@ -1164,7 +1173,7 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         if (hardwareRtSelfTest) {
-            runHardwareRayTracingSmoke(renderer, ui, editor, project, captureDir);
+            runHardwareRayTracingSmoke(renderer, ui, editor, project, captureDir, projectSettingsSelfTest);
             return 0;
         }
         if (giSelfTest) {
@@ -1177,6 +1186,12 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (meshAttributesSelfTest) {
             runMeshAttributesSmoke(renderer, captureDir);
+            return 0;
+        }
+        if (aaSelfTest) {
+            if (aaUiSelfTest) {
+                if (!runAntiAliasingUiSmoke(renderer, ui, editor, project, captureDir, error)) throw std::runtime_error(error);
+            } else runAntiAliasingSmoke(renderer, captureDir);
             return 0;
         }
         if (cameraSelfTest) {
@@ -1425,7 +1440,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "RestArtEngine error: " << e.what() << '\n';
-        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
+        if (!selfTest && !editorSelfTest && !gcSelfTest && !hardwareRtSelfTest && !giSelfTest && !renderScaleTest && !materialRenderStateTest && !lightingSelfTest && !meshAttributesSelfTest && !cameraSelfTest && !native12SelfTest && !inspectorSelfTest && !inspectorUiSelfTest && !aaSelfTest) MessageBoxA(nullptr, e.what(), "RestArtEngine initialization/rendering error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

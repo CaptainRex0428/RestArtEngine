@@ -853,3 +853,4 @@ float4 PSOutlineComposite(FullscreenOutput input) : SV_TARGET
 }
 
 #include "DepthOfField.hlsli"
+#include "AntiAliasing.hlsli"

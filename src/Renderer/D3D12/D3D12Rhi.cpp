@@ -229,6 +229,7 @@ public:
     void submitAndWait() override;
     void prepareUi() override;
     void finishUiFrame() override;
+    void releaseBorrowedUiTextures() override;
     ID3D12Device* device() const noexcept override { return device_.Get(); }
     ID3D12CommandQueue* queue() const noexcept override { return queue_.Get(); }
     ID3D12GraphicsCommandList* commandList() override { beginFrame(); return list_.Get(); }
@@ -975,6 +976,18 @@ void Device12::finishUiFrame() {
     submitAndWait();
     uiBorrowedTextures_.clear();
     releaseUiDescriptors();
+}
+void Device12::releaseBorrowedUiTextures() {
+    // Platform UI may still hold descriptors from the previous surface; the
+    // caller waits for the queue before resizing. Dropping the shared owners is
+    // safe here and prevents a stale borrow from rejecting ResizeBuffers.
+    endRenderPass();
+    pass_ = {}; passTable_.reset(); pipeline_.reset();
+    waitIdle();
+    uiBorrowedTextures_.clear();
+    releaseUiDescriptors();
+    pendingObjects_.clear();
+    pendingAllocations_.clear();
 }
 std::pair<D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE> Device12::allocateUiDescriptor() {
     const UINT index = sampledPool_->allocate(1);

@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 12> resourceNames{{
+constexpr std::array<ResourceName, 15> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -25,6 +25,9 @@ constexpr std::array<ResourceName, 12> resourceNames{{
     {PipelineResource::SelectionMask, "SelectionMask"},
     {PipelineResource::DepthOfFieldSource, "DepthOfFieldSource"},
     {PipelineResource::FrameCapture, "FrameCapture"},
+    {PipelineResource::AntiAliasingSource, "AntiAliasingSource"},
+    {PipelineResource::AntiAliasingHistory, "AntiAliasingHistory"},
+    {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
 }};
 
 bool isForwardOnly(RenderPassKind kind) noexcept {
@@ -62,6 +65,8 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
     case RenderPassKind::HardwareResolve: return "Hardware resolve";
     case RenderPassKind::DepthOfField: return "Depth of field";
+    case RenderPassKind::AntiAliasing: return "Anti-aliasing";
+    case RenderPassKind::AntiAliasingPresent: return "Anti-aliasing present";
     case RenderPassKind::SelectionMask: return "Selection mask";
     case RenderPassKind::SelectionComposite: return "Selection composite";
     case RenderPassKind::FrameCapture: return "Frame capture";
@@ -72,6 +77,7 @@ const char* toString(RenderPassKind kind) noexcept {
 RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     RenderPipeline pipeline;
     pipeline.path = inputs.path;
+    const auto rasterColor = inputs.antiAliasing ? PipelineResource::AntiAliasingSource : PipelineResource::SceneColor;
     const auto add = [&pipeline](RenderPassKind kind, std::string_view name,
                                  PipelineResource reads, PipelineResource writes) {
         pipeline.passes.push_back({kind, name, reads, writes});
@@ -104,26 +110,36 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         add(RenderPassKind::DeferredLighting, "Deferred lighting / debug",
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | directLightingReads,
-            PipelineResource::SceneColor);
+            rasterColor);
     } else {
         // The background writes the first colour; geometry draws on top of it,
         // so SceneColor is both an input and an output of the geometry pass.
         add(RenderPassKind::ForwardBackground, "Forward background",
-            PipelineResource::None, PipelineResource::SceneColor);
+            PipelineResource::None, rasterColor);
         add(RenderPassKind::ForwardGeometry, "Forward geometry / debug",
-            directLightingReads | PipelineResource::SceneColor,
-            PipelineResource::SceneColor | PipelineResource::SceneDepth);
+            directLightingReads | rasterColor,
+            rasterColor | PipelineResource::SceneDepth);
     }
 
     // A resolved hardware image replaces the raster colour after lighting.
     if (inputs.hardwareTransport)
         add(RenderPassKind::HardwareResolve, "Hardware image resolve",
-            PipelineResource::HardwareImage, PipelineResource::SceneColor);
+            PipelineResource::HardwareImage, rasterColor);
 
     if (inputs.depthOfField)
         add(RenderPassKind::DepthOfField, "Screen-space depth of field",
-            PipelineResource::SceneColor | PipelineResource::SceneDepth,
-            PipelineResource::SceneColor | PipelineResource::DepthOfFieldSource);
+            rasterColor | PipelineResource::SceneDepth,
+            rasterColor | PipelineResource::DepthOfFieldSource);
+
+    if (inputs.antiAliasing) {
+        add(RenderPassKind::AntiAliasing, inputs.temporalAntiAliasing ? "TAA resolve" : "FXAA resolve",
+            rasterColor | PipelineResource::SceneDepth | (inputs.temporalAntiAliasing
+                ? PipelineResource::PreviousAntiAliasingHistory : PipelineResource::None),
+            inputs.temporalAntiAliasing ? PipelineResource::AntiAliasingHistory : PipelineResource::SceneColor);
+        if (inputs.temporalAntiAliasing)
+            add(RenderPassKind::AntiAliasingPresent, "TAA present",
+                PipelineResource::AntiAliasingHistory, PipelineResource::SceneColor);
+    }
 
     if (inputs.selectionOutline) {
         add(RenderPassKind::SelectionMask, "Selection masks",

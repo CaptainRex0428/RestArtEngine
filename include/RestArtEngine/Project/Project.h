@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Renderer/AntiAliasing.h>
 #include <RestArtEngine/Renderer/BackendSelection.h>
 
 #include <filesystem>
@@ -55,6 +56,8 @@ struct RenderingSettings {
     bool hardwareRayTracingReflections = true;
     bool hardwareRayTracingShadows = true;
     renderer::GlobalIlluminationSettings globalIllumination;
+    // Older projects gain spatial edge smoothing without temporal history.
+    renderer::AntiAliasingSettings antiAliasing;
     bool operator==(const RenderingSettings&) const = default;
 };
 

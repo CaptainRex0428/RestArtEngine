@@ -2,8 +2,8 @@
 // and buffers. No native context is passed through this execution contract.
 rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
     unsigned rasterIndex, unsigned depthIndex, bool fullscreen, bool hasDepth = true) {
-    // 0..6 are shader modules, 7 is the shadow pass with no pixel stage.
-    if (shaderIndex > 7) throw std::runtime_error("Unknown RHI scene pixel shader.");
+    // 7 is the shadow pass with no pixel stage; 8..10 are AA shaders.
+    if (shaderIndex >= pixelModules.size()) throw std::runtime_error("Unknown RHI scene pixel shader.");
     const auto key = std::make_tuple(shaderIndex, rasterIndex, depthIndex, fullscreen, hasDepth);
     if (const auto found = graphicsPipelines.find(key); found != graphicsPipelines.end()) return found->second;
     rhi::GraphicsPipelineDesc description;
@@ -22,6 +22,7 @@ rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
     if (hasDepth) description.depthFormat = rhi::Format::Depth32Float;
     if (shaderIndex == 1)
         description.colorFormats.assign(3, rhi::Format::RGBA16Float);
+    else if (shaderIndex == 9) description.colorFormats = {rhi::Format::RGBA16Float};
     else if (shaderIndex != 7) description.colorFormats = {rhi::Format::RGBA8Unorm};
     description.name = fullscreen ? "Scene fullscreen pipeline" : "Scene mesh pipeline";
     auto graphicsState = rhiDevice->createGraphicsPipeline(description);
@@ -51,7 +52,7 @@ void bindRhiMesh(const GpuMesh& mesh) {
 
 void drawRhiFullscreen(unsigned shader, bool hasDepth) {
     diagnosticVS = "Private/Scene.hlsl::VSFullscreen";
-    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField"};
+    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent"};
     diagnosticPS = shader < std::size(entries) ? entries[shader] : "Unknown";
     sceneCommands().bindGraphicsPipeline(graphicsPipeline(shader, 0, 16, true, hasDepth));
     sceneCommands().draw(3);

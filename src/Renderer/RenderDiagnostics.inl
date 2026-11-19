@@ -8,7 +8,7 @@
     Clock::time_point diagnosticStart{}, passStart{};
     std::unique_ptr<rae::diagnostics::TraceScope> diagnosticPassTrace;
     std::size_t activePass = static_cast<std::size_t>(-1);
-    static constexpr std::size_t maxDiagnosticPasses = 12;
+    static constexpr std::size_t maxDiagnosticPasses = 16;
     struct TimingSlot {
         ComPtr<ID3D11Query> disjoint;
         std::array<ComPtr<ID3D11Query>, 2 + maxDiagnosticPasses * 2> timestamps;

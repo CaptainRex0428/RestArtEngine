@@ -253,8 +253,9 @@ foreach ($loadingCase in $loadingCases) {
             }
             if ($loadingMaximumJump -gt 0.25) { throw "Loading still contains a large progress jump: $loadingMaximumJump" }
             foreach ($loadingEntry in @('VSMain', 'VSFullscreen', 'PSForward', 'PSGBuffer', 'PSDeferred',
-                'PSBackground', 'PSOutlineMask', 'PSOutlineComposite', 'PSDepthOfField')) {
-                $loadingEntryPattern = '^' + [regex]::Escape($loadingEntry) + ' \([1-9]/9\)$'
+                'PSBackground', 'PSOutlineMask', 'PSOutlineComposite', 'PSDepthOfField',
+                'PSFXAA', 'PSTAA', 'PSAntiAliasingPresent')) {
+                $loadingEntryPattern = '^' + [regex]::Escape($loadingEntry) + ' \((?:[1-9]|1[0-2])/12\)$'
                 if (@($loadingEvents | Where-Object { $_.detail -match $loadingEntryPattern }).Count -lt 2) {
                     throw "Missing shader begin/completion feedback: $loadingEntry"
                 }
@@ -271,7 +272,7 @@ foreach ($loadingCase in $loadingCases) {
                 }
             }
             if ($loadingHasBackendSelection) {
-                if (@($loadingEvents | Where-Object { $_.detail -eq '224 graphics pipelines' }).Count -eq 0) {
+                if (@($loadingEvents | Where-Object { $_.detail -eq '227 graphics pipelines' }).Count -eq 0) {
                     throw 'The graphics pipeline preparation did not report its completed work.'
                 }
             } else {

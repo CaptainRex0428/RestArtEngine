@@ -45,6 +45,9 @@ public:
     // The vendored DX12 platform backend waits for each secondary queue there;
     // this method completes the main queue and releases borrowed UI resources.
     virtual void finishUiFrame() = 0;
+    // Droppable borrows kept for UI descriptors; a resize may release them once
+    // the GPU is idle instead of failing on borrowed swapchain images.
+    virtual void releaseBorrowedUiTextures() = 0;
     [[nodiscard]] virtual ID3D12Device* device() const noexcept = 0;
     [[nodiscard]] virtual ID3D12CommandQueue* queue() const noexcept = 0;
     [[nodiscard]] virtual ID3D12GraphicsCommandList* commandList() = 0;

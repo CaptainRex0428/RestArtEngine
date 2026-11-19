@@ -9,6 +9,7 @@
 #include <RestArtEngine/Renderer/SceneRenderer.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
 #include <RestArtEngine/ImGui/ImGuiLayer.h>
+#include <RestArtEngine/ImGui/EditorTheme.h>
 #include <RestArtEngine/Core/TraceProfiler.h>
 #include <nlohmann/json.hpp>
 
@@ -161,7 +162,7 @@ struct TraceFrame {
 
 void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
     rae::imgui::ImGuiLayer& ui, rae::editor::SceneEditor& editor,
-    const rae::project::ProjectPaths& project, const std::filesystem::path& outputDirectory) {
+    const rae::project::ProjectPaths& project, const std::filesystem::path& outputDirectory, bool projectSettingsOnly) {
     using namespace rae;
     const auto output = std::filesystem::absolute(outputDirectory);
     std::filesystem::create_directories(output);
@@ -199,7 +200,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
 
     Json report{{"format", "RestArtEngine.HardwareRayTracingSmoke"}, {"version", 1},
         {"adapter", renderer.adapterName()}, {"hardwareSupported", renderer.hardwareRayTracingSupported()},
-        {"checks", Json::array()}, {"pixelChanges", Json::object()}, {"passed", false}};
+        {"checks", Json::array()}, {"pixelChanges", Json::object()}, {"projectSettingsOnly", projectSettingsOnly}, {"passed", false}};
     const auto saveReport = [&] { write(output / "hardware-rt-report.json", report.dump(2) + '\n'); };
     const auto pass = [&](const char* text) {
         report["checks"].push_back(text);
@@ -215,6 +216,8 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
 
     try {
         std::string error;
+        const auto dispatchStart = renderer.hardwareRayTracingDispatchCount();
+        if (!projectSettingsOnly) {
         constexpr std::uint32_t width = 320, height = 240;
         require(renderer.resize(width, height, error), error);
         assets::AssetLibrary assets;
@@ -246,7 +249,6 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             require(renderer.render(settings, world, assets, renderError, preview), renderError);
             return readScene(renderer);
         };
-        const auto dispatchStart = renderer.hardwareRayTracingDispatchCount();
         const auto raster = render();
         require(!renderer.hardwareRayTracingActive() &&
             renderer.hardwareRayTracingDispatchCount() == dispatchStart,
@@ -463,6 +465,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
                 "Hardware failed to resume after disabling.");
             pass("forward/deferred paths, resize, disable and re-enable retain working output");
         }
+        }
 
         // UI uses the editor's own isolated project and its normal device size.
         require(renderer.resize(oldWidth, oldHeight, error), error);
@@ -516,8 +519,11 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             ImGui::FocusWindow(window);
             ImGui::SetNavID(id, layer, window->NavRootFocusScopeId, ImRect());
             uiFrame();
-            require(context->NavId == id && context->NavIdIsAlive,
-                std::string("UI control is not navigable: ") + label);
+            if (context->NavId != id || !context->NavIdIsAlive) {
+                uiFrame("project-settings-control-failure.bmp");
+                write(output / "project-settings-control-failure.txt", uiText);
+                require(false, std::string("UI control is not navigable: ") + label);
+            }
             // A navigable item may still be clipped. Scroll, submit the new
             // layout and return only the visible hit area, never an old screen
             // coordinate below the child window or over its parent's footer.
@@ -637,22 +643,96 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "The old ambiguous top-level ray-tracing checkbox remains visible.");
         const auto launchBackend = renderer.mainBackendSelection().requested;
         const auto launchD3D12Attempt = renderer.d3d12InitializationAttempted();
-        click(itemRect(findChild("ProjectSettingsContent"), "##MainBackend").GetCenter());
-        require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
-            "Main backend choices did not open.");
-        auto* backendPopup = context->OpenPopupStack.back().Window;
-        const auto strictItem = ImHashStr("D3D11 (strict)", 0, backendPopup->GetID(2));
-        click(itemRect(backendPopup, "D3D11 (strict)", ImGuiNavLayer_Main, strictItem).GetCenter());
-        click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());
+        const auto selectBackend = [&](const char* label, int index) {
+            click(itemRect(findChild("ProjectSettingsContent"), "##MainBackend").GetCenter());
+            require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
+                "Main backend choices did not open.");
+            auto* popup = context->OpenPopupStack.back().Window;
+            const auto id = ImHashStr(label, 0, popup->GetID(index));
+            click(itemRect(popup, label, ImGuiNavLayer_Main, id).GetCenter());
+        };
+        const bool nativeLaunch = launchBackend.preference == renderer::MainRenderBackend::D3D12;
+        selectBackend(nativeLaunch ? "D3D11 (strict)" : "D3D12 (experimental raster)", nativeLaunch ? 2 : 3);
+        require(!uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections &&
+            !uiSettings.hardwareRayTracingShadows &&
+            uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::Disabled,
+            "Choosing native12 did not clear unsupported dependent requests.");
+        require(uiText.find("Restart required: save project settings") != std::string::npos,
+            "Unsaved backend edits do not request saving and restarting.");
+        if (!nativeLaunch)
+            click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());
+        uiFrame("project-settings-restart-unsaved.bmp");
+        click(itemRect(findWindow("Project Settings"), "Save project settings").GetCenter());
+        require(!editor.projectSettingsDirty() &&
+            uiText.find("Restart required: settings are saved.") != std::string::npos,
+            "Saving cleared the pending backend restart notice.");
+        uiFrame("project-settings-restart-saved.bmp");
+        const auto restartWindowSize = findWindow("Project Settings")->Size;
+        {
+            ContextScope scope(context);
+            ImGui::SetWindowSize(findWindow("Project Settings"), ImVec2(560.0f, 390.0f));
+        }
+        uiFrame();
+        uiFrame("project-settings-restart-compact.bmp");
+        {
+            ContextScope scope(context);
+            ImGui::SetWindowSize(findWindow("Project Settings"), restartWindowSize);
+        }
+        uiFrame();
+        editor.closeProjectSettings();
+        uiFrame();
+        editor.showProjectSettings();
+        uiFrame();
+        uiFrame(); // Allow reopened child windows to finish their navigation initialization.
+        require(uiText.find("Restart required: settings are saved.") != std::string::npos,
+            "Reopening settings lost the saved restart requirement.");
+        selectBackend(nativeLaunch ? "Auto" : "D3D11 (strict)", nativeLaunch ? 1 : 2);
+        require(uiText.find("Fallback applies only to the native D3D12 backend.") != std::string::npos &&
+            uiText.find("These controls are disabled for the selected next-launch backend.") != std::string::npos,
+            "Strict11 does not explain disabled fallback and hardware dependencies.");
         require(editor.projectSettingsDirty(), "Backend editing did not mark the project dirty.");
         require(renderer.mainBackendSelection().requested == launchBackend &&
             renderer.d3d12InitializationAttempted() == launchD3D12Attempt && renderer.mainBackendReady(),
             "Editing the next-launch backend changed the live device.");
         (void)itemRect(findChild("ProjectSettingsContent"), "##MainBackend");
         uiFrame("project-settings-backend.bmp");
+        switch (launchBackend.preference) {
+        case renderer::MainRenderBackend::D3D11Dxr: selectBackend("D3D11 + D3D12 ray tracing", 0); break;
+        case renderer::MainRenderBackend::Auto: selectBackend("Auto", 1); break;
+        case renderer::MainRenderBackend::D3D11: selectBackend("D3D11 (strict)", 2); break;
+        case renderer::MainRenderBackend::D3D12: selectBackend("D3D12 (experimental raster)", 3); break;
+        }
+        if (nativeLaunch && launchBackend.allowFallbackToD3D11)
+            click(itemRect(findChild("ProjectSettingsContent"), "Allow fallback to D3D11").GetCenter());
+        require(uiText.find("Save to cancel restart:") != std::string::npos,
+            "An unsaved backend revert hides the persisted restart requirement.");
+        const auto previousTheme = imgui::currentTheme();
+        {
+            ContextScope scope(context);
+            imgui::setTheme(imgui::EditorTheme::DarkBlue);
+        }
+        uiFrame("project-settings-revert-blue.bmp");
+        {
+            ContextScope scope(context);
+            imgui::setTheme(previousTheme);
+        }
+        click(itemRect(findWindow("Project Settings"), "Save project settings").GetCenter());
+        require(uiText.find("Restart required:") == std::string::npos &&
+            uiText.find("Save to cancel restart:") == std::string::npos,
+            "Saving the launch backend did not clear the restart requirement.");
+        if (launchBackend.preference != renderer::MainRenderBackend::D3D11Dxr)
+            selectBackend("D3D11 + D3D12 ray tracing", 0);
+        if (renderer.mainBackendSelection().effective != renderer::MainRenderBackend::D3D12) {
+            click(itemRect(findChild("ProjectSettingsContent"), "Analytic reflections (D3D11)").GetCenter());
+            require(uiSettings.rayTracing, "The analytic compatibility option did not enable.");
+        }
+        const bool wasRestartRequired = uiText.find("Restart required:") != std::string::npos;
         click(itemRect(findChild("ProjectSettingsContent"), "Hardware ray tracing").GetCenter());
-        require(uiSettings.hardwareRayTracing != project.rendering.hardwareRayTracing && editor.projectSettingsDirty(),
-            "Hardware checkbox failed to update the requested value immediately.");
+        require(uiSettings.hardwareRayTracing && uiSettings.hardwareRayTracingReflections &&
+            uiSettings.hardwareRayTracingShadows && !uiSettings.rayTracing && editor.projectSettingsDirty(),
+            "Hardware checkbox failed to enable dependencies or clear competing analytic tracing.");
+        require((uiText.find("Restart required:") != std::string::npos) == wasRestartRequired,
+            "A live hardware feature edit changed the startup restart requirement.");
         if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible)
             require(renderer.hardwareRayTracingActive() == uiSettings.hardwareRayTracing,
                 "The project checkbox did not update the effective hardware renderer.");
@@ -671,7 +751,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         const auto pathItem = ImHashStr("Path tracing", 0, giPopup->GetID(1));
         click(itemRect(giPopup, "Path tracing", ImGuiNavLayer_Main, pathItem).GetCenter());
         require(uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing &&
-            uiSettings.hardwareRayTracing && editor.projectSettingsDirty(),
+            uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections && editor.projectSettingsDirty(),
             "GI method failed to request path tracing and activate its hardware dependency.");
         if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible) {
             require(renderer.globalIlluminationStatus().effective == renderer::GlobalIlluminationMethod::PathTracing &&
@@ -690,7 +770,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         const auto realtimeItem = ImHashStr("Realtime", 0, modePopup->GetID(1));
         click(itemRect(modePopup, "Realtime", ImGuiNavLayer_Main, realtimeItem).GetCenter());
         require(uiSettings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime &&
-            uiSettings.hardwareRayTracing && editor.projectSettingsDirty(),
+            uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingShadows && editor.projectSettingsDirty(),
             "Realtime GI mode did not update from the actual combo selection.");
         if (renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible)
             require(renderer.globalIlluminationStatus().effective == renderer::GlobalIlluminationMethod::PathTracing &&
@@ -773,6 +853,23 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
                 renderer.globalIlluminationStatus().effectiveMode == renderer::GlobalIlluminationMode::Realtime,
                 "Restart accumulation did not restart the continuous GI history.");
         }
+        const auto beforeHardwareOff = uiSettings.globalIllumination;
+        click(itemRect(findChild("ProjectSettingsContent"), "Hardware ray tracing").GetCenter());
+        require(!uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections &&
+            !uiSettings.hardwareRayTracingShadows &&
+            uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::Disabled &&
+            uiSettings.globalIllumination.targetSamples == beforeHardwareOff.targetSamples,
+            "The hardware-off widget did not clear dependent requests while retaining GI quality.");
+        uiFrame("project-settings-hardware-off.bmp");
+        click(itemRect(findChild("ProjectSettingsContent"), "GI method").GetCenter());
+        require(!context->OpenPopupStack.empty(), "GI choices did not reopen after hardware-off.");
+        auto* restoreGiPopup = context->OpenPopupStack.back().Window;
+        require(restoreGiPopup != nullptr, "GI choices did not reopen after hardware-off.");
+        const auto restorePathId = ImHashStr("Path tracing", 0, restoreGiPopup->GetID(1));
+        click(itemRect(restoreGiPopup, "Path tracing", ImGuiNavLayer_Main, restorePathId).GetCenter());
+        require(uiSettings.hardwareRayTracing && uiSettings.globalIllumination == beforeHardwareOff &&
+            !uiSettings.hardwareRayTracingReflections && !uiSettings.hardwareRayTracingShadows,
+            "Choosing GI after hardware-off lost contribution/quality preferences or competing-effect cancellation.");
         editor.closeProjectSettings();
         uiFrame();
         const bool activeRealtime = renderer.hardwareRayTracingSupported() && uiSettings.viewportVisible;
@@ -814,8 +911,8 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         require(!editor.projectSettingsDirty(), "Save project settings did not clear the unsaved state.");
         project::ProjectPaths reloaded;
         require(project::loadProject(project.manifest, reloaded, error), error);
-        require(reloaded.rendering.backendPreference == renderer::MainRenderBackend::D3D11 &&
-            reloaded.rendering.allowFallbackToD3D11 != project.rendering.allowFallbackToD3D11,
+        require(reloaded.rendering.backendPreference == renderer::MainRenderBackend::D3D11Dxr &&
+            !reloaded.rendering.allowFallbackToD3D11,
             "The next-launch backend and fallback draft did not survive saving.");
         require(renderer.mainBackendSelection().requested == launchBackend &&
             renderer.d3d12InitializationAttempted() == launchD3D12Attempt,

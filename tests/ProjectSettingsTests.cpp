@@ -1,4 +1,5 @@
 #include <RestArtEngine/Project/Project.h>
+#include <RestArtEngine/Editor/ProjectSettingsRules.h>
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -443,6 +444,80 @@ void replacementFailure() {
 }
 } // namespace
 
+void editingDependenciesAndRestart() {
+    using namespace rae::editor;
+    using namespace renderer;
+    RenderingSettings draft;
+    draft.hardwareRayTracing = true;
+    draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+    draft.globalIllumination.targetSamples = 901;
+    draft.hardwareRayTracing = false;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::HardwareRayTracing);
+    require(!draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows &&
+        draft.globalIllumination.method == GlobalIlluminationMethod::Disabled,
+        "An explicit hardware-off edit clears dependent effects and GI.");
+    require(draft.globalIllumination.targetSamples == 901 && draft.globalIllumination.indirectDiffuse,
+        "Clearing the parent preserves GI quality and contribution tuning.");
+    draft.hardwareRayTracing = true;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::HardwareRayTracing);
+    require(draft.hardwareRayTracingReflections && draft.hardwareRayTracingShadows,
+        "Hardware-on selects its default effects.");
+    draft.hardwareRayTracing = false;
+    draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::GiMethod);
+    require(draft.hardwareRayTracing && !draft.hardwareRayTracingReflections && draft.hardwareRayTracingShadows,
+        "Path tracing enables its hardware dependency and clears competing reflections.");
+    draft.globalIllumination.mode = GlobalIlluminationMode::Realtime;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::GiMode);
+    require(!draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows,
+        "Realtime GI also clears the standalone ray-shadow effect.");
+    draft.globalIllumination.method = GlobalIlluminationMethod::Disabled;
+    applyProjectRenderingEdit(draft, ProjectRenderingEdit::GiMethod);
+    require(!draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows,
+        "Leaving GI does not silently re-enable effects the user did not select.");
+    for (auto backend : {MainRenderBackend::Auto, MainRenderBackend::D3D11, MainRenderBackend::D3D12}) {
+        draft.backendPreference = backend;
+        draft.hardwareRayTracing = draft.hardwareRayTracingReflections = draft.hardwareRayTracingShadows = true;
+        draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+        applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
+        require(!draft.hardwareRayTracing && !draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows &&
+            draft.globalIllumination.method == GlobalIlluminationMethod::Disabled,
+            "An explicit incompatible backend choice clears hardware feature requests.");
+        require(!projectBackendAllowsHardware(backend), "Only the hybrid backend exposes hardware/GI editing.");
+    }
+    require(projectBackendAllowsHardware(MainRenderBackend::D3D11Dxr), "The hybrid backend allows feature requests.");
+
+    RenderingSettings saved;
+    const auto launched = projectBackendRequest(saved);
+    draft = saved;
+    draft.hardwareRayTracing = true;
+    draft.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+    require(projectRestartNotice(draft, saved, launched) == ProjectRestartNotice::None,
+        "Live lighting edits do not claim a restart requirement.");
+    draft.backendPreference = MainRenderBackend::D3D12;
+    require(projectRestartNotice(draft, saved, launched) == ProjectRestartNotice::SaveAndRestart,
+        "Unsaved startup edits request both saving and restarting.");
+    saved = draft;
+    require(projectRestartNotice(draft, saved, launched) == ProjectRestartNotice::Restart,
+        "Saving does not hide a pending startup change.");
+    draft.backendPreference = launched.preference;
+    require(projectRestartNotice(draft, saved, launched) == ProjectRestartNotice::SaveToCancelRestart,
+        "An unsaved revert explains that the persisted startup change still needs cancellation.");
+    saved = draft;
+    draft.allowFallbackToD3D11 = !draft.allowFallbackToD3D11;
+    require(projectRestartNotice(draft, saved, launched) == ProjectRestartNotice::None,
+        "An irrelevant fallback preference does not request restarting a non-native12 session.");
+    saved.backendPreference = draft.backendPreference = MainRenderBackend::D3D12;
+    auto nativeLaunch = projectBackendRequest(saved);
+    draft.allowFallbackToD3D11 = !saved.allowFallbackToD3D11;
+    require(projectRestartNotice(draft, saved, nativeLaunch) == ProjectRestartNotice::SaveAndRestart,
+        "Native12 fallback policy is a real startup setting.");
+    const auto preserved = draft;
+    (void)projectRestartNotice(draft, saved, nativeLaunch);
+    (void)projectBackendAllowsHardware(draft.backendPreference);
+    require(draft == preserved, "Reading capability/restart state does not normalize or erase stored requests.");
+}
+
 int main() {
     try {
         defaultsAndRoundTrip();
@@ -452,6 +527,7 @@ int main() {
         globalIlluminationRoundTrip();
         globalIlluminationValidation();
         replacementFailure();
+        editingDependenciesAndRestart();
         std::cout << "ProjectSettingsTests: " << checks << " checks passed.\n";
         return 0;
     } catch (const std::exception& exception) {

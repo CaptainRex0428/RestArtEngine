@@ -113,6 +113,12 @@
 
 ### 4.3 可选能力如何改变列表
 
+抗锯齿开启时，上表中描边之前的颜色输出改为 `AntiAliasingSource`。
+景深之后加入 `FXAA resolve`，读取独立源色与深度并写最终 `SceneColor`；
+TAA 则使用 `TAA resolve` 写 `AntiAliasingHistory`，随后 `TAA present` 写 `SceneColor`。
+`PreviousAntiAliasingHistory` 是跨帧输入，不能与本帧历史写目标相同。
+实际请求／生效与历史限制见 [抗锯齿](AntiAliasing.md)；上表未展开这些可选 Pass。
+
 | 设置 | 列表变化 |
 | --- | --- |
 | `ShadowMethod::AnalyticRay` / `Disabled` | 不生成 `Shadow map`；光照不再声明 `ShadowMap` |

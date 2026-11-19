@@ -42,6 +42,16 @@ void validateBackendPreference(renderer::MainRenderBackend backend) {
     throw std::runtime_error("rendering.backendPreference must be d3d11Dxr, auto, d3d11 or d3d12.");
 }
 
+void validateAntiAliasing(const renderer::AntiAliasingSettings& settings) {
+    using renderer::AntiAliasingMethod;
+    if (settings.method != AntiAliasingMethod::Disabled && settings.method != AntiAliasingMethod::FXAA &&
+        settings.method != AntiAliasingMethod::TAA)
+        throw std::runtime_error("rendering.antiAliasing.method must be disabled, fxaa or taa.");
+    if (!std::isfinite(settings.temporalCurrentWeight) || settings.temporalCurrentWeight < .02f ||
+        settings.temporalCurrentWeight > 1.0f)
+        throw std::runtime_error("rendering.antiAliasing.temporalCurrentWeight must be a finite number from 0.02 to 1.");
+}
+
 void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& settings) {
     using renderer::GlobalIlluminationMethod;
     using renderer::GlobalIlluminationMode;
@@ -89,6 +99,31 @@ RenderingSettings readRenderingSettings(const Json& value) {
     read("hardwareRayTracing", settings.hardwareRayTracing);
     read("hardwareRayTracingReflections", settings.hardwareRayTracingReflections);
     read("hardwareRayTracingShadows", settings.hardwareRayTracingShadows);
+    if (rendering.contains("antiAliasing")) {
+        const auto& aa = rendering.at("antiAliasing");
+        if (!aa.is_object()) throw std::runtime_error("rendering.antiAliasing must be an object.");
+        if (aa.contains("method")) {
+            if (!aa.at("method").is_string())
+                throw std::runtime_error("rendering.antiAliasing.method must be disabled, fxaa or taa.");
+            const auto& method = aa.at("method").get_ref<const std::string&>();
+            if (method == "disabled") settings.antiAliasing.method = renderer::AntiAliasingMethod::Disabled;
+            else if (method == "fxaa") settings.antiAliasing.method = renderer::AntiAliasingMethod::FXAA;
+            else if (method == "taa") settings.antiAliasing.method = renderer::AntiAliasingMethod::TAA;
+            else throw std::runtime_error("rendering.antiAliasing.method must be disabled, fxaa or taa.");
+        }
+        if (aa.contains("temporalCurrentWeight")) {
+            const auto& encoded = aa.at("temporalCurrentWeight");
+            if (!encoded.is_number())
+                throw std::runtime_error("rendering.antiAliasing.temporalCurrentWeight must be a finite number from 0.02 to 1.");
+            const double weight = encoded.get<double>();
+            // Compare against the stored float boundary so saving the minimum
+            // float value (0.02f) remains readable after JSON conversion.
+            if (!std::isfinite(weight) || weight < static_cast<double>(.02f) || weight > 1.0)
+                throw std::runtime_error("rendering.antiAliasing.temporalCurrentWeight must be a finite number from 0.02 to 1.");
+            settings.antiAliasing.temporalCurrentWeight = static_cast<float>(weight);
+        }
+        validateAntiAliasing(settings.antiAliasing);
+    }
     if (rendering.contains("globalIllumination")) {
         const auto& gi = rendering.at("globalIllumination");
         if (!gi.is_object()) throw std::runtime_error("rendering.globalIllumination must be an object.");
@@ -869,6 +904,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
     try {
         validateBackendPreference(settings.backendPreference);
         validateGlobalIllumination(settings.globalIllumination);
+        validateAntiAliasing(settings.antiAliasing);
         fs::path manifest;
         if (!resolveManifest(folderOrManifest, manifest, error)) return false;
         std::ifstream input(manifest, std::ios::binary);
@@ -900,6 +936,14 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["samplesPerFrame"] = settings.globalIllumination.samplesPerFrame;
         gi["targetSamples"] = settings.globalIllumination.targetSamples;
         gi["maxBounces"] = settings.globalIllumination.maxBounces;
+        auto& aa = rendering["antiAliasing"];
+        if (aa.is_null()) aa = Json::object();
+        switch (settings.antiAliasing.method) {
+        case renderer::AntiAliasingMethod::Disabled: aa["method"] = "disabled"; break;
+        case renderer::AntiAliasingMethod::FXAA: aa["method"] = "fxaa"; break;
+        case renderer::AntiAliasingMethod::TAA: aa["method"] = "taa"; break;
+        }
+        aa["temporalCurrentWeight"] = settings.antiAliasing.temporalCurrentWeight;
         const auto text = value.dump(2) + '\n';
         static std::atomic<std::uint64_t> sequence{0};
         temporary = manifest;

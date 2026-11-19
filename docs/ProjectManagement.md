@@ -66,6 +66,23 @@ RestArtEngine 的可执行引擎和用户工程是两个独立目录。引擎根
 
 工程是纯数据：`.raproject` + `Content/` + 工程 `Shaders/`，由 `RestArtEngine.exe` 打开，不生成也不携带自己的 `.sln`。编译引擎只打开仓库根目录的 `RestArtEngine.sln`（一个工程）。`writeProjectBuildFiles` 保留为后续原生 C++ 工程的库能力，当前的数据工程流程不会调用它。
 
+## 抗锯齿配置
+
+`Project → Project Settings... → Rendering → Anti-aliasing` 提供 Off、FXAA、TAA，修改在后续场景帧实时生效，保存到当前工程的 `rendering.antiAliasing`：
+
+```json
+{
+  "rendering": {
+    "antiAliasing": {
+      "method": "fxaa",
+      "temporalCurrentWeight": 0.1
+    }
+  }
+}
+```
+
+`method` 接受 `disabled`、`fxaa`、`taa`；旧工程缺省使用 FXAA。`temporalCurrentWeight` 是 TAA 当前帧权重，范围 0.02–1，较低值优先稳定性，较高值更快响应变化。请求值与实际生效方案分别显示，渲染模式需要降级时保留请求并说明原因。保存只更新渲染设置，保留已有工程绑定和未知扩展字段；无效参数或格式错误不会覆盖原文件。
+
 ## 发布和迁移建议
 
 发布引擎时为每个构建写入新的 `engineVersion` / `engineHash`，并把 `RestArtEngine.exe`、`Engine.raeengine` 与公共 Shader 一起分发；如果要提供示例，再包含 `Projects/Sandbox`。移动工程后应检查 `engineRoot` 是否仍能解析到目标引擎；移动引擎时可在工程管理器中重新绑定工程。工程目录可以提交到独立仓库，仓库只保留 manifest、Content、工程 Shader 与场景文件。完整的目录结构和发布检查见 [EngineDistribution.md](EngineDistribution.md)。

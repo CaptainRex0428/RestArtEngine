@@ -44,6 +44,8 @@ add_executable(RestArtEngine
     app/HardwareRayTracingSmoke.cpp
     app/GlobalIlluminationSmoke.cpp
     app/LightingSmoke.cpp
+    app/AntiAliasingSmoke.cpp
+    app/AntiAliasingUiSmoke.cpp
     app/CameraSmoke.cpp
     app/NativeD3D12Smoke.cpp
     app/InspectorSmoke.cpp
@@ -262,6 +264,13 @@ if(BUILD_TESTING)
         target_compile_options(ProjectSettingsTests PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME ProjectSettingsTests COMMAND ProjectSettingsTests)
+    add_executable(AntiAliasingProjectTests tests/AntiAliasingProjectTests.cpp src/Project/Project.cpp)
+    target_include_directories(AntiAliasingProjectTests PRIVATE include vendor/nlohmann/single_include)
+    target_compile_definitions(AntiAliasingProjectTests PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(AntiAliasingProjectTests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME AntiAliasingProjectTests COMMAND AntiAliasingProjectTests)
     add_executable(TraceProfilerTests tests/TraceProfilerTests.cpp src/Core/TraceProfiler.cpp src/Core/RuntimeDiagnostics.cpp)
     target_include_directories(TraceProfilerTests PRIVATE include vendor/nlohmann/single_include)
     target_compile_definitions(TraceProfilerTests PRIVATE UNICODE _UNICODE NOMINMAX)

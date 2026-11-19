@@ -12,4 +12,4 @@ namespace rae::project { struct ProjectPaths; }
 void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
     rae::imgui::ImGuiLayer& ui, rae::editor::SceneEditor& editor,
     const rae::project::ProjectPaths& project,
-    const std::filesystem::path& outputDirectory);
+    const std::filesystem::path& outputDirectory, bool projectSettingsOnly = false);

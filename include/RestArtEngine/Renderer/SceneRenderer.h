@@ -7,6 +7,7 @@
 #include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <RestArtEngine/Renderer/SceneGeometryStatistics.h>
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
+#include <RestArtEngine/Renderer/AntiAliasing.h>
 #include <RestArtEngine/Renderer/RenderFeatures.h>
 #include <RestArtEngine/Renderer/RenderPipeline.h>
 #include <RestArtEngine/Camera/Camera.h>
@@ -64,6 +65,8 @@ struct SceneSettings {
     bool hardwareRayTracingReflections = true;
     bool hardwareRayTracingShadows = true;
     GlobalIlluminationSettings globalIllumination;
+    // Raw render callers opt in; project rendering preferences default to FXAA.
+    AntiAliasingSettings antiAliasing{AntiAliasingMethod::Disabled};
     float roughness = 0.25f;
     float metallic = 0.65f;
     float baseColor[3] = {0.85f, 0.28f, 0.08f};
@@ -217,6 +220,10 @@ public:
     [[nodiscard]] std::string hardwareRayTracingStatus() const;
     [[nodiscard]] std::uint64_t hardwareRayTracingDispatchCount() const;
     [[nodiscard]] GlobalIlluminationStatus globalIlluminationStatus() const;
+    [[nodiscard]] AntiAliasingStatus antiAliasingStatus() const;
+    // RGBA8 final scene target, available on either active graphics backend.
+    bool readScenePixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
+                         std::uint32_t& height, std::string& error) const;
     // Invalidates only the main scene's progressive history, never assets or
     // offscreen tool previews. The next visible frame starts new samples.
     void resetGlobalIllumination();

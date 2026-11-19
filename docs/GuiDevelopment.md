@@ -18,7 +18,7 @@
 | 窗口与启动 | [MinimalApp.cpp](../app/MinimalApp.cpp)、[WindowChrome.cpp](../src/ImGui/WindowChrome.cpp)、[LoadingScreen.cpp](../src/Editor/LoadingScreen.cpp) | Project Manager 当前仍在入口实现；自定义窗口栏保留系统命令；加载页使用品牌背景与相对布局。 |
 | 工作区 | [EditorDockManager.cpp](../src/Editor/EditorDockManager.cpp) | 六个稳定面板身份，原生 Docking、分割、合并标签、主窗口内悬浮、外部系统浮窗及布局恢复；材质编辑器保持独立窗口。 |
 | 面板与会话 | [SceneEditor.cpp](../src/Editor/SceneEditor.cpp) | Outliner、Scene（场景级参数与当前场景切换）、Details（Actor 实例属性）、Viewport settings、Content & Editors（`AssetRegistry` 驱动的文件夹树、列表/网格资产区、`Asset Details` 窗）、工具栏、草稿和关闭提示；中央为 Scene Viewport。Content 不再嵌套 Meshes 页签，Material Editor / Shader Editor 位于系统独立 MaterialWorkspace；不存在独立 AssetBrowser、MaterialEditor 或 OutputLog 类。 |
-| 项目配置 | [ProjectSettings.cpp](../src/Editor/ProjectSettings.cpp) | `Project → Project Settings...` 打开独立可关闭窗口，左侧 Rendering 导航提供硬件光追／效果开关、GI 算法与采样预算，显示设备支持／请求／实际状态、累积进度和重启。修改自动反馈、显式保存，加入 Save All 与未保存退出提示；焦点不传给场景编辑。 |
+| 项目配置 | [ProjectSettings.cpp](../src/Editor/ProjectSettings.cpp)、[依赖规则](../include/RestArtEngine/Editor/ProjectSettingsRules.h) | `Project → Project Settings...` 打开独立可关闭窗口，提供后端／硬件光追／GI与采样预算；显式编辑联动取消竞争或依赖项，设备降级保留请求。分别提示未保存待重启、已保存待重启、待保存撤回；即时照明不要求重启。加入 Save All 与未保存退出提示，焦点不传给场景编辑。 |
 | 视口交互 | [ViewportInteraction.cpp](../src/Editor/ViewportInteraction.cpp)、[SelectionOutline.cpp](../src/Renderer/SelectionOutline.cpp) | 场景图像、拾取、相机、ImGuizmo、多选、Alt 拖动复制与 Content Mesh 拖入放置；选中 Actor 由编辑器专用遮罩通道绘制屏幕空间描边，默认品牌橙，可选主题强调色或自定义颜色。 |
 | 命令与历史 | [EditorCommands.cpp](../src/Editor/EditorCommands.cpp)、[UndoStack.cpp](../src/Editor/UndoStack.cpp) | 已接入动作共用命令和 enable predicate；应用级快捷键、部分旧输入路径仍分散。撤销覆盖有限，不能描述为全部属性可撤销。 |
 | 底栏与命令控制台 | [EditorStatusBar.cpp](../src/Editor/EditorStatusBar.cpp)、[EditorConsole.cpp](../src/Editor/EditorConsole.cpp) | 固定底栏预留 DockSpace 高度，提供 Content／Output Log／Cmd／诊断工具与保存状态。独立无 UI 命令模型负责解析、注册、历史和补全；GUI 复用现有动作与撤销。日志为本会话编辑器提示和命令结果，Content 入口聚焦已有面板。 |
@@ -136,5 +136,7 @@ Diagnostics 是按需打开的可关闭、可停靠工具窗，复用既有主�
 已有自动化入口是 [EditorSmoke.cpp](../app/EditorSmoke.cpp)、[Test-Window.ps1](../scripts/Test-Window.ps1)、[Test-WindowChrome.ps1](../scripts/Test-WindowChrome.ps1) 和 [Validate-Render.ps1](../scripts/Validate-Render.ps1)。执行前核对脚本参数并显式传入本次可执行文件；桌面输入和 GPU 测试串行，使用隔离的工程、布局与输出目录，保留用户正在编辑的工程及进程。
 
 新环境使用 `cmake --preset windows-vs2022` 与 `cmake --build --preset windows-debug-engine`。已有配置优先使用对应本工作区的目录。编辑器自测示例为 `build/cmake-vs2022/Debug/RestArtEngine.exe --editor-self-test --capture-dir artifacts/gui-validation`；窗口脚本须通过 `-Executable` 指向同一产物，`Test-WindowChrome.ps1` 还可指定独立 `-CaptureDirectory`。
+
+Project Settings 定向交互可使用 `RestArtEngine.exe --project <测试工程> --backend d3d11Dxr --project-settings-self-test --capture-dir <输出目录>`。它沿用硬件光追套件中的真实设置控件、临时工程复制、保存／重载和键盘隔离检查，跳过前段材质／Shader 压力用例；不能将定向通过当作完整硬件光追套件通过。规则与保存失败路径另由 `ProjectSettingsTests` 覆盖。
 
 截图注明构建、主题、窗口尺寸、字体/样式缩放和场景，前后比较保持条件一致。自测必须使用临时工程副本：测试直接跑在用户工程上会写资产，包括将已提交材质另存为 `.rasset`；夹具目录每轮清理。当前测试中的 150% 字体/样式缩放不能证明操作系统跨显示器 DPI 支持。系统吸附弹窗、跨屏、完整键盘路径、中文输入法以及屏幕阅读器等，只有实际检查过才报告通过；不因本页列出目标而视为已覆盖。

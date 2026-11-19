@@ -178,6 +178,32 @@ void rejectsBrokenDeclarations() {
     }
 }
 
+void antiAliasingChain() {
+    for (auto path : {RenderPath::Forward,RenderPath::Deferred}) {
+        for (bool temporal : {false,true}) {
+            auto build=inputs(path);
+            build.depthOfField=true; build.antiAliasing=true; build.temporalAntiAliasing=temporal;
+            build.selectionOutline=true; build.frameCapture=true;
+            const auto pipeline=buildScenePipeline(build);
+            require(validatePipeline(pipeline).valid,"AA pipeline has an unproduced dependency.");
+            const auto aa=indexOf(pipeline,RenderPassKind::AntiAliasing);
+            require(indexOf(pipeline,RenderPassKind::DepthOfField)<aa &&
+                aa<indexOf(pipeline,RenderPassKind::SelectionMask),"AA must run after DOF and before editor overlays.");
+            require(contains(passAt(pipeline,aa).reads,PipelineResource::AntiAliasingSource),
+                "AA must read a distinct source image to avoid read/write aliasing.");
+            if (temporal) {
+                require(contains(passAt(pipeline,aa).reads,PipelineResource::PreviousAntiAliasingHistory),
+                    "TAA needs its previous-frame dependency.");
+                const auto present=indexOf(pipeline,RenderPassKind::AntiAliasingPresent);
+                require(aa<present && present<indexOf(pipeline,RenderPassKind::SelectionMask),
+                    "TAA must publish the new history before overlays.");
+                require(contains(passAt(pipeline,present).writes,PipelineResource::SceneColor),
+                    "TAA presentation must produce final SceneColor.");
+            } else require(!hasKind(pipeline,RenderPassKind::AntiAliasingPresent),"FXAA writes final scene directly.");
+        }
+    }
+}
+
 FeatureRequests featureRequests(RenderPath path = RenderPath::Deferred) {
     FeatureRequests requests;
     requests.path = path;
@@ -403,6 +429,7 @@ int main() {
         analyticRayInputs();
         hardwareTransport();
         postChain();
+        antiAliasingChain();
         rejectsBrokenDeclarations();
         pathAndShadowFeatures();
         hardwareFeatureLayers();

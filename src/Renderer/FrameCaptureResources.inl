@@ -61,6 +61,11 @@
                 kind, std::string(pass.name), boundary);
         };
         add(PipelineResource::SceneColor, color, "SceneColor", 0);
+        add(PipelineResource::AntiAliasingSource,aaSourceImage,"AntiAliasingSource",0);
+        add(PipelineResource::AntiAliasingHistory,aaResolvedImage,"AntiAliasingHistory RGB / linear depth",0);
+        if (before && aaHistoryValid && contains(pass.reads,PipelineResource::PreviousAntiAliasingHistory))
+            appendCaptureImage(aaHistoryImages[aaHistoryRead],std::string(pass.name)+" / Before / PreviousAntiAliasingHistory",
+                0,std::string(pass.name),boundary);
         add(PipelineResource::SceneDepth, sceneDepthImage, "Depth", 4);
         add(PipelineResource::GBufferAlbedo, gbufferImages[0], "GBuffer0 Albedo / Roughness", 1);
         add(PipelineResource::GBufferNormal, gbufferImages[1], "GBuffer1 WorldNormal / Metallic", 2);

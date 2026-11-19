@@ -1,4 +1,5 @@
 #include <RestArtEngine/Editor/SceneEditor.h>
+#include <RestArtEngine/Editor/ProjectSettingsRules.h>
 #include <imgui.h>
 
 #include <algorithm>
@@ -11,6 +12,7 @@ void SceneEditor::syncProjectSettings(const renderer::SceneSettings& settings) {
     projectRenderingDraft_.hardwareRayTracingReflections = settings.hardwareRayTracingReflections;
     projectRenderingDraft_.hardwareRayTracingShadows = settings.hardwareRayTracingShadows;
     projectRenderingDraft_.globalIllumination = settings.globalIllumination;
+    projectRenderingDraft_.antiAliasing = settings.antiAliasing;
     projectSettingsDirty_ = projectRenderingDraft_ != project_.rendering;
 }
 
@@ -49,10 +51,13 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
     projectSettingsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (visible) {
         ImGui::TextUnformatted(project_.name.c_str());
-        ImGui::TextWrapped("Rendering features update immediately. Backend changes take effect on the next launch after saving.");
+        ImGui::TextWrapped("Supported rendering changes update immediately. Backend changes require saving and restarting the editor.");
         ImGui::Separator();
 
-        const float footerHeight = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
+        const bool startupNotice = projectRestartNotice(projectRenderingDraft_, project_.rendering,
+            renderer.mainBackendSelection().requested) != ProjectRestartNotice::None;
+        const float footerHeight = ImGui::GetFrameHeightWithSpacing() +
+            ImGui::GetTextLineHeightWithSpacing() * (startupNotice ? 6.0f : 2.0f);
         const float contentHeight = std::max(100.0f, ImGui::GetContentRegionAvail().y - footerHeight);
         ImGui::BeginChild("ProjectSettingsNavigation", ImVec2(135, contentHeight), ImGuiChildFlags_Borders);
         ImGui::TextDisabled("Categories");
@@ -64,15 +69,34 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::TextWrapped("Configure project rendering features independently of the current device.");
         ImGui::Spacing();
         bool changed = false;
+        const auto applyEdit = [&](ProjectRenderingEdit edit) {
+            syncProjectSettings(settings);
+            applyProjectRenderingEdit(projectRenderingDraft_, edit);
+            settings.hardwareRayTracing = projectRenderingDraft_.hardwareRayTracing;
+            settings.hardwareRayTracingReflections = projectRenderingDraft_.hardwareRayTracingReflections;
+            settings.hardwareRayTracingShadows = projectRenderingDraft_.hardwareRayTracingShadows;
+            settings.globalIllumination = projectRenderingDraft_.globalIllumination;
+            if (settings.hardwareRayTracing || projectRenderingDraft_.backendPreference == renderer::MainRenderBackend::D3D12)
+                settings.rayTracing = false;
+            changed = true;
+        };
         int backend = static_cast<int>(projectRenderingDraft_.backendPreference);
         ImGui::TextUnformatted("Main backend (next launch)");
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (ImGui::Combo("##MainBackend", &backend,
             "D3D11 + D3D12 ray tracing\0Auto\0D3D11 (strict)\0D3D12 (experimental raster)\0")) {
             projectRenderingDraft_.backendPreference = static_cast<renderer::MainRenderBackend>(backend);
+            applyEdit(ProjectRenderingEdit::Backend);
+        }
+        const bool fallbackEditable = projectRenderingDraft_.backendPreference == renderer::MainRenderBackend::D3D12;
+        bool fallback = fallbackEditable && projectRenderingDraft_.allowFallbackToD3D11;
+        ImGui::BeginDisabled(!fallbackEditable);
+        if (ImGui::Checkbox("Allow fallback to D3D11", &fallback)) {
+            projectRenderingDraft_.allowFallbackToD3D11 = fallback;
             changed = true;
         }
-        changed |= ImGui::Checkbox("Allow fallback to D3D11", &projectRenderingDraft_.allowFallbackToD3D11);
+        ImGui::EndDisabled();
+        if (!fallbackEditable) ImGui::TextDisabled("Fallback applies only to the native D3D12 backend.");
         const auto& activeBackend = renderer.mainBackendSelection();
         ImGui::Text("Current main backend: %s", renderer.mainBackendReady()
             ? renderer::mainRenderBackendKey(activeBackend.effective) : "Not initialized");
@@ -83,45 +107,88 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::TextWrapped("Auto uses strict D3D11. Native D3D12 is an experimental raster backend. Hybrid mode uses D3D11 raster and optional D3D12/DXR ray tracing.");
         if (activeBackend.effective == renderer::MainRenderBackend::D3D12)
             ImGui::TextWrapped("Native D3D12 currently keeps requests for ray tracing, GI, depth of field and selection outlines without executing those features.");
-        const renderer::MainBackendRequest nextLaunch{
-            projectRenderingDraft_.backendPreference, projectRenderingDraft_.allowFallbackToD3D11};
-        if (nextLaunch != activeBackend.requested)
-            ImGui::TextWrapped("The project preference differs from this launch. Save and relaunch without command-line overrides to use it.");
+        ImGui::Spacing();
+        ImGui::SeparatorText("Anti-aliasing");
+        int aaMethod = static_cast<int>(settings.antiAliasing.method);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##AntiAliasingMethod", &aaMethod, "Off\0FXAA\0TAA\0")) {
+            settings.antiAliasing.method = static_cast<renderer::AntiAliasingMethod>(aaMethod);
+            changed = true;
+        }
+        ImGui::TextWrapped("FXAA smooths edges in the current image. TAA combines jittered frames for steadier subpixel detail.");
+        if (settings.antiAliasing.method == renderer::AntiAliasingMethod::TAA) {
+            ImGui::TextUnformatted("Current frame weight");
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            changed |= ImGui::SliderFloat("##TemporalCurrentWeight", &settings.antiAliasing.temporalCurrentWeight,
+                .02f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TextWrapped("Lower weights favor a stable image; higher weights respond faster to motion and lighting changes.");
+        }
+        const auto aaStatus = renderer.antiAliasingStatus();
+        ImGui::Text("Requested: %s", renderer::antiAliasingMethodName(settings.antiAliasing.method));
+        ImGui::Text("Effective: %s", renderer::antiAliasingMethodName(aaStatus.effective));
+        if (aaStatus.effective == renderer::AntiAliasingMethod::TAA)
+            ImGui::Text("History: %u frames", aaStatus.accumulatedFrames);
+        if (!aaStatus.reason.empty()) ImGui::TextWrapped("%s", aaStatus.reason.c_str());
+        ImGui::Spacing();
+        const bool hardwareEditable = projectBackendAllowsHardware(projectRenderingDraft_.backendPreference);
+        if (!hardwareEditable)
+            ImGui::TextWrapped("Hardware ray tracing and path-traced GI require D3D11 + D3D12 ray tracing in this build. These controls are disabled for the selected next-launch backend.");
+        else if (!activeBackend.allowD3D12Bridge)
+            ImGui::TextWrapped("Lighting requests can be configured now, but require a restart into the hybrid backend to execute.");
         ImGui::Spacing();
         ImGui::SeparatorText("Lighting features");
         auto& gi = settings.globalIllumination;
+        bool hardware = hardwareEditable && settings.hardwareRayTracing;
+        ImGui::BeginDisabled(!hardwareEditable);
+        if (ImGui::Checkbox("Hardware ray tracing", &hardware)) {
+            settings.hardwareRayTracing = hardware;
+            applyEdit(ProjectRenderingEdit::HardwareRayTracing);
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Enabling hardware tracing selects reflections and shadows. Disabling it also disables dependent effects and GI.");
         const bool giEnabled = gi.method != renderer::GlobalIlluminationMethod::Disabled;
         const bool realtimeGi = giEnabled && gi.mode == renderer::GlobalIlluminationMode::Realtime;
-        changed |= ImGui::Checkbox("Hardware ray tracing", &settings.hardwareRayTracing);
-        ImGui::TextWrapped("Use supported hardware tracing for the configured lighting features.");
-        ImGui::BeginDisabled(!settings.hardwareRayTracing || giEnabled);
-        changed |= ImGui::Checkbox("Ray-traced reflections", &settings.hardwareRayTracingReflections);
+        const bool reflectionsEditable = hardware && !giEnabled;
+        bool reflections = reflectionsEditable && settings.hardwareRayTracingReflections;
+        ImGui::BeginDisabled(!reflectionsEditable);
+        if (ImGui::Checkbox("Ray-traced reflections", &reflections)) {
+            settings.hardwareRayTracingReflections = reflections;
+            changed = true;
+        }
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(!settings.hardwareRayTracing || realtimeGi);
-        changed |= ImGui::Checkbox("Ray-traced shadows", &settings.hardwareRayTracingShadows);
+        const bool shadowsEditable = hardware && !realtimeGi;
+        bool shadows = shadowsEditable && settings.hardwareRayTracingShadows;
+        ImGui::BeginDisabled(!shadowsEditable);
+        if (ImGui::Checkbox("Ray-traced shadows", &shadows)) {
+            settings.hardwareRayTracingShadows = shadows;
+            changed = true;
+        }
         ImGui::EndDisabled();
         if (giEnabled)
-            ImGui::TextWrapped("GI uses its indirect-specular option below. The standalone reflection preference is retained for GI-disabled rendering.");
+            ImGui::TextWrapped("GI uses indirect specular below. Selecting path tracing clears standalone ray-traced reflections.");
         if (realtimeGi)
-            ImGui::TextWrapped("Realtime GI uses the current Forward / Deferred direct-light shadow settings. The hardware shadow preference is retained for other modes.");
+            ImGui::TextWrapped("Realtime GI uses Forward / Deferred direct-light shadows and clears standalone ray-traced shadows.");
+        if ((!hardwareEditable && (settings.hardwareRayTracing || giEnabled)) ||
+            (!settings.hardwareRayTracing && (settings.hardwareRayTracingReflections || settings.hardwareRayTracingShadows || giEnabled)))
+            ImGui::TextWrapped("Inactive requests loaded from the project are retained. Explicit parent changes clear dependent requests; device limitations alone do not rewrite project settings.");
 
         ImGui::Spacing();
         ImGui::SeparatorText("Global illumination");
-        int method = static_cast<int>(gi.method);
+        int method = hardwareEditable ? static_cast<int>(gi.method) : 0;
+        ImGui::BeginDisabled(!hardwareEditable);
         if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0")) {
             gi.method = static_cast<renderer::GlobalIlluminationMethod>(method);
-            if (gi.method == renderer::GlobalIlluminationMethod::PathTracing)
-                settings.hardwareRayTracing = true;
-            changed = true;
+            applyEdit(ProjectRenderingEdit::GiMethod);
         }
+        ImGui::EndDisabled();
         if (gi.method == renderer::GlobalIlluminationMethod::Disabled)
             ImGui::TextWrapped("GI is disabled. Hardware preview has no diffuse color bleeding.");
-        ImGui::TextWrapped("Selecting path tracing enables hardware ray tracing. Turning hardware off keeps your GI preference.");
-        ImGui::BeginDisabled(gi.method != renderer::GlobalIlluminationMethod::PathTracing);
+        ImGui::TextWrapped("Selecting path tracing enables hardware ray tracing and disables the competing standalone reflections.");
+        ImGui::BeginDisabled(!hardwareEditable || !settings.hardwareRayTracing || gi.method != renderer::GlobalIlluminationMethod::PathTracing);
         int mode = static_cast<int>(gi.mode);
         if (ImGui::Combo("GI mode", &mode, "Progressive accumulation\0Realtime\0")) {
             gi.mode = static_cast<renderer::GlobalIlluminationMode>(mode);
-            changed = true;
+            applyEdit(ProjectRenderingEdit::GiMode);
         }
         changed |= ImGui::Checkbox("Indirect diffuse (color bleeding)", &gi.indirectDiffuse);
         ImGui::BeginDisabled(!gi.indirectDiffuse);
@@ -187,13 +254,27 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::TextWrapped("Unavailable features retain your saved request and use the supported rendering path.");
         ImGui::Spacing();
         ImGui::SeparatorText("Compatibility preview");
-        ImGui::BeginDisabled(settings.hardwareRayTracing);
-        ImGui::Checkbox("Analytic reflections (D3D11)", &settings.rayTracing);
+        const bool analyticEditable = !settings.hardwareRayTracing &&
+            projectRenderingDraft_.backendPreference != renderer::MainRenderBackend::D3D12 &&
+            activeBackend.effective != renderer::MainRenderBackend::D3D12;
+        bool analytic = analyticEditable && settings.rayTracing;
+        ImGui::BeginDisabled(!analyticEditable);
+        if (ImGui::Checkbox("Analytic reflections (D3D11)", &analytic)) settings.rayTracing = analytic;
         ImGui::EndDisabled();
-        ImGui::TextWrapped("Session-only analytic tracing. Hardware ray tracing takes precedence when requested.");
+        ImGui::TextWrapped("Session-only D3D11 analytic tracing. Enabling hardware tracing clears this competing option.");
         ImGui::EndChild();
 
         ImGui::Separator();
+        const auto restart = projectRestartNotice(projectRenderingDraft_, project_.rendering,
+            renderer.mainBackendSelection().requested);
+        if (restart == ProjectRestartNotice::SaveAndRestart)
+            ImGui::TextWrapped("Restart required: save project settings, then restart the editor.");
+        else if (restart == ProjectRestartNotice::Restart)
+            ImGui::TextWrapped("Restart required: settings are saved. Restart the editor to apply the startup configuration.");
+        else if (restart == ProjectRestartNotice::SaveToCancelRestart)
+            ImGui::TextWrapped("Save to cancel restart: the saved startup configuration still differs from this session.");
+        if (restart != ProjectRestartNotice::None)
+            ImGui::TextWrapped("Launch without backend command-line overrides to use the saved project configuration.");
         ImGui::BeginDisabled(!projectSettingsDirty_);
         if (ImGui::Button("Save project settings")) saveProjectSettings();
         ImGui::EndDisabled();

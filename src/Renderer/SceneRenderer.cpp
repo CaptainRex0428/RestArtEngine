@@ -111,6 +111,12 @@ struct alignas(16) GlobalIlluminationConstants { XMFLOAT4 viewport; };
 static_assert(sizeof(GlobalIlluminationConstants) == 16);
 struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
 static_assert(sizeof(DepthOfFieldConstants) == 32);
+struct alignas(16) AntiAliasingConstants {
+    XMFLOAT4X4 inverseViewProjection, previousViewProjection;
+    XMFLOAT4 currentEye, currentForward, previousEye, previousForward;
+    XMFLOAT4 viewport, parameters;
+};
+static_assert(sizeof(AntiAliasingConstants) == 224);
 struct alignas(16) RayTriangle {
     XMFLOAT3 position0;
     XMFLOAT3 position1;
@@ -211,6 +217,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"GlobalIlluminationConstants", D3D_SIT_CBUFFER, 6, sizeof(GlobalIlluminationConstants)},
         {"LightingConstants", D3D_SIT_CBUFFER, 7, sizeof(LightingConstants)},
         {"DepthOfFieldConstants", D3D_SIT_CBUFFER, 8, sizeof(DepthOfFieldConstants)},
+        {"AntiAliasingConstants", D3D_SIT_CBUFFER, 5, sizeof(AntiAliasingConstants)},
         {"albedoBuffer", D3D_SIT_TEXTURE, 0, 0}, {"normalBuffer", D3D_SIT_TEXTURE, 1, 0}, {"positionBuffer", D3D_SIT_TEXTURE, 2, 0},
         {"shadowMap", D3D_SIT_TEXTURE, 3, 0}, {"gbufferSampler", D3D_SIT_SAMPLER, 0, 0},
         {"shadowSampler", D3D_SIT_SAMPLER, 1, 0},
@@ -218,6 +225,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
         {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
         {"dofColor", D3D_SIT_TEXTURE, 12, 0},
+        {"aaSource", D3D_SIT_TEXTURE, 7, 0}, {"aaHistory", D3D_SIT_TEXTURE, 8, 0},
         {"rayUvVertices", D3D_SIT_STRUCTURED, 10, 0}, {"rayUvTriangles", D3D_SIT_STRUCTURED, 11, 0}
     };
     for (UINT i = 0; i < desc.BoundResources; ++i) {
@@ -276,6 +284,14 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"GlobalIlluminationConstants","giViewport",0,16},
         {"DepthOfFieldConstants","dofViewport",0,16},
         {"DepthOfFieldConstants","dofParameters",16,16},
+        {"AntiAliasingConstants","aaInverseViewProjection",0,64},
+        {"AntiAliasingConstants","aaPreviousViewProjection",64,64},
+        {"AntiAliasingConstants","aaCurrentEye",128,16},
+        {"AntiAliasingConstants","aaCurrentForward",144,16},
+        {"AntiAliasingConstants","aaPreviousEye",160,16},
+        {"AntiAliasingConstants","aaPreviousForward",176,16},
+        {"AntiAliasingConstants","aaViewport",192,16},
+        {"AntiAliasingConstants","aaParameters",208,16},
         {"LightingConstants","lightInfo",0,16},
         {"LightingConstants","skyColor",16,16},
         {"LightingConstants","sceneLights",32,sizeof(GpuLight) * maxSceneLights}
@@ -447,9 +463,10 @@ struct SceneRenderer::Impl {
     rhi::TextureHandle swapchainImage, sceneColorImage, sceneDepthImage, shadowImage;
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
-    std::array<rhi::ShaderHandle, 7> pixelModules;
+    // Index 7 remains the depth-only shadow pipeline without a pixel stage.
+    std::array<rhi::ShaderHandle, 11> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
-    rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, zeroUv;
+    rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv;
     ComPtr<IDXGISwapChain> swapChain;
     ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D11InfoQueue> infoQueue;
@@ -554,6 +571,7 @@ struct SceneRenderer::Impl {
 #include "GeometryStatistics.inl"
 #include "FrustumCulling.inl"
 #include "DepthOfField.inl"
+#include "AntiAliasing.inl"
 
     bool createSwapChain(HWND__* window, std::uint32_t targetWidth, std::uint32_t targetHeight, std::string& error) {
         DXGI_SWAP_CHAIN_DESC1 description{};
@@ -595,7 +613,7 @@ struct SceneRenderer::Impl {
     bool createPipeline(std::string& error, const LoadProgress& progress = {}) {
         try {
         ComPtr<ID3DBlob> shader;
-        progress.report(0.0f, "Compiling geometry shader", "VSMain (1/9)");
+        progress.report(0.0f, "Compiling geometry shader", "VSMain (1/12)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSMain", "vs_5_0", shader, error)) return false;
         geometryModule = rhiDevice->createShader(rhi::ShaderStage::Vertex,
             gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "Scene geometry VS");
@@ -607,25 +625,27 @@ struct SceneRenderer::Impl {
             {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
         if (device && failed(device->CreateInputLayout(layout, static_cast<UINT>(std::size(layout)), shader->GetBufferPointer(), shader->GetBufferSize(), &inputLayout), "Create input layout", error)) return false;
-        progress.report(0.07f, "Geometry shader ready", "VSMain (1/9)");
+        progress.report(0.07f, "Geometry shader ready", "VSMain (1/12)");
         shader.Reset();
-        progress.report(0.07f, "Compiling fullscreen shader", "VSFullscreen (2/9)");
+        progress.report(0.07f, "Compiling fullscreen shader", "VSFullscreen (2/12)");
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, "VSFullscreen", "vs_5_0", shader, error)) return false;
         fullscreenModule = rhiDevice->createShader(rhi::ShaderStage::Vertex,
             gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "Scene fullscreen VS");
         if (device) fullscreenVS = d3d11::nativeVertexShader(fullscreenModule);
-        progress.report(0.14f, "Fullscreen shader ready", "VSFullscreen (2/9)");
+        progress.report(0.14f, "Fullscreen shader ready", "VSFullscreen (2/12)");
         unsigned moduleIndex = 0;
+        unsigned compiledPixels = 0;
         const auto pixelShader = [&](const char* entry, ComPtr<ID3D11PixelShader>& result) {
             shader.Reset();
-            const auto detail = std::string(entry) + " (" + std::to_string(moduleIndex + 3) + "/9)";
-            progress.report(0.14f + 0.08f * static_cast<float>(moduleIndex), "Compiling scene shader", detail);
+            const auto detail = std::string(entry) + " (" + std::to_string(compiledPixels + 3) + "/12)";
+            progress.report(0.14f + 0.056f * static_cast<float>(compiledPixels), "Compiling scene shader", detail);
             if (!compile(shaderRoot, materialPath(), sceneSource, materialSource, entry, "ps_5_0", shader, error)) return false;
             auto module = rhiDevice->createShader(rhi::ShaderStage::Pixel,
                 gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), entry);
             if (device) result = d3d11::nativePixelShader(module);
             pixelModules[moduleIndex++] = std::move(module);
-            progress.report(0.14f + 0.08f * static_cast<float>(moduleIndex), "Scene shader ready", detail);
+            ++compiledPixels;
+            progress.report(0.14f + 0.056f * static_cast<float>(compiledPixels), "Scene shader ready", detail);
             return true;
         };
         if (!pixelShader("PSForward", forwardPS) || !pixelShader("PSGBuffer", gbufferPS) ||
@@ -633,6 +653,11 @@ struct SceneRenderer::Impl {
             !pixelShader("PSOutlineMask", outlineMaskPS) || !pixelShader("PSOutlineComposite", outlineCompositePS) ||
             !pixelShader("PSDepthOfField", dofPS))
             return false;
+        // Index 7 is reserved for the depth-only shadow PSO.
+        ++moduleIndex;
+        ComPtr<ID3D11PixelShader> aaPixel;
+        if (!pixelShader("PSFXAA",aaPixel) || !pixelShader("PSTAA",aaPixel) ||
+            !pixelShader("PSAntiAliasingPresent",aaPixel)) return false;
         if (device) {
             progress.report(0.70f, "Preparing selection outline");
             if (!outline) outline = std::make_unique<SelectionOutlinePass>();
@@ -652,6 +677,7 @@ struct SceneRenderer::Impl {
         constant(giBuffer, giConstants, sizeof(GlobalIlluminationConstants), "GI constants");
         constant(dofBuffer, dofConstants, sizeof(DepthOfFieldConstants), "DOF constants");
         constant(lightingBuffer, lightingConstants, sizeof(LightingConstants), "Lighting constants");
+        aaBuffer = rhiDevice->createBuffer({sizeof(AntiAliasingConstants),rhi::BufferUsage::Constant,false,"Anti-aliasing constants"});
         meshAttributes::PackedUv missingUvData{};
         this->zeroUv = rhiDevice->createBuffer({sizeof(missingUvData), rhi::BufferUsage::Vertex, true, "Absent UV stream"},
             gpuBytes(&missingUvData, sizeof(missingUvData)));
@@ -696,10 +722,11 @@ struct SceneRenderer::Impl {
             progress.report(0.80f + 0.03f * static_cast<float>(rasterVariant + 1), "Graphics pipeline group ready",
                 "Material and shadow variants " + std::to_string((rasterVariant + 1) * 37) + "/222");
         }
-        progress.report(0.98f, "Preparing fullscreen pipelines", "Deferred lighting and background (0/2)");
+        progress.report(0.98f, "Preparing fullscreen pipelines", "Lighting, background and anti-aliasing (0/5)");
         (void)graphicsPipeline(2, 0, 16, true, false);
         (void)graphicsPipeline(3, 0, 16, true, true);
-        progress.report(1.0f, "Raster pipelines ready", "224 graphics pipelines");
+        for (unsigned index=8;index<=10;++index) (void)graphicsPipeline(index,0,16,true,false);
+        progress.report(1.0f, "Raster pipelines ready", "227 graphics pipelines");
         return true;
         } catch (const std::exception& failure) { error = failure.what(); return false; }
     }
@@ -1240,6 +1267,7 @@ bool SceneRenderer::resize(std::uint32_t width, std::uint32_t height, std::strin
         try {
             state.sceneCommands().endRenderPass();
             state.swapchainImage.reset();
+            state.native12->releaseBorrowedUiTextures();
             state.native12->resize(width, height);
             state.width = width; state.height = height;
             state.resetGeometryViewport();
@@ -1398,6 +1426,7 @@ bool SceneRenderer::renderCameraPreview(const scene::World& world, const assets:
     if (!camera::valid(camera)) { error = "Invalid camera pose or lens."; return false; }
     SceneSettings settings;
     settings.offscreenTarget = true;
+    settings.antiAliasing.method = AntiAliasingMethod::FXAA;
     settings.cameraPose = camera.pose;
     settings.cameraLens = camera.lens;
     settings.exposure = exposure;
@@ -1442,6 +1471,7 @@ bool SceneRenderer::renderMaterialPreview(const assets::MaterialAsset& material,
     SceneSettings settings;
     settings.editorViewport = false;
     settings.offscreenTarget = true;
+    settings.antiAliasing.method = AntiAliasingMethod::FXAA;
     settings.viewportVisible = true;
     settings.viewportX = 0;
     settings.viewportY = 0;
@@ -1495,6 +1525,7 @@ bool SceneRenderer::renderScenePreview(const scene::World& world, const assets::
     SceneSettings settings;
     settings.editorViewport = false;
     settings.offscreenTarget = true;
+    settings.antiAliasing.method = AntiAliasingMethod::FXAA;
     settings.viewportVisible = true;
     settings.viewportX = 0;
     settings.viewportY = 0;
@@ -1666,10 +1697,37 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     std::memcpy(&viewValues, cameraView.view.data(), sizeof(viewValues));
     std::memcpy(&projectionValues, cameraView.projection.data(), sizeof(projectionValues));
     const XMMATRIX view = XMLoadFloat4x4(&viewValues);
-    const XMMATRIX projection = XMLoadFloat4x4(&projectionValues);
+    XMMATRIX projection = XMLoadFloat4x4(&projectionValues);
     const XMVECTOR eye = XMVectorSet(cameraView.position[0], cameraView.position[1], cameraView.position[2], 1);
     const bool wantsRayScene = !state.native12 && (settings.rayTracing || settings.shadowMethod == ShadowMethod::AnalyticRay);
     const auto lighting = gatherLighting(world, settings.lightIntensity);
+    const bool hardwareImageExpected = diagnosticMainScene && settings.hardwareRayTracing &&
+        state.hardwarePipelineReady && state.hardwareRayTracing && state.hardwareRayTracing->supported() &&
+        !state.hardwareRuntimeFailed && std::all_of(world.actors.begin(),world.actors.end(),[&](const scene::Actor& actor) {
+            if (!actor.visible || actor.light || actor.camera || !validTransform(actor)) return true;
+            const auto* mesh=assets.findMesh(actor.mesh.meshId);
+            if (!mesh) return true;
+            bool compatible=true;
+            meshAttributes::sections(*mesh,[&](std::uint32_t,std::uint32_t count,std::uint32_t slot) {
+                const auto* material=resolveMaterial(assets,actor.mesh.materialForSlot(*mesh,slot),materialOverride);
+                if(count && material && !material->hardwareDepthCompatible()) compatible=false;
+            });
+            return compatible;
+        });
+    const auto aaPolicy = state.resolveAntiAliasing(settings,hardwareImageExpected);
+    const bool antiAliasing = aaPolicy.effective != AntiAliasingMethod::Disabled;
+    const bool temporalAntiAliasing = aaPolicy.effective == AntiAliasingMethod::TAA;
+    const XMFLOAT4 aaViewport(static_cast<float>(viewportX),static_cast<float>(viewportY),
+        static_cast<float>(viewportWidth),static_cast<float>(viewportHeight));
+    if (antiAliasing) state.ensureAntiAliasingTargets(targetWidth,targetHeight,temporalAntiAliasing);
+    if (temporalAntiAliasing)
+        state.prepareTemporalAntiAliasing(settings,world,assets,materialOverride,cameraView,lighting,aaViewport,projection);
+    else if (diagnosticMainScene && state.aaHistoryValid) state.invalidateAntiAliasing();
+    if (diagnosticMainScene) {
+        state.aaStatus = aaPolicy;
+        state.aaStatus.historyRevision = state.aaHistoryRevision;
+    }
+    const auto aaConstants = state.antiAliasingConstants(settings,cameraView,view*projection,aaViewport);
     state.raySceneActive = wantsRayScene;
     if (wantsRayScene) state.rayLastUsed = Impl::Clock::now();
     if (wantsRayScene && !state.prepareRayTriangles(world, assets, error, materialOverride)) return false;
@@ -1858,6 +1916,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.hardwareTransport = hardwareTransport;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.depthOfField = depthOfField;
+    pipelineInputs.antiAliasing = antiAliasing;
+    pipelineInputs.temporalAntiAliasing = temporalAntiAliasing;
     pipelineInputs.selectionOutline = selectionOutline && !state.native12;
     pipelineInputs.frameCapture = diagnosticMainScene && state.captureRequested;
     auto pipeline = buildScenePipeline(pipelineInputs);
@@ -1872,6 +1932,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         static_cast<float>(viewportWidth), static_cast<float>(viewportHeight), 0, 1};
     ID3D11RenderTargetView* backbuffer = (settings.editorViewport || settings.offscreenTarget)
         ? state.sceneTarget.Get() : state.backbuffer.Get();
+    ID3D11RenderTargetView* finalBackbuffer = backbuffer;
+    if (antiAliasing && state.device) backbuffer = d3d11::nativeColorTarget(state.aaSourceImage);
     const bool blackClear = world.blackBackground || fitAuthoredAspect;
     const float backgroundClear[4] = {blackClear ? 0.0f : 0.025f, blackClear ? 0.0f : 0.035f,
         blackClear ? 0.0f : 0.055f, 1.0f};
@@ -1918,6 +1980,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
 
     const auto destinationImage = (settings.editorViewport || settings.offscreenTarget)
         ? state.sceneColorImage : state.swapchainImage;
+    const auto rasterDestinationImage = antiAliasing ? state.aaSourceImage : destinationImage;
     const std::array<float, 4> clearColor{backgroundClear[0], backgroundClear[1], backgroundClear[2], backgroundClear[3]};
     struct RhiPassScope {
         Impl& state;
@@ -2049,7 +2112,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.beginDiagnosticPass(pass.name);
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
-            rasterPass.colors = {{destinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
+            rasterPass.colors = {{rasterDestinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
                 {state.gbufferImages[2], 2}};
             if (contains(pass.reads, PipelineResource::ShadowMap))
@@ -2065,7 +2128,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             beginRasterPasses();
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
-            rasterPass.colors = {{destinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
+            rasterPass.colors = {{rasterDestinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor}};
             rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Clear};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
@@ -2077,7 +2140,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.beginDiagnosticPass(pass.name);
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
-            rasterPass.colors = {{destinationImage}};
+            rasterPass.colors = {{rasterDestinationImage}};
             rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
@@ -2119,6 +2182,17 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             if (!state.outline->drawMasks(state.context.Get(), state.depth.Get(), sceneViewport,
                     state.geometryVS.Get(), state.inputLayout.Get(), state.outlineMaskPS.Get(),
                     state.constants.Get(), state.objectConstants.Get(), drawSelected, error)) return false;
+            break;
+        }
+        case RenderPassKind::AntiAliasing: {
+            state.beginDiagnosticPass(pass.name);
+            state.executeAntiAliasing(destinationImage,aaConstants,temporalAntiAliasing);
+            backbuffer = finalBackbuffer;
+            break;
+        }
+        case RenderPassKind::AntiAliasingPresent: {
+            state.beginDiagnosticPass(pass.name);
+            state.presentTemporalAntiAliasing(destinationImage,aaConstants,view*XMLoadFloat4x4(&projectionValues));
             break;
         }
         case RenderPassKind::SelectionComposite: {
@@ -2264,7 +2338,7 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
             impl_->hardwareRuntimeFailed = false;
         }
     }
-    // No live GPU state or source is changed until all nine stages and contracts pass.
+    // No live GPU state or source is changed until all twelve stages and contracts pass.
     impl_->geometryModule = std::move(candidate.geometryModule);
     impl_->fullscreenModule = std::move(candidate.fullscreenModule);
     impl_->pixelModules = std::move(candidate.pixelModules);
@@ -2282,7 +2356,8 @@ bool SceneRenderer::applyShaderSource(const std::string& source, std::string& di
     impl_->materialSource = source;
     impl_->sceneSource = std::move(candidate.sceneSource);
     ++impl_->revision;
-    diagnostics = "Applied all 9 raster shader stages";
+    impl_->invalidateAntiAliasing();
+    diagnostics = "Applied all 12 raster shader stages";
     if (impl_->hardwarePipelineReady) diagnostics += " and the DXR hardware pipeline";
     diagnostics += ". Revision " + std::to_string(impl_->revision) + ".";
     if (!hardwareWarning.empty()) diagnostics += " Hardware mode unavailable: " + hardwareWarning;
@@ -2359,6 +2434,36 @@ std::uint64_t SceneRenderer::hardwareRayTracingDispatchCount() const {
     return impl_->hardwareRayTracing ? impl_->hardwareRayTracing->dispatchCount() : 0;
 }
 GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const { return impl_->giStatus; }
+AntiAliasingStatus SceneRenderer::antiAliasingStatus() const { return impl_->aaStatus; }
+bool SceneRenderer::readScenePixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
+    std::uint32_t& height, std::string& error) const {
+    error.clear(); pixels.clear(); width=height=0;
+    auto& state=*impl_;
+    if (!state.sceneColorImage) { error="Scene target is unavailable."; return false; }
+    try {
+        if (state.native12) {
+            const auto result=state.native12->readTexture(state.sceneColorImage);
+            width=result.width; height=result.height;
+            pixels.resize(static_cast<std::size_t>(width)*height*4);
+            for(unsigned y=0;y<height;++y) std::memcpy(pixels.data()+static_cast<std::size_t>(y)*width*4,
+                result.bytes.data()+static_cast<std::size_t>(y)*result.rowPitch,width*4);
+            return true;
+        }
+        D3D11_TEXTURE2D_DESC desc{}; state.sceneTexture->GetDesc(&desc);
+        desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=desc.MiscFlags=0; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        if(failed(state.device->CreateTexture2D(&desc,nullptr,&staging),"Create scene readback",error)) return false;
+        state.context->OMSetRenderTargets(0,nullptr,nullptr);
+        state.context->CopyResource(staging.Get(),state.sceneTexture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(failed(state.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Map scene readback",error)) return false;
+        width=desc.Width; height=desc.Height; pixels.resize(static_cast<std::size_t>(width)*height*4);
+        for(unsigned y=0;y<height;++y) std::memcpy(pixels.data()+static_cast<std::size_t>(y)*width*4,
+            static_cast<const std::uint8_t*>(mapped.pData)+static_cast<std::size_t>(y)*mapped.RowPitch,width*4);
+        state.context->Unmap(staging.Get(),0);
+        return true;
+    } catch(const std::exception& failure) { error=failure.what(); return false; }
+}
 void SceneRenderer::resetGlobalIllumination() {
     ++impl_->giHistoryEpoch;
     impl_->giStatus.accumulatedSamples = 0;
