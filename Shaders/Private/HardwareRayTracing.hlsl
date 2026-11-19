@@ -60,35 +60,50 @@ void ResolveRealtimeGi(uint2 pixel)
     {
         // Keep near-mirror reflections sharp. For rough surfaces filter only
         // neighbours on the same plane/normal and with similar material values.
+        // Longer iteration counts add wider 5x5 taps (multi-scale approximation
+        // of a-trous) instead of repeating the same one-pixel kernel.
         int radius = material.w < 0.12 ? 0 : 2;
         float footprint = CameraPixelFootprint(position, float(outputInfo.y));
         float3 sum = 0.0;
         float total = 0.0;
-        [loop] for (int y = -radius; y <= radius; ++y)
-        [loop] for (int x = -radius; x <= radius; ++x)
+        uint iterations = clamp((uint)denoiseOptions.w, 1u, 4u);
+        if (radius > 0)
         {
-            int2 neighbour = int2(pixel) + int2(x, y);
-            if (any(neighbour < 0) || any(neighbour >= int2(outputInfo.xy))) continue;
-            float4 otherGeometry = primaryGeometry[neighbour];
-            if (otherGeometry.w <= 0.0) continue;
-            float cosine = saturate(dot(geometry.xyz, otherGeometry.xyz));
-            if (cosine < 0.9) continue;
-            float4 otherMaterial = primaryMaterial[neighbour];
-            float3 delta = RealtimePosition(uint2(neighbour), otherGeometry.w) - position;
-            float planeDistance = abs(dot(delta, geometry.xyz));
-            float3 colorDelta = material.rgb - otherMaterial.rgb;
-            float weight = exp(-float(x*x + y*y) / 4.0)
-                * pow(cosine, 32.0) * exp(-planeDistance / footprint)
-                * exp(-dot(colorDelta, colorDelta) * 32.0 - abs(material.w - otherMaterial.w) * 32.0);
-            sum += pathAccumulation[neighbour].rgb * weight;
-            total += weight;
+            [loop] for (uint iteration = 0; iteration < iterations; ++iteration)
+            {
+                int step = int(1u << min(iteration, 3u));
+                float iterationWeight = exp(-float(iteration) * 0.5);
+                [loop] for (int y = -radius; y <= radius; ++y)
+                [loop] for (int x = -radius; x <= radius; ++x)
+                {
+                    int2 neighbour = int2(pixel) + int2(x, y) * step;
+                    if (any(neighbour < 0) || any(neighbour >= int2(outputInfo.xy))) continue;
+                    float4 otherGeometry = primaryGeometry[neighbour];
+                    if (otherGeometry.w <= 0.0) continue;
+                    float cosine = saturate(dot(geometry.xyz, otherGeometry.xyz));
+                    if (cosine < 0.9) continue;
+                    float4 otherMaterial = primaryMaterial[neighbour];
+                    float3 delta = RealtimePosition(uint2(neighbour), otherGeometry.w) - position;
+                    float planeDistance = abs(dot(delta, geometry.xyz));
+                    float3 colorDelta = material.rgb - otherMaterial.rgb;
+                    float weight = exp(-float(x*x + y*y) / 4.0) * iterationWeight
+                        * pow(cosine, 32.0) * exp(-planeDistance / footprint)
+                        * exp(-dot(colorDelta, colorDelta) * 32.0 - abs(material.w - otherMaterial.w) * 32.0);
+                    sum += pathAccumulation[neighbour].rgb * weight;
+                    total += weight;
+                }
+            }
+            resolved = sum / max(total, 1e-8);
         }
-        resolved = sum / max(total, 1e-8);
+        else
+        {
+            resolved = raw;
+        }
     }
     if (denoiseOptions.x >= 1.5)
     {
-        // Camera reprojection. Per-object motion is a later extension; object
-        // motion currently relies on the geometry/depth rejection below.
+        // Camera and per-object reprojection. Object motion can still exhibit
+        // mild disocclusion trailing at depth/normal boundaries.
         float3 history = resolved;
         float historyWeight = 0.0;
         if (denoiseOptions.z < 0.5)

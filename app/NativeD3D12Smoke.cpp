@@ -580,7 +580,7 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
             settings.globalIllumination.maxBounces = 2;
             settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::TemporalSpatial;
             settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::Automatic;
-            settings.globalIllumination.denoiseIterations = 2;
+            settings.globalIllumination.denoiseIterations = 4;
             for (int frame = 0; frame < 4; ++frame) renderMain(frame == 3 ? "native-dxr-realtime-gi.bmp" : nullptr);
             const auto gi = renderer.globalIlluminationStatus();
             require(gi.effective == renderer::GlobalIlluminationMethod::PathTracing,
