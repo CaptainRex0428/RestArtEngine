@@ -285,7 +285,10 @@ void globalIlluminationRoundTrip() {
         "An empty GI settings object preserves compatible defaults.");
     require(loaded.rendering.globalIllumination.denoiser == renderer::GlobalIlluminationDenoiser::Spatial &&
         loaded.rendering.globalIllumination.motionVectors == renderer::GlobalIlluminationMotionVectors::Automatic &&
-        loaded.rendering.globalIllumination.denoiseIterations == 2,
+        loaded.rendering.globalIllumination.denoiseIterations == 2 &&
+        loaded.rendering.globalIllumination.screenSpaceSteps == 8 &&
+        loaded.rendering.globalIllumination.screenSpaceRadius == 2.0f &&
+        loaded.rendering.globalIllumination.screenSpaceThickness == 0.2f,
         "Missing reconstruction fields keep the legacy spatial resolve defaults.");
 
     value["rendering"]["globalIllumination"]["method"] = "pathTracing";
@@ -323,6 +326,18 @@ void globalIlluminationRoundTrip() {
     require(gi.at("extension") == value.at("rendering").at("globalIllumination").at("extension") &&
         saved.at("customExtension") == fixture.original.at("customExtension"),
         "Saving GI preserves unknown nested and project fields.");
+    requested.globalIllumination.method = renderer::GlobalIlluminationMethod::ScreenSpace;
+    requested.globalIllumination.screenSpaceSteps = 12;
+    requested.globalIllumination.screenSpaceRadius = 4.5f;
+    requested.globalIllumination.screenSpaceThickness = 0.35f;
+    require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
+    require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
+        "SSGI method and march settings survive project reload.");
+    const auto savedSsgi = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
+    require(savedSsgi.at("method") == "screenSpace" && savedSsgi.at("screenSpaceSteps") == 12 &&
+        savedSsgi.at("screenSpaceRadius") == 4.5f && savedSsgi.at("screenSpaceThickness") == 0.35f,
+        "SSGI serializes its stable method name and march settings.");
+    requested.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
 
     requested.hardwareRayTracing = false;
     requested.globalIllumination.mode = renderer::GlobalIlluminationMode::Progressive;
@@ -388,11 +403,18 @@ void globalIlluminationValidation() {
     for (const auto& invalid : {Json(nullptr), Json(false), Json(true), Json("2"), Json(-0.01),
             Json(8.01), Json(1e100), Json::array(), Json::object()})
         reject(Json{{"indirectDiffuseIntensity", invalid}}, "indirectDiffuseIntensity");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json("2"), Json(0.0), Json(-1.0),
+            Json(100.1), Json::array(), Json::object()})
+        reject(Json{{"screenSpaceRadius", invalid}}, "screenSpaceRadius");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json("0.2"), Json(0.0), Json(-1.0),
+            Json(10.1), Json::array(), Json::object()})
+        reject(Json{{"screenSpaceThickness", invalid}}, "screenSpaceThickness");
 
     struct Bound { const char* key; std::uint32_t maximum; };
     for (const auto& bound : {Bound{"samplesPerFrame", renderer::kGiMaxSamplesPerFrame},
             Bound{"targetSamples", renderer::kGiMaxTargetSamples}, Bound{"maxBounces", renderer::kGiMaxBounces},
-            Bound{"denoiseIterations", renderer::kGiMaxDenoiseIterations}}) {
+            Bound{"denoiseIterations", renderer::kGiMaxDenoiseIterations},
+            Bound{"screenSpaceSteps", renderer::kGiMaxScreenSpaceSteps}}) {
         for (const auto& invalid : {Json(nullptr), Json(false), Json("4"), Json(1.0), Json(1.5),
                 Json(0), Json(-1), Json(bound.maximum + 1), Json(std::numeric_limits<std::uint64_t>::max()),
                 Json(std::numeric_limits<std::int64_t>::min()), Json::object()})
@@ -442,6 +464,24 @@ void globalIlluminationValidation() {
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.maxBounces = renderer::kGiMaxBounces + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceSteps = 0;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceSteps = renderer::kGiMaxScreenSpaceSteps + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceRadius = 0.0f;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceRadius = std::numeric_limits<float>::infinity();
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceThickness = std::numeric_limits<float>::quiet_NaN();
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceThickness = 11.0f;
     invalidRequest(invalid);
 }
 
@@ -509,6 +549,10 @@ void editingDependenciesAndRestart() {
         require(!draft.hardwareRayTracing && !draft.hardwareRayTracingReflections && !draft.hardwareRayTracingShadows &&
             draft.globalIllumination.method == GlobalIlluminationMethod::Disabled,
             "An explicit incompatible backend choice clears hardware feature requests.");
+        draft.globalIllumination.method = GlobalIlluminationMethod::ScreenSpace;
+        applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
+        require(!draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace,
+            "SSGI survives an incompatible backend because it is a raster algorithm.");
         require(!projectBackendAllowsHardware(backend), "Strict D3D11 variants do not expose hardware/GI editing.");
     }
     require(projectBackendAllowsHardware(MainRenderBackend::D3D11Dxr), "The hybrid backend allows feature requests.");

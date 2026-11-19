@@ -98,6 +98,15 @@ void analyticRayInputs() {
     require(validatePipeline(pipeline).valid, "Ray pipeline is inconsistent.");
 }
 
+void screenSpaceGiInputs() {
+    auto build = inputs(RenderPath::Deferred);
+    build.screenSpaceGi = true;
+    const auto pipeline = buildScenePipeline(build);
+    require(contains(passAt(pipeline, 2).reads, PipelineResource::ScreenSpaceHistory),
+        "SSGI lighting must declare the previous-colour history input.");
+    require(validatePipeline(pipeline).valid, "SSGI pipeline is inconsistent.");
+}
+
 void hardwareTransport() {
     auto build = inputs(RenderPath::Deferred);
     build.hardwareTransport = true;
@@ -427,6 +436,7 @@ int main() {
         forwardBaseline();
         disabledShadowMap();
         analyticRayInputs();
+        screenSpaceGiInputs();
         hardwareTransport();
         postChain();
         antiAliasingChain();

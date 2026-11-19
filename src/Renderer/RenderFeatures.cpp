@@ -21,6 +21,7 @@ const char* toString(RenderFeature feature) noexcept {
     case RenderFeature::HardwareReflections: return "Hardware reflections";
     case RenderFeature::HardwareShadows: return "Hardware shadows";
     case RenderFeature::PathTracingGI: return "Path-traced GI";
+    case RenderFeature::ScreenSpaceGI: return "Screen-space GI";
     case RenderFeature::RealtimeGI: return "Realtime GI";
     case RenderFeature::DepthOfField: return "Depth of field";
     case RenderFeature::SelectionOutline: return "Selection outline";
@@ -194,6 +195,18 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
             set(RenderFeature::RealtimeGI, hardwareActive ? FeatureState::Active
                 : FeatureState::BlockedByDependency,
                 hardwareActive ? std::string{} : hardwareReason);
+        }
+    }
+
+    if (requests.globalIllumination == GlobalIlluminationMethod::ScreenSpace) {
+        if (requests.path != RenderPath::Deferred) {
+            set(RenderFeature::ScreenSpaceGI, FeatureState::BlockedByDependency,
+                "SSGI needs the Deferred G-buffer; Forward reports the request as unavailable.");
+        } else if (hardwareActive) {
+            set(RenderFeature::ScreenSpaceGI, FeatureState::BlockedByDependency,
+                "Hardware ray tracing resolved this frame; screen-space GI is skipped.");
+        } else {
+            set(RenderFeature::ScreenSpaceGI, FeatureState::Active);
         }
     }
 

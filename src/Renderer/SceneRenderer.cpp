@@ -107,8 +107,11 @@ struct alignas(16) RayObject {
     XMFLOAT4 color, properties;
 };
 struct alignas(16) RayConstants { XMFLOAT4 info; RayObject objects[32]; };
-struct alignas(16) GlobalIlluminationConstants { XMFLOAT4 viewport; };
-static_assert(sizeof(GlobalIlluminationConstants) == 16);
+struct alignas(16) GlobalIlluminationConstants {
+    XMFLOAT4 viewport; // enabled, width, height, screen-space steps
+    XMFLOAT4 screenSpace; // enabled, radius, thickness, intensity
+};
+static_assert(sizeof(GlobalIlluminationConstants) == 32);
 struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
 static_assert(sizeof(DepthOfFieldConstants) == 32);
 struct alignas(16) AntiAliasingConstants {
@@ -228,6 +231,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"rayTriangles", D3D_SIT_STRUCTURED, 4, 0}, {"outlineMask", D3D_SIT_TEXTURE, 5, 0},
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
         {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
+        {"screenSpaceHistory", D3D_SIT_TEXTURE, 13, 0},
         {"dofColor", D3D_SIT_TEXTURE, 12, 0},
         {"aaSource", D3D_SIT_TEXTURE, 7, 0}, {"aaHistory", D3D_SIT_TEXTURE, 8, 0},
         {"rayUvVertices", D3D_SIT_STRUCTURED, 10, 0}, {"rayUvTriangles", D3D_SIT_STRUCTURED, 11, 0}
@@ -286,6 +290,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"OutlineConstants","outlineColor",0,16},
         {"OutlineConstants","outlineParams",16,16},
         {"GlobalIlluminationConstants","giViewport",0,16},
+        {"GlobalIlluminationConstants","giScreenSpace",16,16},
         {"DepthOfFieldConstants","dofViewport",0,16},
         {"DepthOfFieldConstants","dofParameters",16,16},
         {"AntiAliasingConstants","aaInverseViewProjection",0,64},
@@ -465,6 +470,9 @@ struct SceneRenderer::Impl {
     std::string diagnosticVS, diagnosticPS;
     std::shared_ptr<d3d12::D3D12RhiDevice> native12;
     rhi::TextureHandle swapchainImage, sceneColorImage, sceneDepthImage, shadowImage;
+    // Last frame's resolved raster colour for deferred SSGI. Sampled by the
+    // deferred pass at t12; copied from the final scene colour after present.
+    rhi::TextureHandle ssgiHistoryImage;
     // The native DXR module owns and transitions its HDR indirect image; the
     // raster lighting samples an RHI-owned copy so both state machines stay
     // independent.
@@ -488,7 +496,11 @@ struct SceneRenderer::Impl {
     RenderPipeline pipeline;
     RenderFeatureMatrix features;
     GlobalIlluminationStatus giStatus;
+    GlobalIlluminationMethod lastGiMethod = GlobalIlluminationMethod::Disabled;
+    bool lastScreenSpaceGi = false;
     std::uint64_t giHistoryEpoch = 0;
+    bool ssgiHistoryValid = false;
+    std::uint64_t ssgiViewId = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
     ComPtr<ID3D11Texture2D> sceneTexture;
@@ -562,7 +574,7 @@ struct SceneRenderer::Impl {
     std::uint32_t width = 0, height = 0;
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
-        rhi::TextureHandle colorImage, depthImage;
+        rhi::TextureHandle colorImage, depthImage, historyImage;
         std::array<rhi::TextureHandle, 3> images;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
@@ -607,6 +619,7 @@ struct SceneRenderer::Impl {
             auto& retired = retiredSceneTargets.emplace_back();
             retired.colorImage = std::move(sceneColorImage);
             retired.depthImage = std::move(sceneDepthImage);
+            retired.historyImage = std::move(ssgiHistoryImage);
             retired.images = std::move(gbufferImages);
             retired.colorTarget = std::move(sceneTarget);
             retired.color = std::move(sceneTexture);
@@ -1939,6 +1952,30 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested && settings.debugView == 0;
+    const bool screenSpaceGi = diagnosticMainScene && settings.debugView == 0 &&
+        (settings.editorViewport || settings.offscreenTarget) &&
+        settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace &&
+        settings.path == RenderPath::Deferred && !hardwareTransport;
+    if (diagnosticMainScene && state.ssgiViewId != settings.viewId) {
+        state.ssgiHistoryValid = false;
+        state.ssgiViewId = settings.viewId;
+    }
+    state.lastGiMethod = settings.globalIllumination.method;
+    state.lastScreenSpaceGi = screenSpaceGi;
+    if (diagnosticMainScene && settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace) {
+        state.giStatus.requested = GlobalIlluminationMethod::ScreenSpace;
+        state.giStatus.effective = screenSpaceGi ? GlobalIlluminationMethod::ScreenSpace
+            : GlobalIlluminationMethod::Disabled;
+        state.giStatus.requestedMode = GlobalIlluminationMode::Realtime;
+        state.giStatus.effectiveMode = GlobalIlluminationMode::Realtime;
+        state.giStatus.accumulatedSamples = screenSpaceGi ? 1u : 0u;
+        state.giStatus.targetSamples = 1;
+        state.giStatus.reason = screenSpaceGi
+            ? "Realtime screen-space GI consumes the deferred G-buffer and the previous frame's lit colour."
+            : settings.path == RenderPath::Forward ? "SSGI requires the Deferred raster path."
+            : !(settings.editorViewport || settings.offscreenTarget) ? "SSGI currently requires the editor/offscreen scene target."
+            : "SSGI is unavailable for this frame.";
+    }
     const bool depthOfField = !state.native12 && depthOfFieldEligible(cameraView.lens) && settings.debugView <= 1;
     const bool selectionOutline = settings.editorViewport && settings.outlineActors &&
         settings.outlineActorCount > 0;
@@ -1948,6 +1985,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.rayTriangleScene = wantsRayScene;
     pipelineInputs.hardwareTransport = hardwareTransport;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
+    pipelineInputs.screenSpaceGi = screenSpaceGi;
     pipelineInputs.depthOfField = depthOfField;
     pipelineInputs.antiAliasing = antiAliasing;
     pipelineInputs.temporalAntiAliasing = temporalAntiAliasing;
@@ -1973,8 +2011,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // Realtime GI publishes a resolved indirect image consumed by either raster
     // path. The transport pass overwrites this binding when it produced one.
     GlobalIlluminationConstants giData{};
+    const bool ssgiHistoryReady = screenSpaceGi && state.ssgiHistoryValid;
     giData.viewport = XMFLOAT4(0.0f, static_cast<float>(viewportWidth),
-        static_cast<float>(viewportHeight), 0.0f);
+        static_cast<float>(viewportHeight), screenSpaceGi
+            ? static_cast<float>(settings.globalIllumination.screenSpaceSteps) : 0.0f);
+    giData.screenSpace = XMFLOAT4(ssgiHistoryReady ? 1.0f : 0.0f,
+        settings.globalIllumination.screenSpaceRadius, settings.globalIllumination.screenSpaceThickness,
+        settings.globalIllumination.indirectDiffuseIntensity);
     state.uploadConstants(state.giBuffer, giData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
     bool hardwareFrameReady = false;
@@ -2174,6 +2217,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 rasterPass.reads.push_back({state.shadowImage, 3});
             if (contains(pass.reads, PipelineResource::IndirectLighting) && state.nativeIndirectCopy)
                 rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
+            if (screenSpaceGi && state.ssgiHistoryImage)
+                rasterPass.reads.push_back({state.ssgiHistoryImage, 13});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(2, false);
             commands.endRenderPass();
@@ -2351,11 +2396,21 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         const bool complete = !failed(state.native12->device()->GetDeviceRemovedReason(), "D3D12 render/device status", error);
         geometryFrameScope.completed = complete;
         rhiPassScope.complete = complete;
+        if (screenSpaceGi && state.ssgiHistoryImage) {
+            state.native12->copyTextureRegionTo(state.ssgiHistoryImage, 0, 0, destinationImage,
+                0, 0, state.sceneWidth, state.sceneHeight);
+            state.ssgiHistoryValid = true;
+        }
         return complete;
     }
     if (settings.editorViewport) {
         backbuffer = state.backbuffer.Get();
         state.context->ClearRenderTargetView(backbuffer, editorClear);
+    }
+    if (screenSpaceGi && state.ssgiHistoryImage && state.context && destinationImage) {
+        state.context->CopyResource(d3d11::nativeTexture(state.ssgiHistoryImage),
+            d3d11::nativeTexture(destinationImage));
+        state.ssgiHistoryValid = true;
     }
     state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
     const HRESULT removed = state.device->GetDeviceRemovedReason();
@@ -2508,7 +2563,22 @@ std::string SceneRenderer::hardwareRayTracingStatus() const {
 std::uint64_t SceneRenderer::hardwareRayTracingDispatchCount() const {
     return impl_->hardwareRayTracing ? impl_->hardwareRayTracing->dispatchCount() : 0;
 }
-GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const { return impl_->giStatus; }
+GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
+    auto status = impl_->giStatus;
+    if (impl_->lastGiMethod == GlobalIlluminationMethod::ScreenSpace) {
+        status.requested = GlobalIlluminationMethod::ScreenSpace;
+        status.effective = impl_->lastScreenSpaceGi ? GlobalIlluminationMethod::ScreenSpace
+            : GlobalIlluminationMethod::Disabled;
+        status.requestedMode = GlobalIlluminationMode::Realtime;
+        status.effectiveMode = GlobalIlluminationMode::Realtime;
+        status.accumulatedSamples = impl_->lastScreenSpaceGi ? 1u : 0u;
+        status.targetSamples = 1;
+        status.reason = impl_->lastScreenSpaceGi
+            ? "Realtime screen-space GI consumes the deferred G-buffer and the previous frame's lit colour."
+            : "SSGI is unavailable for the current frame.";
+    }
+    return status;
+}
 AntiAliasingStatus SceneRenderer::antiAliasingStatus() const { return impl_->aaStatus; }
 bool SceneRenderer::readScenePixels(std::vector<std::uint8_t>& pixels, std::uint32_t& width,
     std::uint32_t& height, std::string& error) const {

@@ -55,8 +55,9 @@ void validateAntiAliasing(const renderer::AntiAliasingSettings& settings) {
 void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& settings) {
     using renderer::GlobalIlluminationMethod;
     using renderer::GlobalIlluminationMode;
-    if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing)
-        throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+    if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing &&
+        settings.method != GlobalIlluminationMethod::ScreenSpace)
+        throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing or screenSpace.");
     if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
         throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
     if (settings.denoiser != renderer::GlobalIlluminationDenoiser::Off &&
@@ -79,6 +80,13 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     range("targetSamples", settings.targetSamples, renderer::kGiMaxTargetSamples);
     range("maxBounces", settings.maxBounces, renderer::kGiMaxBounces);
     range("denoiseIterations", settings.denoiseIterations, renderer::kGiMaxDenoiseIterations);
+    range("screenSpaceSteps", settings.screenSpaceSteps, renderer::kGiMaxScreenSpaceSteps);
+    if (!std::isfinite(settings.screenSpaceRadius) || settings.screenSpaceRadius <= 0.0f ||
+        settings.screenSpaceRadius > 100.0f)
+        throw std::runtime_error("rendering.globalIllumination.screenSpaceRadius must be a finite number from >0 to 100.");
+    if (!std::isfinite(settings.screenSpaceThickness) || settings.screenSpaceThickness <= 0.0f ||
+        settings.screenSpaceThickness > 10.0f)
+        throw std::runtime_error("rendering.globalIllumination.screenSpaceThickness must be a finite number from >0 to 10.");
 }
 
 RenderingSettings readRenderingSettings(const Json& value) {
@@ -138,11 +146,12 @@ RenderingSettings readRenderingSettings(const Json& value) {
         if (!gi.is_object()) throw std::runtime_error("rendering.globalIllumination must be an object.");
         if (gi.contains("method")) {
             if (!gi.at("method").is_string())
-                throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+                throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing or screenSpace.");
             const auto& method = gi.at("method").get_ref<const std::string&>();
             if (method == "disabled") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
             else if (method == "pathTracing") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
-            else throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
+            else if (method == "screenSpace") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::ScreenSpace;
+            else throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing or screenSpace.");
         }
         if (gi.contains("mode")) {
             if (!gi.at("mode").is_string())
@@ -191,6 +200,21 @@ RenderingSettings readRenderingSettings(const Json& value) {
         readCount("targetSamples", settings.globalIllumination.targetSamples, renderer::kGiMaxTargetSamples);
         readCount("maxBounces", settings.globalIllumination.maxBounces, renderer::kGiMaxBounces);
         readCount("denoiseIterations", settings.globalIllumination.denoiseIterations, renderer::kGiMaxDenoiseIterations);
+        readCount("screenSpaceSteps", settings.globalIllumination.screenSpaceSteps, renderer::kGiMaxScreenSpaceSteps);
+        const auto readPositiveFloat = [&gi](const char* key, float& target, float maximum) {
+            if (!gi.contains(key)) return;
+            const auto& encoded = gi.at(key);
+            if (!encoded.is_number())
+                throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                    " must be a finite number in range.");
+            const double value = encoded.get<double>();
+            if (!std::isfinite(value) || value <= 0.0 || value > maximum)
+                throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                    " must be a finite number in range.");
+            target = static_cast<float>(value);
+        };
+        readPositiveFloat("screenSpaceRadius", settings.globalIllumination.screenSpaceRadius, 100.0f);
+        readPositiveFloat("screenSpaceThickness", settings.globalIllumination.screenSpaceThickness, 10.0f);
         if (gi.contains("denoiser")) {
             if (!gi.at("denoiser").is_string())
                 throw std::runtime_error("rendering.globalIllumination.denoiser must be off, spatial or temporalSpatial.");
@@ -955,7 +979,8 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         auto& gi = rendering["globalIllumination"];
         if (gi.is_null()) gi = Json::object();
         gi["method"] = settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing
-            ? "pathTracing" : "disabled";
+            ? "pathTracing" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::ScreenSpace
+                ? "screenSpace" : "disabled";
         gi["mode"] = settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
             ? "realtime" : "progressive";
         gi["indirectDiffuse"] = settings.globalIllumination.indirectDiffuse;
@@ -967,6 +992,9 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["denoiser"] = renderer::giDenoiserKey(settings.globalIllumination.denoiser);
         gi["motionVectors"] = renderer::giMotionVectorsKey(settings.globalIllumination.motionVectors);
         gi["denoiseIterations"] = settings.globalIllumination.denoiseIterations;
+        gi["screenSpaceSteps"] = settings.globalIllumination.screenSpaceSteps;
+        gi["screenSpaceRadius"] = settings.globalIllumination.screenSpaceRadius;
+        gi["screenSpaceThickness"] = settings.globalIllumination.screenSpaceThickness;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

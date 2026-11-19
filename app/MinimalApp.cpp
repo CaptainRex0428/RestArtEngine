@@ -1432,7 +1432,9 @@ int wmain(int argc, wchar_t** argv) {
         if (validationErrors) throw std::runtime_error(std::string(mainGraphicsApiName(renderer)) + " validation reported errors");
         if (frameLimit > 0 && settings.globalIllumination.method != GlobalIlluminationMethod::Disabled) {
             const auto gi = renderer.globalIlluminationStatus();
-            std::cout << "GI effective: " << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing" : "disabled")
+            std::cout << "GI effective: "
+                << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing"
+                    : gi.effective == GlobalIlluminationMethod::ScreenSpace ? "screenSpace" : "disabled")
                 << "; mode: " << (gi.effectiveMode == GlobalIlluminationMode::Progressive ? "progressive" : "realtime")
                 << "; samples: " << gi.accumulatedSamples << '/' << gi.targetSamples
                 << "; DXR dispatches: " << renderer.hardwareRayTracingDispatchCount() << '\n';

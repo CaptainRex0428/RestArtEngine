@@ -72,8 +72,11 @@ SamplerComparisonState shadowSampler : register(s1);
 cbuffer GlobalIlluminationConstants : register(b6)
 {
     float4 giViewport; // effective realtime GI, local width, local height, reserved
+    // enabled, world-space march radius, thickness, artistic intensity
+    float4 giScreenSpace;
 };
 Texture2D<float4> indirectLightingBuffer : register(t9);
+Texture2D<float4> screenSpaceHistory : register(t13);
 #endif
 
 static const float PI = 3.14159265359;
@@ -784,6 +787,42 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
     return output;
 }
 
+#if !defined(RAE_HARDWARE_RAYTRACING)
+// Screen-space diffuse GI. The depth/normal buffer is current; the radiance
+// source is last frame's lit colour, so fast camera cuts keep one frame of lag.
+float3 ScreenSpaceIndirect(uint2 pixel, float3 position, float3 normal)
+{
+    if (giScreenSpace.x < 0.5 || giViewport.w < 0.5) return 0.0;
+    uint steps = max((uint)giViewport.w, 1u);
+    float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
+    float3 bitangent = cross(normal, tangent);
+    float seed = frac(sin(dot(float2(pixel), float2(12.9898, 78.233))) * 43758.5453);
+    float3 sum = 0.0;
+    float weight = 0.0;
+    [loop] for (uint i = 0; i < steps; ++i)
+    {
+        float angle = seed * 6.2831853 + float(i) * 2.3999632;
+        float radial = sqrt(frac(seed + float(i) * 0.6180339));
+        float3 direction = normalize(tangent * cos(angle) * radial + bitangent * sin(angle) * radial + normal * 0.75);
+        float travel = giScreenSpace.y * (float(i) + 1.0) / float(steps);
+        float3 samplePosition = position + direction * travel;
+        float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
+        if (clip.w <= 0.0001) continue;
+        float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+        if (any(uv < 0.0) || any(uv > 1.0)) continue;
+        float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
+        if (scenePosition.w < 0.5) continue;
+        float3 delta = scenePosition.xyz - samplePosition;
+        if (dot(delta, delta) > giScreenSpace.z * giScreenSpace.z) continue;
+        float4 sceneNormal = normalBuffer.SampleLevel(gbufferSampler, uv, 0);
+        if (dot(normalize(sceneNormal.xyz), normal) < 0.25) continue;
+        sum += screenSpaceHistory.SampleLevel(gbufferSampler, uv, 0).rgb;
+        weight += 1.0;
+    }
+    return weight > 0.0 ? sum / weight : 0.0;
+}
+#endif
+
 float4 PSDeferred(FullscreenOutput input) : SV_TARGET
 {
     int3 pixel = int3(int2(input.position.xy), 0);
@@ -796,7 +835,12 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.roughness = albedo.a;
     material.metallic = normal.a;
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
-    return OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
+    float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
+#if !defined(RAE_HARDWARE_RAYTRACING)
+    if (giScreenSpace.x > 0.5)
+        color.rgb = saturate(color.rgb + ScreenSpaceIndirect(uint2(pixel.xy), position.xyz, normalize(normal.xyz)) * giScreenSpace.w);
+#endif
+    return color;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,9 +4,10 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 | 维度 | 当前选择 | 含义 |
 | --- | --- | --- |
-| GI 算法 `method` | Disabled／Path tracing | 是否计算间接光照，以及采用的光传输算法。当前只有路径追踪算法实现。 |
-| 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。 |
+| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪。 |
+| 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI 固定为实时。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
+| SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
 
@@ -93,6 +94,12 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 *Sandbox：实时模式只输出间接光，Forward／Deferred 在主表面直接光之后合成。金属球的间接镜面与地面互染来自同一份间接缓冲；开启 temporal denoise 后相机与物体运动均可复用历史。*
 
+### Screen space (SSGI)
+
+SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 native D3D12 的 **Deferred** 路径运行；Forward 请求会报告不可用。它使用当前帧的 position／normal G-buffer 做世界空间屏幕追踪，命中点采样**上一帧**已着色的场景颜色，因此首帧或 resize 后没有贡献，快速相机运动保留一帧历史滞后。`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；`Indirect diffuse intensity` 作为强度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+
+SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并使用独立的上一帧颜色资源；它不做时域重投影，越过遮挡边界仍可能出现拖影。
+
 ## 历史与资源
 
 首批样本覆盖历史，不读取未初始化资源。相机、视口尺寸、几何／可见性、材质／法线、光照、背景、算法／更新模式、贡献开关、反弹数、相关阴影选项、成功发布的 Shader 及显式重启会使历史失效。材质草稿恢复已提交值同样触发新历史。曝光只改变最终显示，不使历史失效。
@@ -117,11 +124,14 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
   "maxBounces": 4,
   "denoiser": "temporalSpatial",
   "motionVectors": "cameraOnly",
-  "denoiseIterations": 2
+  "denoiseIterations": 2,
+  "screenSpaceSteps": 8,
+  "screenSpaceRadius": 2.0,
+  "screenSpaceThickness": 0.2
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2。强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2。`method` 可为 `disabled`、`pathTracing` 或 `screenSpace`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 

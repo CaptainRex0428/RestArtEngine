@@ -7,7 +7,7 @@ namespace rae::renderer {
 
 // A lighting algorithm, independent of Forward/Deferred organization and API.
 // Backends resolve requests against their capabilities without rewriting them.
-enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1 };
+enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1, ScreenSpace = 2 };
 
 // Update policy is independent of the transport algorithm and graphics API.
 enum class GlobalIlluminationMode : std::uint32_t { Progressive = 0, Realtime = 1 };
@@ -50,6 +50,11 @@ struct GlobalIlluminationSettings {
     std::uint32_t samplesPerFrame = 1;
     std::uint32_t targetSamples = 256;
     std::uint32_t maxBounces = 4;
+    // ScreenSpace (SSGI): world-space march radius and step count. Reuses
+    // indirectDiffuseIntensity as the artistic gain.
+    std::uint32_t screenSpaceSteps = 8;
+    float screenSpaceRadius = 2.0f;
+    float screenSpaceThickness = 0.2f;
     // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;
@@ -60,6 +65,7 @@ struct GlobalIlluminationSettings {
 inline constexpr std::uint32_t kGiMaxSamplesPerFrame = 16;
 inline constexpr std::uint32_t kGiMaxTargetSamples = 65536;
 inline constexpr std::uint32_t kGiMaxBounces = 12;
+inline constexpr std::uint32_t kGiMaxScreenSpaceSteps = 32;
 inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;
 
 struct GlobalIlluminationStatus {

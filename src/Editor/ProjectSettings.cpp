@@ -176,22 +176,32 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
 
         ImGui::Spacing();
         ImGui::SeparatorText("Global illumination");
-        int method = hardwareEditable ? static_cast<int>(gi.method) : 0;
-        ImGui::BeginDisabled(!hardwareEditable);
-        if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0")) {
+        int method = static_cast<int>(gi.method);
+        if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0Screen space (SSGI)\0")) {
             gi.method = static_cast<renderer::GlobalIlluminationMethod>(method);
             applyEdit(ProjectRenderingEdit::GiMethod);
         }
-        ImGui::EndDisabled();
         if (gi.method == renderer::GlobalIlluminationMethod::Disabled)
             ImGui::TextWrapped("GI is disabled. Hardware preview has no diffuse color bleeding.");
+        if (gi.method == renderer::GlobalIlluminationMethod::ScreenSpace) {
+            ImGui::TextWrapped("SSGI traces the current depth/normal buffer and samples last frame's lit color. It needs the Deferred path; Forward reports it unavailable. DXR hardware is not required.");
+            int steps = static_cast<int>(gi.screenSpaceSteps);
+            if (ImGui::SliderInt("SSGI steps", &steps, 1, static_cast<int>(renderer::kGiMaxScreenSpaceSteps),
+                    "%d", ImGuiSliderFlags_AlwaysClamp)) {
+                gi.screenSpaceSteps = static_cast<std::uint32_t>(steps);
+                changed = true;
+            }
+            changed |= ImGui::SliderFloat("SSGI radius", &gi.screenSpaceRadius, 0.05f, 20.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+            changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+        }
         ImGui::TextWrapped("Selecting path tracing enables hardware ray tracing and disables the competing standalone reflections.");
-        ImGui::BeginDisabled(!hardwareEditable || !settings.hardwareRayTracing || gi.method != renderer::GlobalIlluminationMethod::PathTracing);
+        ImGui::BeginDisabled(gi.method != renderer::GlobalIlluminationMethod::PathTracing);
         int mode = static_cast<int>(gi.mode);
         if (ImGui::Combo("GI mode", &mode, "Progressive accumulation\0Realtime\0")) {
             gi.mode = static_cast<renderer::GlobalIlluminationMode>(mode);
             applyEdit(ProjectRenderingEdit::GiMode);
         }
+        ImGui::EndDisabled();
         changed |= ImGui::Checkbox("Indirect diffuse (color bleeding)", &gi.indirectDiffuse);
         ImGui::BeginDisabled(!gi.indirectDiffuse);
         ImGui::TextUnformatted("Indirect diffuse intensity");
@@ -210,11 +220,14 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
                 changed = true;
             }
         };
+        ImGui::BeginDisabled(gi.method != renderer::GlobalIlluminationMethod::PathTracing);
         sampleSlider("Samples per frame", gi.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
         const bool realtimeRequested = gi.mode == renderer::GlobalIlluminationMode::Realtime;
         sampleSlider(realtimeRequested ? "History samples" : "Target samples", gi.targetSamples, renderer::kGiMaxTargetSamples);
         sampleSlider("Max bounces", gi.maxBounces, renderer::kGiMaxBounces);
+        ImGui::EndDisabled();
         const bool realtimePath = gi.method == renderer::GlobalIlluminationMethod::PathTracing && realtimeRequested;
+        const bool ssgiRequested = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace;
         ImGui::BeginDisabled(!realtimePath);
         int denoiser = static_cast<int>(gi.denoiser);
         if (ImGui::Combo("Denoiser", &denoiser, "Off\0Spatial (5x5)\0Temporal + spatial\0")) {
@@ -234,20 +247,27 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         }
         ImGui::EndDisabled();
         if (realtimePath && gi.denoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial)
-            ImGui::TextWrapped("Temporal denoising is staged for the realtime GI implementation; until wired it falls back to the spatial resolve.");
-        ImGui::EndDisabled();
-        if (realtimeRequested)
-            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Temporal denoising reprojects history with camera motion and per-object motion vectors; scene/lighting/material changes reset the reconstruction history.");
+            ImGui::TextWrapped("Temporal denoising reprojects history with camera and per-object motion vectors.");
+        if (ssgiRequested)
+            ImGui::TextWrapped("SSGI runs as a single deferred pass against last frame's lit color; camera motion keeps one frame of history lag. It does not use path samples, denoiser settings or hardware ray tracing.");
+        if (realtimeRequested || ssgiRequested)
+            ImGui::TextWrapped("Realtime GI updates continuously. Temporal denoising reprojects history with camera motion and per-object motion vectors; scene/lighting/material changes reset the reconstruction history.");
         else
             ImGui::TextWrapped("Progressive accumulation stops at the target sample count. Keep the view still for a cleaner image; scene and lighting edits automatically restart the affected history.");
 
         const auto giStatus = renderer.globalIlluminationStatus();
-        const bool giEffective = giStatus.effective == renderer::GlobalIlluminationMethod::PathTracing;
-        ImGui::Text("GI requested: %s", gi.method == renderer::GlobalIlluminationMethod::PathTracing
-            ? "Path tracing" : "Disabled");
-        ImGui::Text("GI requested mode: %s", realtimeRequested ? "Realtime" : "Progressive accumulation");
-        ImGui::Text("GI effective: %s", giEffective ? "Path tracing" : "Disabled");
-        if (giEffective) {
+        const bool pathEffective = giStatus.effective == renderer::GlobalIlluminationMethod::PathTracing;
+        const bool ssgiEffective = giStatus.effective == renderer::GlobalIlluminationMethod::ScreenSpace;
+        const bool giEffective = pathEffective || ssgiEffective;
+        const auto methodName = [](renderer::GlobalIlluminationMethod value) {
+            return value == renderer::GlobalIlluminationMethod::PathTracing ? "Path tracing"
+                : value == renderer::GlobalIlluminationMethod::ScreenSpace ? "Screen space (SSGI)" : "Disabled";
+        };
+        ImGui::Text("GI requested: %s", methodName(gi.method));
+        ImGui::Text("GI requested mode: %s", ssgiRequested ? "Realtime (single pass)"
+            : realtimeRequested ? "Realtime" : "Progressive accumulation");
+        ImGui::Text("GI effective: %s", methodName(giStatus.effective));
+        if (pathEffective) {
             const auto target = std::max(1u, giStatus.targetSamples);
             const auto progress = std::min(giStatus.accumulatedSamples, target);
             if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) {
@@ -258,8 +278,10 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
                 const std::string label = std::to_string(progress) + " / " + std::to_string(target) + " samples";
                 ImGui::ProgressBar(static_cast<float>(progress) / static_cast<float>(target), ImVec2(-FLT_MIN, 0), label.c_str());
             }
+        } else if (ssgiEffective) {
+            ImGui::TextUnformatted("GI effective mode: Realtime deferred SSGI (previous-frame color)");
         }
-        if (giEffective && giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) {
+        if (pathEffective && giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) {
             const char* denoiser = giStatus.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial
                 ? "Temporal + spatial" : giStatus.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::Spatial
                     ? "Spatial (5x5)" : "Off";

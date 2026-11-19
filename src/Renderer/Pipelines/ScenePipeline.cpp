@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 15> resourceNames{{
+constexpr std::array<ResourceName, 16> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -28,6 +28,7 @@ constexpr std::array<ResourceName, 15> resourceNames{{
     {PipelineResource::AntiAliasingSource, "AntiAliasingSource"},
     {PipelineResource::AntiAliasingHistory, "AntiAliasingHistory"},
     {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
+    {PipelineResource::ScreenSpaceHistory, "ScreenSpaceHistory"},
 }};
 
 bool isForwardOnly(RenderPassKind kind) noexcept {
@@ -90,6 +91,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     if (inputs.rayTriangleScene) directLightingReads |= PipelineResource::RayTriangleScene;
     if (inputs.rasterShadowMap) directLightingReads |= PipelineResource::ShadowMap;
     if (inputs.realtimeIndirect) directLightingReads |= PipelineResource::IndirectLighting;
+    if (inputs.screenSpaceGi) directLightingReads |= PipelineResource::ScreenSpaceHistory;
 
     if (inputs.rasterShadowMap)
         add(RenderPassKind::ShadowMap, "Shadow map",

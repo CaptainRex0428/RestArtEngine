@@ -11,6 +11,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         }
         candidate.colorImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA8Unorm, true, "Scene color"});
+        candidate.historyImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA8Unorm, true, "SSGI previous color"});
         if (device) {
             candidate.color = d3d11::nativeTexture(candidate.colorImage);
             candidate.colorTarget = d3d11::nativeColorTarget(candidate.colorImage);
@@ -28,6 +30,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         retireSceneTargets();
         sceneColorImage = std::move(candidate.colorImage);
         sceneDepthImage = std::move(candidate.depthImage);
+        ssgiHistoryImage = std::move(candidate.historyImage);
         gbufferImages = std::move(candidate.images);
         sceneTarget = std::move(candidate.colorTarget);
         sceneTexture = std::move(candidate.color);
@@ -37,6 +40,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         gbufferTargets = std::move(candidate.gbufferTargets);
         gbufferViews = std::move(candidate.gbufferViews);
         sceneWidth = targetWidth; sceneHeight = targetHeight;
+        ssgiHistoryValid = false;
         return true;
     } catch (const std::exception& failure) { error = failure.what(); return false; }
 }
