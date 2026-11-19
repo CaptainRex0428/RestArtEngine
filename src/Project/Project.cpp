@@ -68,6 +68,9 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
         settings.motionVectors != renderer::GlobalIlluminationMotionVectors::PerObject &&
         settings.motionVectors != renderer::GlobalIlluminationMotionVectors::Automatic)
         throw std::runtime_error("rendering.globalIllumination.motionVectors must be cameraOnly, perObject or automatic.");
+    if (settings.sampling != renderer::GlobalIlluminationSampling::Uniform &&
+        settings.sampling != renderer::GlobalIlluminationSampling::Restir)
+        throw std::runtime_error("rendering.globalIllumination.sampling must be uniform or restir.");
     if (!std::isfinite(settings.indirectDiffuseIntensity) || settings.indirectDiffuseIntensity < 0.0f ||
         settings.indirectDiffuseIntensity > renderer::kGiMaxIndirectDiffuseIntensity)
         throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
@@ -80,6 +83,7 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     range("targetSamples", settings.targetSamples, renderer::kGiMaxTargetSamples);
     range("maxBounces", settings.maxBounces, renderer::kGiMaxBounces);
     range("denoiseIterations", settings.denoiseIterations, renderer::kGiMaxDenoiseIterations);
+    range("restirCandidates", settings.restirCandidates, renderer::kGiMaxRestirCandidates);
     range("screenSpaceSteps", settings.screenSpaceSteps, renderer::kGiMaxScreenSpaceSteps);
     if (!std::isfinite(settings.screenSpaceRadius) || settings.screenSpaceRadius <= 0.0f ||
         settings.screenSpaceRadius > 100.0f)
@@ -263,6 +267,22 @@ RenderingSettings readRenderingSettings(const Json& value) {
             else if (motion == "perObject") settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::PerObject;
             else if (motion == "automatic") settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::Automatic;
             else throw std::runtime_error("rendering.globalIllumination.motionVectors must be cameraOnly, perObject or automatic.");
+        }
+        if (gi.contains("sampling")) {
+            if (!gi.at("sampling").is_string())
+                throw std::runtime_error("rendering.globalIllumination.sampling must be uniform or restir.");
+            const auto& sampling = gi.at("sampling").get_ref<const std::string&>();
+            if (sampling == "uniform") settings.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Uniform;
+            else if (sampling == "restir") settings.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
+            else throw std::runtime_error("rendering.globalIllumination.sampling must be uniform or restir.");
+        }
+        readCount("restirCandidates", settings.globalIllumination.restirCandidates, renderer::kGiMaxRestirCandidates);
+        for (const auto& [key, target] : {std::pair{"restirDirect", &settings.globalIllumination.restirDirect},
+                std::pair{"restirIndirect", &settings.globalIllumination.restirIndirect}}) {
+            if (!gi.contains(key)) continue;
+            if (!gi.at(key).is_boolean())
+                throw std::runtime_error(std::string("rendering.globalIllumination.") + key + " must be a boolean.");
+            *target = gi.at(key).get<bool>();
         }
     }
     return settings;
@@ -1024,6 +1044,11 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["denoiser"] = renderer::giDenoiserKey(settings.globalIllumination.denoiser);
         gi["motionVectors"] = renderer::giMotionVectorsKey(settings.globalIllumination.motionVectors);
         gi["denoiseIterations"] = settings.globalIllumination.denoiseIterations;
+        gi["sampling"] = settings.globalIllumination.sampling == renderer::GlobalIlluminationSampling::Restir
+            ? "restir" : "uniform";
+        gi["restirCandidates"] = settings.globalIllumination.restirCandidates;
+        gi["restirDirect"] = settings.globalIllumination.restirDirect;
+        gi["restirIndirect"] = settings.globalIllumination.restirIndirect;
         gi["screenSpaceSteps"] = settings.globalIllumination.screenSpaceSteps;
         gi["screenSpaceRadius"] = settings.globalIllumination.screenSpaceRadius;
         gi["screenSpaceThickness"] = settings.globalIllumination.screenSpaceThickness;

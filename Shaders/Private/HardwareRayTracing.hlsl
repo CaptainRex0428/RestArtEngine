@@ -168,28 +168,70 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
         float3 mean = 0.0;
         if (batchSamples != 0)
         {
-            float3 batchSum = 0.0;
-            [loop] for (uint sampleOrdinal = 0; sampleOrdinal < batchSamples; ++sampleOrdinal)
+            uint restirPacked = (uint)traceOptions.w;
+            uint restirCandidates = min(restirPacked % 100u, 16u);
+            bool restirIndirect = realtime && ((restirPacked / 1000u) % 10u) > 0u;
+            uint effectiveSamples = batchSamples;
+            float3 batchMean = 0.0;
+            if (restirIndirect && restirCandidates > 0u)
             {
-                float4 geometry, material;
-                float3 previousPosition;
-                batchSum += PathRadiance(thread.xy,
-                    (realtime ? giOptions.w : previousSamples) + sampleOrdinal, geometry, material, previousPosition);
-                if (realtime && sampleOrdinal == 0)
+                // Weighted-reservoir sampling over several indirect path
+                // candidates. Primary guides come from the first candidate.
+                effectiveSamples = restirCandidates;
+                float3 selected = 0.0;
+                float selectedWeight = 0.0;
+                float totalWeight = 0.0;
+                uint sampleBase = (realtime ? giOptions.w : previousSamples);
+                [loop] for (uint candidate = 0; candidate < restirCandidates; ++candidate)
                 {
-                    primaryGeometry[thread.xy] = geometry;
-                    primaryMaterial[thread.xy] = material;
-                    primaryPreviousPosition[thread.xy] = float4(previousPosition, 1.0);
+                    float4 geometry, material;
+                    float3 previousPosition;
+                    float3 sample = PathRadiance(thread.xy, sampleBase + candidate,
+                        geometry, material, previousPosition);
+                    if (candidate == 0u)
+                    {
+                        primaryGeometry[thread.xy] = geometry;
+                        primaryMaterial[thread.xy] = material;
+                        primaryPreviousPosition[thread.xy] = float4(previousPosition, 1.0);
+                    }
+                    float weight = dot(sample, float3(0.2126, 0.7152, 0.0722));
+                    totalWeight += weight;
+                    uint hash = PathHash(thread.x + thread.y * outputInfo.x + candidate * 9781u);
+                    float random = float(hash & 0xffffffu) / 16777216.0;
+                    if (weight > 0.0 && random * totalWeight <= weight)
+                    {
+                        selected = sample;
+                        selectedWeight = weight;
+                    }
                 }
+                batchMean = selectedWeight > 0.0
+                    ? selected * (totalWeight / (selectedWeight * float(restirCandidates))) : 0.0;
             }
-            float3 batchMean = batchSum / float(batchSamples);
+            else
+            {
+                float3 batchSum = 0.0;
+                [loop] for (uint sampleOrdinal = 0; sampleOrdinal < batchSamples; ++sampleOrdinal)
+                {
+                    float4 geometry, material;
+                    float3 previousPosition;
+                    batchSum += PathRadiance(thread.xy,
+                        (realtime ? giOptions.w : previousSamples) + sampleOrdinal, geometry, material, previousPosition);
+                    if (realtime && sampleOrdinal == 0)
+                    {
+                        primaryGeometry[thread.xy] = geometry;
+                        primaryMaterial[thread.xy] = material;
+                        primaryPreviousPosition[thread.xy] = float4(previousPosition, 1.0);
+                    }
+                }
+                batchMean = batchSum / float(batchSamples);
+            }
             // No read from an uninitialized or invalidated history allocation.
             if (previousSamples == 0) mean = batchMean;
             // traceOptions.y is the history sample cap in realtime mode.
-            uint count = realtime ? min(previousSamples + batchSamples, (uint)traceOptions.y)
-                : previousSamples + batchSamples;
+            uint count = realtime ? min(previousSamples + effectiveSamples, (uint)traceOptions.y)
+                : previousSamples + effectiveSamples;
             if (previousSamples != 0) mean = lerp(pathAccumulation[thread.xy].rgb, batchMean,
-                float(batchSamples) / float(max(count, 1u)));
+                float(effectiveSamples) / float(max(count, 1u)));
             pathAccumulation[thread.xy] = float4(mean, float(count));
         }
         else if (previousSamples != 0)

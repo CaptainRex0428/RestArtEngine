@@ -1394,9 +1394,16 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         std::memcpy(constants.data() + denoiseOffset, &denoise, sizeof(denoise));
         std::memcpy(constants.data() + lightingOffset, &frame.lighting, sizeof(frame.lighting));
+        std::uint32_t restirPacked = 0;
+        if (frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir) {
+            restirPacked = std::clamp(frame.globalIllumination.restirCandidates, 1u, kGiMaxRestirCandidates);
+            if (frame.globalIllumination.restirDirect) restirPacked += 100u;
+            if (frame.globalIllumination.restirIndirect) restirPacked += 1000u;
+        }
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
-            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), indirectDiffuseIntensity, 0},
+            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), indirectDiffuseIntensity,
+                static_cast<float>(restirPacked)},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
             {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}, frame.areaLight, frame.thinLens};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));
@@ -1558,6 +1565,11 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (realtimeLit)
             state.message += std::string(" Denoiser: ") + (denoiseMode == 2 ? "temporal+spatial" :
                 denoiseMode == 1 ? "spatial" : "off") + ".";
+        if (pathRequested && frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir)
+            state.message += std::string(" Sampling: ReSTIR (direct ") +
+                (frame.globalIllumination.restirDirect ? "on, " : "off, ") + "indirect " +
+                (frame.globalIllumination.restirIndirect ? "on, " : "off, ") + "candidates " +
+                std::to_string(frame.globalIllumination.restirCandidates) + ").";
         return true;
     } catch (const std::exception& exception) {
         if (recording) { state.list->Close(); state.geometryReady = false; }

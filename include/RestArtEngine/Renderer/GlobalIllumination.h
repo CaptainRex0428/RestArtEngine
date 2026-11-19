@@ -19,6 +19,8 @@ enum class GlobalIlluminationDenoiser : std::uint32_t { Off = 0, Spatial = 1, Te
 // Camera-only reprojection works without object history; PerObject also uses
 // the previous object transform. Automatic falls back when history is missing.
 enum class GlobalIlluminationMotionVectors : std::uint32_t { CameraOnly = 0, PerObject = 1, Automatic = 2 };
+// Optional reservoir-based sampling layer over the path/light samples.
+enum class GlobalIlluminationSampling : std::uint32_t { Uniform = 0, Restir = 1 };
 
 inline constexpr std::uint32_t kGiMaxDenoiseIterations = 4;
 inline constexpr const char* giDenoiserKey(GlobalIlluminationDenoiser value) noexcept {
@@ -64,6 +66,10 @@ struct GlobalIlluminationSettings {
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;
     std::uint32_t denoiseIterations = 2;
+    GlobalIlluminationSampling sampling = GlobalIlluminationSampling::Uniform;
+    std::uint32_t restirCandidates = 4;
+    bool restirDirect = true;
+    bool restirIndirect = true;
     bool operator==(const GlobalIlluminationSettings&) const = default;
 };
 
@@ -72,6 +78,7 @@ inline constexpr std::uint32_t kGiMaxTargetSamples = 65536;
 inline constexpr std::uint32_t kGiMaxBounces = 12;
 inline constexpr std::uint32_t kGiMaxScreenSpaceSteps = 32;
 inline constexpr std::uint32_t kGiMaxProbeGridAxis = 32;
+inline constexpr std::uint32_t kGiMaxRestirCandidates = 16;
 inline constexpr float kGiMaxProbeSpacing = 20.0f;
 inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;
 

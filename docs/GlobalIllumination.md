@@ -9,6 +9,7 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
 | SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
 | DDGI 参数 | grid X/Y/Z／spacing／hysteresis | 相机目标附近 probe 网格尺寸、世界间距和历史混合速度。 |
+| 采样策略 `sampling` | Uniform／ReSTIR | Path tracing 实时模式可选择加权 reservoir 采样；direct/indirect 各自开关，候选数控制每像素候选。 |
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
 
@@ -107,6 +108,16 @@ DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染�
 
 限制：probe 更新是屏幕空间可见性近似，不是逐 probe 光线追踪；被遮挡或在屏幕外的 probe 保留旧值；网格固定相机目标附近，移动相机时 probe 世界位置随帧重建，可能出现滞后；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
+### ReSTIR sampling
+
+`sampling = restir` 是 Path tracing 实时模式的**采样层**，不改变 GI 算法本身：
+
+- `ReSTIR direct`：每个 shading point 从场景非矩形灯中采样 `restirCandidates` 个候选，按亮度做加权 reservoir 选择，再乘灯数校正后作为直接光估计；矩形灯继续走独立面积光估计器。
+- `ReSTIR indirect`：trace pass 对每像素的若干路径候选（数量同 `restirCandidates`）做加权 reservoir 选择，把结果写入路径累积；`samplesPerFrame` 仍是历史预算。
+- 两种模式都依赖现有 GI 历史做时间稳定；当前实现**没有独立的上一帧 reservoir、没有空间 reuse**，因此快速运动/稀疏光源下仍会出现闪烁或偏差。
+
+Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path tracing 的实时模式，SSGI/DDGI 不受影响。实现位于 `PathTracing.hlsli`（直接光 reservoir）与 `HardwareRayTracing.hlsl` 的 trace batch（间接路径 reservoir）。
+
 ## 历史与资源
 
 首批样本覆盖历史，不读取未初始化资源。相机、视口尺寸、几何／可见性、材质／法线、光照、背景、算法／更新模式、贡献开关、反弹数、相关阴影选项、成功发布的 Shader 及显式重启会使历史失效。材质草稿恢复已提交值同样触发新历史。曝光只改变最终显示，不使历史失效。
@@ -139,11 +150,15 @@ DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染�
   "probeGridY": 8,
   "probeGridZ": 16,
   "probeSpacing": 1.0,
-  "probeHysteresis": 0.95
+  "probeHysteresis": 0.95,
+  "sampling": "restir",
+  "restirCandidates": 4,
+  "restirDirect": true,
+  "restirIndirect": true
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95，缺失采样字段默认 `uniform`／4／true／true。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；`sampling` 可为 `uniform` 或 `restir`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 

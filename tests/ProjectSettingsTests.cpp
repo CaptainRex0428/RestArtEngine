@@ -291,7 +291,10 @@ void globalIlluminationRoundTrip() {
         loaded.rendering.globalIllumination.screenSpaceThickness == 0.2f &&
         loaded.rendering.globalIllumination.probeGridX == 16 && loaded.rendering.globalIllumination.probeGridY == 8 &&
         loaded.rendering.globalIllumination.probeGridZ == 16 && loaded.rendering.globalIllumination.probeSpacing == 1.0f &&
-        loaded.rendering.globalIllumination.probeHysteresis == 0.95f,
+        loaded.rendering.globalIllumination.probeHysteresis == 0.95f &&
+        loaded.rendering.globalIllumination.sampling == renderer::GlobalIlluminationSampling::Uniform &&
+        loaded.rendering.globalIllumination.restirCandidates == 4 &&
+        loaded.rendering.globalIllumination.restirDirect && loaded.rendering.globalIllumination.restirIndirect,
         "Missing reconstruction fields keep the legacy spatial resolve defaults.");
 
     value["rendering"]["globalIllumination"]["method"] = "pathTracing";
@@ -354,6 +357,17 @@ void globalIlluminationRoundTrip() {
         savedDdgi.at("probeGridY") == 10 && savedDdgi.at("probeGridZ") == 24 &&
         savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f,
         "DDGI serializes its probe grid and history controls.");
+    requested.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
+    requested.globalIllumination.restirCandidates = 7;
+    requested.globalIllumination.restirDirect = false;
+    requested.globalIllumination.restirIndirect = true;
+    require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
+    require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
+        "ReSTIR sampling settings survive project reload.");
+    const auto savedRestir = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
+    require(savedRestir.at("sampling") == "restir" && savedRestir.at("restirCandidates") == 7 &&
+        savedRestir.at("restirDirect") == false && savedRestir.at("restirIndirect") == true,
+        "ReSTIR serializes its sampling layer controls.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
 
     requested.hardwareRayTracing = false;
@@ -414,6 +428,11 @@ void globalIlluminationValidation() {
         reject(Json{{"denoiser", invalid}}, "denoiser");
     for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("PerObject"), Json::array()})
         reject(Json{{"motionVectors", invalid}}, "motionVectors");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("Restir"), Json::array()})
+        reject(Json{{"sampling", invalid}}, "sampling");
+    for (const char* restirBool : {"restirDirect", "restirIndirect"})
+        for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
+            reject(Json{{restirBool, invalid}}, restirBool);
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{contribution, invalid}}, contribution);
@@ -440,7 +459,8 @@ void globalIlluminationValidation() {
             Bound{"screenSpaceSteps", renderer::kGiMaxScreenSpaceSteps},
             Bound{"probeGridX", renderer::kGiMaxProbeGridAxis},
             Bound{"probeGridY", renderer::kGiMaxProbeGridAxis},
-            Bound{"probeGridZ", renderer::kGiMaxProbeGridAxis}}) {
+            Bound{"probeGridZ", renderer::kGiMaxProbeGridAxis},
+            Bound{"restirCandidates", renderer::kGiMaxRestirCandidates}}) {
         for (const auto& invalid : {Json(nullptr), Json(false), Json("4"), Json(1.0), Json(1.5),
                 Json(0), Json(-1), Json(bound.maximum + 1), Json(std::numeric_limits<std::uint64_t>::max()),
                 Json(std::numeric_limits<std::int64_t>::min()), Json::object()})
@@ -522,6 +542,15 @@ void globalIlluminationValidation() {
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.probeHysteresis = 1.1f;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.sampling = static_cast<renderer::GlobalIlluminationSampling>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.restirCandidates = 0;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.restirCandidates = renderer::kGiMaxRestirCandidates + 1;
     invalidRequest(invalid);
 }
 

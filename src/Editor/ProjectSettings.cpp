@@ -248,6 +248,21 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         const bool ssgiRequested = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace;
         const bool ddgiRequested = gi.method == renderer::GlobalIlluminationMethod::ProbeGrid;
         ImGui::BeginDisabled(!realtimePath);
+        int sampling = static_cast<int>(gi.sampling);
+        if (ImGui::Combo("Sampling", &sampling, "Uniform (all lights)\0ReSTIR reservoirs\0")) {
+            gi.sampling = static_cast<renderer::GlobalIlluminationSampling>(sampling);
+            changed = true;
+        }
+        ImGui::BeginDisabled(gi.sampling != renderer::GlobalIlluminationSampling::Restir);
+        int candidates = static_cast<int>(std::clamp(gi.restirCandidates, 1u, renderer::kGiMaxRestirCandidates));
+        if (ImGui::SliderInt("Reservoir candidates", &candidates, 1,
+                static_cast<int>(renderer::kGiMaxRestirCandidates), "%d", ImGuiSliderFlags_AlwaysClamp)) {
+            gi.restirCandidates = static_cast<std::uint32_t>(candidates);
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("ReSTIR direct", &gi.restirDirect);
+        changed |= ImGui::Checkbox("ReSTIR indirect", &gi.restirIndirect);
+        ImGui::EndDisabled();
         int denoiser = static_cast<int>(gi.denoiser);
         if (ImGui::Combo("Denoiser", &denoiser, "Off\0Spatial (5x5)\0Temporal + spatial\0")) {
             gi.denoiser = static_cast<renderer::GlobalIlluminationDenoiser>(denoiser);
@@ -267,6 +282,8 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::EndDisabled();
         if (realtimePath && gi.denoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial)
             ImGui::TextWrapped("Temporal denoising reprojects history with camera and per-object motion vectors.");
+        if (realtimePath && gi.sampling == renderer::GlobalIlluminationSampling::Restir)
+            ImGui::TextWrapped("ReSTIR uses weighted reservoir sampling over light/path candidates. Direct and indirect toggles select the layers; temporal stability still comes from the GI history, not a separate reservoir history.");
         if (ssgiRequested)
             ImGui::TextWrapped("SSGI runs as a single deferred pass against last frame's lit color; camera motion keeps one frame of history lag. It does not use path samples, denoiser settings or hardware ray tracing.");
         if (realtimeRequested || ssgiRequested)

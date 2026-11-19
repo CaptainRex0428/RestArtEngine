@@ -63,7 +63,7 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | 绑定 | 内容 |
 | --- | --- |
 | b0 | 共用 `SceneConstants`，176 字节。 |
-| b5 | `HardwareConstants`：逆 ViewProjection、输出与效果参数、样本批次／反弹数／算法、更新模式／贡献位／解析阶段／独立序列索引、兼容矩形参数与薄透镜参数，208 字节。 |
+| b5 | `HardwareConstants`：逆 ViewProjection、输出与效果参数、样本批次／反弹数／算法、更新模式／贡献位／解析阶段／独立序列索引、兼容矩形参数、薄透镜参数与 ReSTIR 采样打包位，208 字节。 |
 | b7 | `LightingConstants`：灯光计数／模式、Sky 聚合及 32 个光源；3104 字节，与光栅共享布局且纳入 GI 历史键。 |
 | b8 | `DenoiseConstants`：上一帧 ViewProjection、降噪模式／当前帧权重／重置标志／迭代数，80 字节。 |
 | t4 | 共用 `RayTriangle`，116 字节：当前/上一帧位置、几何法线、颜色与材质标志。 |

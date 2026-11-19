@@ -334,6 +334,50 @@ float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
     return radiance;
 }
 
+float3 PathDirectLightReservoir(float3 position, float3 normal, float3 geometricNormal,
+    float3 view, Surface material, uint candidates, inout uint randomState)
+{
+    uint lightCount = min((uint)lightInfo.x, 32u);
+    if (lightCount == 0) return 0.0;
+    float3 origin = position + geometricNormal * RAY_EPSILON;
+    float3 selected = 0.0;
+    float selectedWeight = 0.0;
+    float totalWeight = 0.0;
+    [loop] for (uint candidate = 0; candidate < candidates; ++candidate)
+    {
+        uint index = min((uint)(PathRandom(randomState) * float(lightCount)), lightCount - 1u);
+        SceneLight source = sceneLights[index];
+        if (source.positionType.w == 2.0) continue;
+        SceneLightSample lightSample;
+        if (!SampleSceneLight(source, 0, position, lightSample)) continue;
+        float nl = dot(normal, lightSample.direction);
+        if (nl <= 0.0 || dot(geometricNormal, lightSample.direction) <= 0.0) continue;
+        if (outputInfo.w != 0 && source.spotShadow.z > 0.5)
+        {
+            float blockerDistance; float3 ignoredNormal; int ignoredObject;
+            if (TraceScene(origin, lightSample.direction, blockerDistance, ignoredNormal, ignoredObject, true)
+                && blockerDistance < lightSample.distance - RAY_EPSILON) continue;
+            if (PathAreaHit(origin, lightSample.direction, blockerDistance, ignoredObject)
+                && blockerDistance < lightSample.distance - RAY_EPSILON) continue;
+        }
+        float unusedPdf;
+        float3 brdf = PathBrdf(normal, view, lightSample.direction, material, true, true, 1.0, unusedPdf);
+        float3 contribution = brdf * nl * lightSample.irradiance;
+        // Uniform light choice needs the 1/N correction; the reservoir then
+        // selects among those candidate estimators by luminance.
+        float3 estimate = contribution * float(lightCount);
+        float weight = dot(estimate, float3(0.2126, 0.7152, 0.0722));
+        totalWeight += weight;
+        if (weight > 0.0 && PathRandom(randomState) * totalWeight <= weight)
+        {
+            selected = estimate;
+            selectedWeight = weight;
+        }
+    }
+    if (selectedWeight <= 0.0) return 0.0;
+    return selected * (totalWeight / (selectedWeight * max(float(candidates), 1.0)));
+}
+
 void PathPrimaryRay(uint2 pixel, float2 jitter, out float3 origin,
     out float3 direction, out float farDistance)
 {
@@ -444,7 +488,13 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
         // owns the primary direct light, shadows and background.
         if (depth != 0 || !realtime)
         {
-            radiance += throughput * PathDirectLight(position, normal, geometricNormal, -direction, material);
+            uint restirPacked = (uint)traceOptions.w;
+        uint restirCandidates = restirPacked % 100u;
+        bool restirDirect = restirCandidates > 0u && ((restirPacked / 100u) % 10u) > 0u;
+        radiance += throughput * (restirDirect
+            ? PathDirectLightReservoir(position, normal, geometricNormal, -direction, material,
+                restirCandidates, randomState)
+            : PathDirectLight(position, normal, geometricNormal, -direction, material));
             radiance += throughput * PathAreaDirect(position, normal, geometricNormal, -direction, material, randomState);
         }
         float3 incoming, weight;
