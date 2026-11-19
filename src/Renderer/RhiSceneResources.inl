@@ -13,6 +13,10 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA8Unorm, true, "Scene color"});
         candidate.historyImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA8Unorm, true, "SSGI previous color"});
+        candidate.probeAtlasA = rhiDevice->createTexture({1024, 32, 1,
+            rhi::Format::RGBA16Float, true, "DDGI probe atlas A"});
+        candidate.probeAtlasB = rhiDevice->createTexture({1024, 32, 1,
+            rhi::Format::RGBA16Float, true, "DDGI probe atlas B"});
         if (device) {
             candidate.color = d3d11::nativeTexture(candidate.colorImage);
             candidate.colorTarget = d3d11::nativeColorTarget(candidate.colorImage);
@@ -31,6 +35,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         sceneColorImage = std::move(candidate.colorImage);
         sceneDepthImage = std::move(candidate.depthImage);
         ssgiHistoryImage = std::move(candidate.historyImage);
+        probeAtlasA = std::move(candidate.probeAtlasA);
+        probeAtlasB = std::move(candidate.probeAtlasB);
         gbufferImages = std::move(candidate.images);
         sceneTarget = std::move(candidate.colorTarget);
         sceneTexture = std::move(candidate.color);
@@ -41,6 +47,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         gbufferViews = std::move(candidate.gbufferViews);
         sceneWidth = targetWidth; sceneHeight = targetHeight;
         ssgiHistoryValid = false;
+        probeAtlasValid = false;
         return true;
     } catch (const std::exception& failure) { error = failure.what(); return false; }
 }

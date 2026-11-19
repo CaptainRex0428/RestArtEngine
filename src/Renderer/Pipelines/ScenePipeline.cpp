@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 16> resourceNames{{
+constexpr std::array<ResourceName, 17> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -29,6 +29,7 @@ constexpr std::array<ResourceName, 16> resourceNames{{
     {PipelineResource::AntiAliasingHistory, "AntiAliasingHistory"},
     {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
     {PipelineResource::ScreenSpaceHistory, "ScreenSpaceHistory"},
+    {PipelineResource::ProbeAtlas, "ProbeAtlas"},
 }};
 
 bool isForwardOnly(RenderPassKind kind) noexcept {
@@ -36,7 +37,8 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 }
 
 bool isDeferredOnly(RenderPassKind kind) noexcept {
-    return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting;
+    return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
+        kind == RenderPassKind::ProbeUpdate;
 }
 
 } // namespace
@@ -62,6 +64,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::HardwareTransport: return "Hardware transport";
     case RenderPassKind::GBuffer: return "G-Buffer";
     case RenderPassKind::DeferredLighting: return "Deferred lighting";
+    case RenderPassKind::ProbeUpdate: return "DDGI probe update";
     case RenderPassKind::ForwardBackground: return "Forward background";
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
     case RenderPassKind::HardwareResolve: return "Hardware resolve";
@@ -92,6 +95,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     if (inputs.rasterShadowMap) directLightingReads |= PipelineResource::ShadowMap;
     if (inputs.realtimeIndirect) directLightingReads |= PipelineResource::IndirectLighting;
     if (inputs.screenSpaceGi) directLightingReads |= PipelineResource::ScreenSpaceHistory;
+    if (inputs.probeGridGi) directLightingReads |= PipelineResource::ProbeAtlas;
 
     if (inputs.rasterShadowMap)
         add(RenderPassKind::ShadowMap, "Shadow map",
@@ -113,6 +117,11 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | directLightingReads,
             rasterColor);
+        if (inputs.probeGridGi)
+            add(RenderPassKind::ProbeUpdate, "DDGI probe update",
+                PipelineResource::SceneDepth |
+                    PipelineResource::GBufferNormal | rasterColor,
+                PipelineResource::ProbeAtlas);
     } else {
         // The background writes the first colour; geometry draws on top of it,
         // so SceneColor is both an input and an output of the geometry pass.

@@ -1434,7 +1434,8 @@ int wmain(int argc, wchar_t** argv) {
             const auto gi = renderer.globalIlluminationStatus();
             std::cout << "GI effective: "
                 << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing"
-                    : gi.effective == GlobalIlluminationMethod::ScreenSpace ? "screenSpace" : "disabled")
+                    : gi.effective == GlobalIlluminationMethod::ScreenSpace ? "screenSpace"
+                    : gi.effective == GlobalIlluminationMethod::ProbeGrid ? "probeGrid" : "disabled")
                 << "; mode: " << (gi.effectiveMode == GlobalIlluminationMode::Progressive ? "progressive" : "realtime")
                 << "; samples: " << gi.accumulatedSamples << '/' << gi.targetSamples
                 << "; DXR dispatches: " << renderer.hardwareRayTracingDispatchCount() << '\n';

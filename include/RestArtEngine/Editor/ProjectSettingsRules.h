@@ -24,8 +24,9 @@ inline void applyProjectRenderingEdit(project::RenderingSettings& settings, Proj
         settings.hardwareRayTracing = false;
         settings.hardwareRayTracingReflections = false;
         settings.hardwareRayTracingShadows = false;
-        // SSGI is a raster algorithm and survives a backend that cannot run DXR.
-        if (settings.globalIllumination.method != GlobalIlluminationMethod::ScreenSpace)
+        // SSGI/DDGI are raster algorithms and survive a backend that cannot run DXR.
+        if (settings.globalIllumination.method != GlobalIlluminationMethod::ScreenSpace &&
+            settings.globalIllumination.method != GlobalIlluminationMethod::ProbeGrid)
             settings.globalIllumination.method = GlobalIlluminationMethod::Disabled;
         return;
     }

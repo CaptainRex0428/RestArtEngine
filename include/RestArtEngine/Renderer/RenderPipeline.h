@@ -61,6 +61,7 @@ enum class PipelineResource : std::uint64_t {
     AntiAliasingHistory = 1ull << 13,
     PreviousAntiAliasingHistory = 1ull << 14,
     ScreenSpaceHistory = 1ull << 15,
+    ProbeAtlas = 1ull << 16,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -89,6 +90,7 @@ enum class RenderPassKind : std::uint8_t {
     HardwareTransport,
     GBuffer,
     DeferredLighting,
+    ProbeUpdate,
     ForwardBackground,
     ForwardGeometry,
     HardwareResolve,
@@ -125,6 +127,7 @@ struct PipelineBuildInputs {
     bool hardwareTransport = false;
     bool realtimeIndirect = false;
     bool screenSpaceGi = false;
+    bool probeGridGi = false;
     bool depthOfField = false;
     bool antiAliasing = false;
     bool temporalAntiAliasing = false;
@@ -136,7 +139,8 @@ struct PipelineBuildInputs {
 // world-space triangle scene before the frame, so validation accepts it as an
 // input instead of demanding a producer pass.
 inline constexpr PipelineResource pipelineFrameInputs = PipelineResource::RayTriangleScene |
-    PipelineResource::PreviousAntiAliasingHistory | PipelineResource::ScreenSpaceHistory;
+    PipelineResource::PreviousAntiAliasingHistory | PipelineResource::ScreenSpaceHistory |
+    PipelineResource::ProbeAtlas;
 
 [[nodiscard]] RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs);
 

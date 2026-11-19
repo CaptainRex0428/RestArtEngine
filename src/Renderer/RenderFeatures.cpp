@@ -22,6 +22,7 @@ const char* toString(RenderFeature feature) noexcept {
     case RenderFeature::HardwareShadows: return "Hardware shadows";
     case RenderFeature::PathTracingGI: return "Path-traced GI";
     case RenderFeature::ScreenSpaceGI: return "Screen-space GI";
+    case RenderFeature::ProbeGridGI: return "Probe-grid GI";
     case RenderFeature::RealtimeGI: return "Realtime GI";
     case RenderFeature::DepthOfField: return "Depth of field";
     case RenderFeature::SelectionOutline: return "Selection outline";
@@ -207,6 +208,18 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
                 "Hardware ray tracing resolved this frame; screen-space GI is skipped.");
         } else {
             set(RenderFeature::ScreenSpaceGI, FeatureState::Active);
+        }
+    }
+
+    if (requests.globalIllumination == GlobalIlluminationMethod::ProbeGrid) {
+        if (requests.path != RenderPath::Deferred) {
+            set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency,
+                "DDGI needs the Deferred G-buffer; Forward reports the request as unavailable.");
+        } else if (hardwareActive) {
+            set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency,
+                "Hardware ray tracing resolved this frame; DDGI is skipped.");
+        } else {
+            set(RenderFeature::ProbeGridGI, FeatureState::Active);
         }
     }
 

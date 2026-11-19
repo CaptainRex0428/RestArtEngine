@@ -7,7 +7,7 @@ namespace rae::renderer {
 
 // A lighting algorithm, independent of Forward/Deferred organization and API.
 // Backends resolve requests against their capabilities without rewriting them.
-enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1, ScreenSpace = 2 };
+enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1, ScreenSpace = 2, ProbeGrid = 3 };
 
 // Update policy is independent of the transport algorithm and graphics API.
 enum class GlobalIlluminationMode : std::uint32_t { Progressive = 0, Realtime = 1 };
@@ -55,6 +55,11 @@ struct GlobalIlluminationSettings {
     std::uint32_t screenSpaceSteps = 8;
     float screenSpaceRadius = 2.0f;
     float screenSpaceThickness = 0.2f;
+    // DDGI probe grid. The grid is camera-target centred and rebuilt per frame;
+    // probe hysteresis controls how quickly the update pass replaces history.
+    std::uint32_t probeGridX = 16, probeGridY = 8, probeGridZ = 16;
+    float probeSpacing = 1.0f;
+    float probeHysteresis = 0.95f;
     // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;
@@ -66,6 +71,8 @@ inline constexpr std::uint32_t kGiMaxSamplesPerFrame = 16;
 inline constexpr std::uint32_t kGiMaxTargetSamples = 65536;
 inline constexpr std::uint32_t kGiMaxBounces = 12;
 inline constexpr std::uint32_t kGiMaxScreenSpaceSteps = 32;
+inline constexpr std::uint32_t kGiMaxProbeGridAxis = 32;
+inline constexpr float kGiMaxProbeSpacing = 20.0f;
 inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;
 
 struct GlobalIlluminationStatus {

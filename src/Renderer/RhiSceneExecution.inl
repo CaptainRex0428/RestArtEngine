@@ -22,7 +22,7 @@ rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
     if (hasDepth) description.depthFormat = rhi::Format::Depth32Float;
     if (shaderIndex == 1)
         description.colorFormats.assign(3, rhi::Format::RGBA16Float);
-    else if (shaderIndex == 9) description.colorFormats = {rhi::Format::RGBA16Float};
+    else if (shaderIndex == 9 || shaderIndex == 11) description.colorFormats = {rhi::Format::RGBA16Float};
     else if (shaderIndex != 7) description.colorFormats = {rhi::Format::RGBA8Unorm};
     description.name = fullscreen ? "Scene fullscreen pipeline" : "Scene mesh pipeline";
     auto graphicsState = rhiDevice->createGraphicsPipeline(description);
@@ -52,7 +52,7 @@ void bindRhiMesh(const GpuMesh& mesh) {
 
 void drawRhiFullscreen(unsigned shader, bool hasDepth) {
     diagnosticVS = "Private/Scene.hlsl::VSFullscreen";
-    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent"};
+    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate"};
     diagnosticPS = shader < std::size(entries) ? entries[shader] : "Unknown";
     sceneCommands().bindGraphicsPipeline(graphicsPipeline(shader, 0, 16, true, hasDepth));
     sceneCommands().draw(3);

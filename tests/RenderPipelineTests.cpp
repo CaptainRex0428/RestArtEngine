@@ -107,6 +107,19 @@ void screenSpaceGiInputs() {
     require(validatePipeline(pipeline).valid, "SSGI pipeline is inconsistent.");
 }
 
+void probeGridInputs() {
+    auto build = inputs(RenderPath::Deferred);
+    build.probeGridGi = true;
+    const auto pipeline = buildScenePipeline(build);
+    require(contains(passAt(pipeline, 2).reads, PipelineResource::ProbeAtlas),
+        "Deferred lighting must consume the DDGI probe atlas.");
+    const auto update = indexOf(pipeline, RenderPassKind::ProbeUpdate);
+    require(update < pipeline.passes.size(), "DDGI probe update pass missing.");
+    require(contains(passAt(pipeline, update).writes, PipelineResource::ProbeAtlas),
+        "DDGI update must publish the probe atlas.");
+    require(validatePipeline(pipeline).valid, "DDGI pipeline is inconsistent.");
+}
+
 void hardwareTransport() {
     auto build = inputs(RenderPath::Deferred);
     build.hardwareTransport = true;
@@ -437,6 +450,7 @@ int main() {
         disabledShadowMap();
         analyticRayInputs();
         screenSpaceGiInputs();
+        probeGridInputs();
         hardwareTransport();
         postChain();
         antiAliasingChain();

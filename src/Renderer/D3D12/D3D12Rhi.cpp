@@ -19,7 +19,7 @@ namespace rae::renderer::d3d12 {
 namespace {
 using Microsoft::WRL::ComPtr;
 using namespace rhi;
-constexpr UINT sampledSlots = 14, constantSlots = 9, vertexSlots = 32;
+constexpr UINT sampledSlots = 16, constantSlots = 10, vertexSlots = 32;
 
 bool initializeDebugRuntime(bool requested) {
     // Debug-layer selection is process-wide. Re-enabling it after another

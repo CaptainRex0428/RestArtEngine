@@ -112,6 +112,12 @@ struct alignas(16) GlobalIlluminationConstants {
     XMFLOAT4 screenSpace; // enabled, radius, thickness, intensity
 };
 static_assert(sizeof(GlobalIlluminationConstants) == 32);
+struct alignas(16) ProbeConstants {
+    XMFLOAT4 grid; // x, y, z, hysteresis
+    XMFLOAT4 origin; // x, y, z, spacing
+    XMFLOAT4 parameters; // enabled, valid, intensity, reserved
+};
+static_assert(sizeof(ProbeConstants) == 48);
 struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
 static_assert(sizeof(DepthOfFieldConstants) == 32);
 struct alignas(16) AntiAliasingConstants {
@@ -222,6 +228,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ShadowConstants", D3D_SIT_CBUFFER, 3, sizeof(ShadowConstants)},
         {"OutlineConstants", D3D_SIT_CBUFFER, 4, sizeof(OutlineConstants)},
         {"GlobalIlluminationConstants", D3D_SIT_CBUFFER, 6, sizeof(GlobalIlluminationConstants)},
+        {"ProbeConstants", D3D_SIT_CBUFFER, 9, sizeof(ProbeConstants)},
         {"LightingConstants", D3D_SIT_CBUFFER, 7, sizeof(LightingConstants)},
         {"DepthOfFieldConstants", D3D_SIT_CBUFFER, 8, sizeof(DepthOfFieldConstants)},
         {"AntiAliasingConstants", D3D_SIT_CBUFFER, 5, sizeof(AntiAliasingConstants)},
@@ -232,6 +239,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
         {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
         {"screenSpaceHistory", D3D_SIT_TEXTURE, 13, 0},
+        {"probeAtlasRead", D3D_SIT_TEXTURE, 14, 0},
+        {"probeColorSource", D3D_SIT_TEXTURE, 15, 0},
         {"dofColor", D3D_SIT_TEXTURE, 12, 0},
         {"aaSource", D3D_SIT_TEXTURE, 7, 0}, {"aaHistory", D3D_SIT_TEXTURE, 8, 0},
         {"rayUvVertices", D3D_SIT_STRUCTURED, 10, 0}, {"rayUvTriangles", D3D_SIT_STRUCTURED, 11, 0}
@@ -291,6 +300,9 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"OutlineConstants","outlineParams",16,16},
         {"GlobalIlluminationConstants","giViewport",0,16},
         {"GlobalIlluminationConstants","giScreenSpace",16,16},
+        {"ProbeConstants","probeGrid",0,16},
+        {"ProbeConstants","probeOrigin",16,16},
+        {"ProbeConstants","probeParameters",32,16},
         {"DepthOfFieldConstants","dofViewport",0,16},
         {"DepthOfFieldConstants","dofParameters",16,16},
         {"AntiAliasingConstants","aaInverseViewProjection",0,64},
@@ -477,12 +489,16 @@ struct SceneRenderer::Impl {
     // raster lighting samples an RHI-owned copy so both state machines stay
     // independent.
     rhi::TextureHandle nativeIndirectCopy;
+    // DDGI probe irradiance atlas ping-pong. Fixed 1024x32 covers a 32x32x32
+    // grid (width = gridX*gridZ, height = gridY).
+    rhi::TextureHandle probeAtlasA, probeAtlasB;
+    bool probeAtlasValid = false;
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 11> pixelModules;
+    std::array<rhi::ShaderHandle, 12> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
-    rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv;
+    rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
     ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D11InfoQueue> infoQueue;
@@ -500,6 +516,7 @@ struct SceneRenderer::Impl {
     bool lastScreenSpaceGi = false;
     std::uint64_t giHistoryEpoch = 0;
     bool ssgiHistoryValid = false;
+    bool lastProbeGridGi = false;
     std::uint64_t ssgiViewId = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
@@ -531,7 +548,7 @@ struct SceneRenderer::Impl {
     // never allocate the mask.
     std::unique_ptr<SelectionOutlinePass> outline;
     ComPtr<ID3D11InputLayout> inputLayout;
-    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants, giConstants, lightingConstants, dofConstants;
+    ComPtr<ID3D11Buffer> constants, objectConstants, rayConstants, shadowConstants, giConstants, lightingConstants, dofConstants, probeConstants;
     ComPtr<ID3D11Buffer> rayTriangleBuffer;
     ComPtr<ID3D11ShaderResourceView> rayTriangleView;
     ComPtr<ID3D11Buffer> rayUvBuffer, rayUvIndexBuffer, zeroUvBuffer;
@@ -574,7 +591,7 @@ struct SceneRenderer::Impl {
     std::uint32_t width = 0, height = 0;
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
-        rhi::TextureHandle colorImage, depthImage, historyImage;
+        rhi::TextureHandle colorImage, depthImage, historyImage, probeAtlasA, probeAtlasB;
         std::array<rhi::TextureHandle, 3> images;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
@@ -620,6 +637,8 @@ struct SceneRenderer::Impl {
             retired.colorImage = std::move(sceneColorImage);
             retired.depthImage = std::move(sceneDepthImage);
             retired.historyImage = std::move(ssgiHistoryImage);
+            retired.probeAtlasA = std::move(probeAtlasA);
+            retired.probeAtlasB = std::move(probeAtlasB);
             retired.images = std::move(gbufferImages);
             retired.colorTarget = std::move(sceneTarget);
             retired.color = std::move(sceneTexture);
@@ -682,6 +701,8 @@ struct SceneRenderer::Impl {
         ComPtr<ID3D11PixelShader> aaPixel;
         if (!pixelShader("PSFXAA",aaPixel) || !pixelShader("PSTAA",aaPixel) ||
             !pixelShader("PSAntiAliasingPresent",aaPixel)) return false;
+        ComPtr<ID3D11PixelShader> probeUpdatePS;
+        if (!pixelShader("PSProbeUpdate", probeUpdatePS)) return false;
         if (device) {
             progress.report(0.70f, "Preparing selection outline");
             if (!outline) outline = std::make_unique<SelectionOutlinePass>();
@@ -699,6 +720,7 @@ struct SceneRenderer::Impl {
         constant(rayBuffer, rayConstants, sizeof(RayConstants), "Analytic ray constants");
         constant(shadowBuffer, shadowConstants, sizeof(ShadowConstants), "Shadow constants");
         constant(giBuffer, giConstants, sizeof(GlobalIlluminationConstants), "GI constants");
+        constant(probeBuffer, probeConstants, sizeof(ProbeConstants), "DDGI probe constants");
         constant(dofBuffer, dofConstants, sizeof(DepthOfFieldConstants), "DOF constants");
         constant(lightingBuffer, lightingConstants, sizeof(LightingConstants), "Lighting constants");
         aaBuffer = rhiDevice->createBuffer({sizeof(AntiAliasingConstants),rhi::BufferUsage::Constant,false,"Anti-aliasing constants"});
@@ -1962,6 +1984,25 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     state.lastGiMethod = settings.globalIllumination.method;
     state.lastScreenSpaceGi = screenSpaceGi;
+    const bool probeGridGi = diagnosticMainScene && settings.debugView == 0 &&
+        (settings.editorViewport || settings.offscreenTarget) &&
+        settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
+        settings.path == RenderPath::Deferred && !hardwareTransport;
+    state.lastProbeGridGi = probeGridGi;
+    if (diagnosticMainScene && settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid) {
+        state.giStatus.requested = GlobalIlluminationMethod::ProbeGrid;
+        state.giStatus.effective = probeGridGi ? GlobalIlluminationMethod::ProbeGrid
+            : GlobalIlluminationMethod::Disabled;
+        state.giStatus.requestedMode = GlobalIlluminationMode::Realtime;
+        state.giStatus.effectiveMode = GlobalIlluminationMode::Realtime;
+        state.giStatus.accumulatedSamples = probeGridGi ? 1u : 0u;
+        state.giStatus.targetSamples = 1;
+        state.giStatus.reason = probeGridGi
+            ? "Realtime DDGI updates a camera-centred diffuse probe atlas from the deferred G-buffer."
+            : settings.path == RenderPath::Forward ? "DDGI requires the Deferred raster path."
+            : !(settings.editorViewport || settings.offscreenTarget) ? "DDGI currently requires the editor/offscreen scene target."
+            : "DDGI is unavailable for this frame.";
+    }
     if (diagnosticMainScene && settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace) {
         state.giStatus.requested = GlobalIlluminationMethod::ScreenSpace;
         state.giStatus.effective = screenSpaceGi ? GlobalIlluminationMethod::ScreenSpace
@@ -1986,6 +2027,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.hardwareTransport = hardwareTransport;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
+    pipelineInputs.probeGridGi = probeGridGi;
     pipelineInputs.depthOfField = depthOfField;
     pipelineInputs.antiAliasing = antiAliasing;
     pipelineInputs.temporalAntiAliasing = temporalAntiAliasing;
@@ -2020,6 +2062,25 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.globalIllumination.indirectDiffuseIntensity);
     state.uploadConstants(state.giBuffer, giData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
+    ProbeConstants probeData{};
+    const auto& probeSettings = settings.globalIllumination;
+    probeData.grid = XMFLOAT4(static_cast<float>(probeSettings.probeGridX),
+        static_cast<float>(probeSettings.probeGridY), static_cast<float>(probeSettings.probeGridZ),
+        probeSettings.probeHysteresis);
+    const float probeSpacing = std::max(probeSettings.probeSpacing, 0.01f);
+    const XMFLOAT3 probeCenter{settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2]};
+    probeData.origin = XMFLOAT4(
+        probeCenter.x - (probeSettings.probeGridX - 1) * probeSpacing * 0.5f,
+        probeCenter.y - (probeSettings.probeGridY - 1) * probeSpacing * 0.5f,
+        probeCenter.z - (probeSettings.probeGridZ - 1) * probeSpacing * 0.5f, probeSpacing);
+    probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
+        probeGridGi && state.probeAtlasValid ? 1.0f : 0.0f, probeSettings.indirectDiffuseIntensity, 0.0f);
+    state.uploadConstants(state.probeBuffer, probeData);
+    commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 9, std::span(&state.probeBuffer, 1));
+    if (state.context) {
+        ID3D11Buffer* probeConstantBuffer = state.probeConstants.Get();
+        state.context->PSSetConstantBuffers(9, 1, &probeConstantBuffer);
+    }
     bool hardwareFrameReady = false;
     bool thinLensImage = false;
     ID3D11ShaderResourceView* indirectView = nullptr;
@@ -2219,10 +2280,26 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
             if (screenSpaceGi && state.ssgiHistoryImage)
                 rasterPass.reads.push_back({state.ssgiHistoryImage, 13});
+            if (probeGridGi)
+                rasterPass.reads.push_back({state.probeAtlasA, 14});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(2, false);
             commands.endRenderPass();
             releaseRasterInputs();
+            break;
+        }
+        case RenderPassKind::ProbeUpdate: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{state.probeAtlasB, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
+                {state.probeAtlasA, 14}, {rasterDestinationImage, 15}};
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(11, false);
+            commands.endRenderPass();
+            std::swap(state.probeAtlasA, state.probeAtlasB);
+            state.probeAtlasValid = true;
             break;
         }
         case RenderPassKind::ForwardBackground: {
@@ -2576,6 +2653,18 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         status.reason = impl_->lastScreenSpaceGi
             ? "Realtime screen-space GI consumes the deferred G-buffer and the previous frame's lit colour."
             : "SSGI is unavailable for the current frame.";
+    }
+    if (impl_->lastGiMethod == GlobalIlluminationMethod::ProbeGrid) {
+        status.requested = GlobalIlluminationMethod::ProbeGrid;
+        status.effective = impl_->lastProbeGridGi ? GlobalIlluminationMethod::ProbeGrid
+            : GlobalIlluminationMethod::Disabled;
+        status.requestedMode = GlobalIlluminationMode::Realtime;
+        status.effectiveMode = GlobalIlluminationMode::Realtime;
+        status.accumulatedSamples = impl_->lastProbeGridGi ? 1u : 0u;
+        status.targetSamples = 1;
+        status.reason = impl_->lastProbeGridGi
+            ? "Realtime DDGI updates a camera-centred diffuse probe atlas from the deferred G-buffer."
+            : "DDGI is unavailable for the current frame.";
     }
     return status;
 }

@@ -41,6 +41,7 @@ enum class RenderFeature : std::uint8_t {
     HardwareShadows,
     PathTracingGI,
     ScreenSpaceGI,
+    ProbeGridGI,
     RealtimeGI,
     DepthOfField,
     SelectionOutline,

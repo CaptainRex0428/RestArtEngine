@@ -139,7 +139,7 @@ void verifyIndependentConstants(backend::D3D12RhiDevice& device, backend::D3D12R
     const std::array wrongConstant{vertex};
     rejects([&] { commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 0, wrongConstant); }, "A vertex buffer cannot bind as a constant buffer.");
     const std::array<rhi::BufferHandle, 1> nullConstants{};
-    rejects([&] { commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 9, nullConstants); }, "A null buffer still needs an in-range root slot.");
+    rejects([&] { commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 10, nullConstants); }, "A null buffer still needs an in-range root slot.");
     const std::array invalidNullVertex{rhi::VertexBufferBinding{nullptr, 8, 0}};
     rejects([&] { commands.bindVertexBuffers(0, invalidNullVertex); }, "An unbound vertex stream must reject a nonzero stride.");
     rejects([&] { commands.bindIndexBuffer(nullptr, 4); }, "An unbound index stream must reject a nonzero offset.");

@@ -77,6 +77,14 @@ cbuffer GlobalIlluminationConstants : register(b6)
 };
 Texture2D<float4> indirectLightingBuffer : register(t9);
 Texture2D<float4> screenSpaceHistory : register(t13);
+Texture2D<float4> probeAtlasRead : register(t14);
+Texture2D<float4> probeColorSource : register(t15);
+cbuffer ProbeConstants : register(b9)
+{
+    float4 probeGrid;    // x, y, z probe counts, history hysteresis
+    float4 probeOrigin;  // grid origin xyz, world spacing
+    float4 probeParameters;  // enabled, previous atlas valid, intensity, reserved
+};
 #endif
 
 static const float PI = 3.14159265359;
@@ -821,6 +829,54 @@ float3 ScreenSpaceIndirect(uint2 pixel, float3 position, float3 normal)
     }
     return weight > 0.0 ? sum / weight : 0.0;
 }
+float3 ProbeIrradiance(float3 position)
+{
+    if (probeParameters.x < 0.5 || probeParameters.y < 0.5) return 0.0;
+    int3 dimensions = int3(probeGrid.xyz);
+    float3 local = (position - probeOrigin.xyz) / max(probeOrigin.w, 1e-4) - 0.5;
+    int3 base = int3(floor(local));
+    float3 fraction = saturate(local - floor(local));
+    float3 sum = 0.0;
+    float weightSum = 0.0;
+    [unroll] for (int y = 0; y < 2; ++y)
+    [unroll] for (int z = 0; z < 2; ++z)
+    [unroll] for (int x = 0; x < 2; ++x)
+    {
+        int3 coordinate = clamp(base + int3(x, y, z), int3(0, 0, 0), dimensions - 1);
+        float weight = (x ? fraction.x : 1.0 - fraction.x) *
+            (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
+        int2 atlas = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
+        sum += probeAtlasRead.Load(int3(atlas, 0)).rgb * weight;
+        weightSum += weight;
+    }
+    return sum / max(weightSum, 1e-5) * probeParameters.z;
+}
+
+float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
+{
+    int2 pixel = int2(input.position.xy);
+    int3 dimensions = int3(probeGrid.xyz);
+    int ix = pixel.x % max(dimensions.x, 1);
+    int iz = pixel.x / max(dimensions.x, 1);
+    int iy = pixel.y;
+    if (iz >= dimensions.z || iy >= dimensions.y) return 0.0;
+    float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
+    float4 previous = probeParameters.y > 0.5 ? probeAtlasRead.Load(int3(pixel, 0)) : float4(0.0, 0.0, 0.0, 1.0);
+    if (probeParameters.x < 0.5) return previous;
+    float4 clip = mul(float4(world, 1.0), viewProjection);
+    if (clip.w <= 0.0001) return previous;
+    float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0)) return previous;
+    float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
+    if (scenePosition.w < 0.5 || distance(scenePosition.xyz, world) > max(probeOrigin.w * 2.0, 0.5))
+        return previous;
+    float4 sceneNormal = normalBuffer.SampleLevel(gbufferSampler, uv, 0);
+    float3 toProbe = normalize(world - scenePosition.xyz);
+    float cosine = saturate(dot(normalize(sceneNormal.xyz), toProbe));
+    float3 radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb * cosine;
+    float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
+    return float4(lerp(previous.rgb, radiance, blend), 1.0);
+}
 #endif
 
 float4 PSDeferred(FullscreenOutput input) : SV_TARGET
@@ -839,6 +895,8 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
 #if !defined(RAE_HARDWARE_RAYTRACING)
     if (giScreenSpace.x > 0.5)
         color.rgb = saturate(color.rgb + ScreenSpaceIndirect(uint2(pixel.xy), position.xyz, normalize(normal.xyz)) * giScreenSpace.w);
+    if (probeParameters.x > 0.5)
+        color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz));
 #endif
     return color;
 }

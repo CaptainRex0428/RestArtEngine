@@ -56,8 +56,8 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     using renderer::GlobalIlluminationMethod;
     using renderer::GlobalIlluminationMode;
     if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing &&
-        settings.method != GlobalIlluminationMethod::ScreenSpace)
-        throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing or screenSpace.");
+        settings.method != GlobalIlluminationMethod::ScreenSpace && settings.method != GlobalIlluminationMethod::ProbeGrid)
+        throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing, screenSpace or probeGrid.");
     if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
         throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
     if (settings.denoiser != renderer::GlobalIlluminationDenoiser::Off &&
@@ -87,6 +87,20 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     if (!std::isfinite(settings.screenSpaceThickness) || settings.screenSpaceThickness <= 0.0f ||
         settings.screenSpaceThickness > 10.0f)
         throw std::runtime_error("rendering.globalIllumination.screenSpaceThickness must be a finite number from >0 to 10.");
+    const auto probeRange = [](const char* key, std::uint32_t value) {
+        if (value < 2 || value > renderer::kGiMaxProbeGridAxis)
+            throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                " must be an integer from 2 to " + std::to_string(renderer::kGiMaxProbeGridAxis) + ".");
+    };
+    probeRange("probeGridX", settings.probeGridX);
+    probeRange("probeGridY", settings.probeGridY);
+    probeRange("probeGridZ", settings.probeGridZ);
+    if (!std::isfinite(settings.probeSpacing) || settings.probeSpacing <= 0.0f ||
+        settings.probeSpacing > renderer::kGiMaxProbeSpacing)
+        throw std::runtime_error("rendering.globalIllumination.probeSpacing must be a finite number from >0 to 20.");
+    if (!std::isfinite(settings.probeHysteresis) || settings.probeHysteresis < 0.0f ||
+        settings.probeHysteresis > 1.0f)
+        throw std::runtime_error("rendering.globalIllumination.probeHysteresis must be a finite number from 0 to 1.");
 }
 
 RenderingSettings readRenderingSettings(const Json& value) {
@@ -151,7 +165,8 @@ RenderingSettings readRenderingSettings(const Json& value) {
             if (method == "disabled") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
             else if (method == "pathTracing") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
             else if (method == "screenSpace") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::ScreenSpace;
-            else throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing or screenSpace.");
+            else if (method == "probeGrid") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::ProbeGrid;
+            else throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing, screenSpace or probeGrid.");
         }
         if (gi.contains("mode")) {
             if (!gi.at("mode").is_string())
@@ -215,6 +230,22 @@ RenderingSettings readRenderingSettings(const Json& value) {
         };
         readPositiveFloat("screenSpaceRadius", settings.globalIllumination.screenSpaceRadius, 100.0f);
         readPositiveFloat("screenSpaceThickness", settings.globalIllumination.screenSpaceThickness, 10.0f);
+        readCount("probeGridX", settings.globalIllumination.probeGridX, renderer::kGiMaxProbeGridAxis);
+        readCount("probeGridY", settings.globalIllumination.probeGridY, renderer::kGiMaxProbeGridAxis);
+        readCount("probeGridZ", settings.globalIllumination.probeGridZ, renderer::kGiMaxProbeGridAxis);
+        if (settings.globalIllumination.probeGridX < 2 || settings.globalIllumination.probeGridY < 2 ||
+            settings.globalIllumination.probeGridZ < 2)
+            throw std::runtime_error("rendering.globalIllumination.probeGrid axes must be integers from 2 to 32.");
+        readPositiveFloat("probeSpacing", settings.globalIllumination.probeSpacing, renderer::kGiMaxProbeSpacing);
+        if (gi.contains("probeHysteresis")) {
+            const auto& encoded = gi.at("probeHysteresis");
+            if (!encoded.is_number())
+                throw std::runtime_error("rendering.globalIllumination.probeHysteresis must be a finite number from 0 to 1.");
+            const double value = encoded.get<double>();
+            if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+                throw std::runtime_error("rendering.globalIllumination.probeHysteresis must be a finite number from 0 to 1.");
+            settings.globalIllumination.probeHysteresis = static_cast<float>(value);
+        }
         if (gi.contains("denoiser")) {
             if (!gi.at("denoiser").is_string())
                 throw std::runtime_error("rendering.globalIllumination.denoiser must be off, spatial or temporalSpatial.");
@@ -980,7 +1011,8 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         if (gi.is_null()) gi = Json::object();
         gi["method"] = settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing
             ? "pathTracing" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::ScreenSpace
-                ? "screenSpace" : "disabled";
+                ? "screenSpace" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::ProbeGrid
+                    ? "probeGrid" : "disabled";
         gi["mode"] = settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
             ? "realtime" : "progressive";
         gi["indirectDiffuse"] = settings.globalIllumination.indirectDiffuse;
@@ -995,6 +1027,11 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["screenSpaceSteps"] = settings.globalIllumination.screenSpaceSteps;
         gi["screenSpaceRadius"] = settings.globalIllumination.screenSpaceRadius;
         gi["screenSpaceThickness"] = settings.globalIllumination.screenSpaceThickness;
+        gi["probeGridX"] = settings.globalIllumination.probeGridX;
+        gi["probeGridY"] = settings.globalIllumination.probeGridY;
+        gi["probeGridZ"] = settings.globalIllumination.probeGridZ;
+        gi["probeSpacing"] = settings.globalIllumination.probeSpacing;
+        gi["probeHysteresis"] = settings.globalIllumination.probeHysteresis;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

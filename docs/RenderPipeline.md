@@ -67,10 +67,12 @@
 | `SelectionMask` | 编辑器描边遮罩（可见 / 遮挡双通道） | 描边遮罩 Pass |
 | `DepthOfFieldSource` | 景深 Pass 的内部源色副本 | 景深 Pass |
 | `FrameCapture` | 帧检查器快照 | 捕获 Pass |
+| `ScreenSpaceHistory` | 上一帧已着色颜色，SSGI 采样源 | **帧开始前**由上一帧复制，属于外部输入 |
+| `ProbeAtlas` | DDGI 动态 probe 辐照度 atlas（RGBA16F 2D） | DDGI probe update Pass |
 
 几个刻意的取舍：
 
-- **常量缓冲和采样器不算边**。`b0`–`b8` 在帧准备及逐对象绘制时更新，不列入这张粗粒度图像依赖表；实际 RHI 命令仍记录上传与绑定，不代表它们没有生命周期或同步要求；把它们画进图里只会让图变成绑定清单。
+- **常量缓冲和采样器不算边**。`b0`–`b9` 在帧准备及逐对象绘制时更新，不列入这张粗粒度图像依赖表；实际 RHI 命令仍记录上传与绑定，不代表它们没有生命周期或同步要求；把它们画进图里只会让图变成绑定清单。
 - **`RayTriangleScene` 是外部输入**。它在 Pass 列表开始前由 `prepareRayTriangles()` 准备好，校验器把它当作帧输入（`pipelineFrameInputs`），而不是要求某个 Pass 生产它。
 - **场景几何本身不是资源**。所有绘制类 Pass 都隐含读取世界与资产；把它抽象成资源没有信息量。
 - **一个资源可以有多个写者**（`SceneColor` 会被光照写、被硬件回读覆盖、被 DOF 改写），但**任何读取都必须发生在至少一个写者之后**。这正是校验器检查的核心。
@@ -88,12 +90,13 @@
 | 1 | `Shadow map` | 光栅阴影方案且方向光需要阴影 | — | `ShadowMap` |
 | 2 | `Hardware ray tracing transport` | DXR 本帧执行 | — | `HardwareImage`（+ 实时模式 `IndirectLighting`） |
 | 3 | `GBuffer` | 总是 | — | 三张 G-buffer + `SceneDepth` |
-| 4 | `Deferred lighting / debug` | 总是 | 三张 G-buffer + 可选 `ShadowMap` / `RayTriangleScene` / `IndirectLighting` | `SceneColor` |
-| 5 | `Hardware image resolve` | 声明了硬件传输 | `HardwareImage` | `SceneColor` |
-| 6 | `Screen-space depth of field` | 镜头启用 DOF 且不在数据视图 | `SceneColor`、`SceneDepth` | `SceneColor`、`DepthOfFieldSource` |
-| 7 | `Selection masks` | 编辑器有选中 | `SceneDepth` | `SelectionMask` |
-| 8 | `Selection composite` | 编辑器有选中 | `SceneColor`、`SceneDepth`、`SelectionMask` | `SceneColor` |
-| 9 | `Frame capture` | 请求了帧捕获 | `SceneColor`、`SceneDepth`、三张 G-buffer | `FrameCapture` |
+| 4 | `Deferred lighting / debug` | 总是 | 三张 G-buffer + 可选 `ShadowMap` / `RayTriangleScene` / `IndirectLighting` / `ScreenSpaceHistory` / `ProbeAtlas` | `SceneColor` |
+| 5 | `DDGI probe update` | DDGI 请求且 Deferred 执行 | `SceneColor`、`SceneDepth`、`GBufferNormal` | `ProbeAtlas` |
+| 6 | `Hardware image resolve` | 声明了硬件传输 | `HardwareImage` | `SceneColor` |
+| 7 | `Screen-space depth of field` | 镜头启用 DOF 且不在数据视图 | `SceneColor`、`SceneDepth` | `SceneColor`、`DepthOfFieldSource` |
+| 8 | `Selection masks` | 编辑器有选中 | `SceneDepth` | `SelectionMask` |
+| 9 | `Selection composite` | 编辑器有选中 | `SceneColor`、`SceneDepth`、`SelectionMask` | `SceneColor` |
+| 10 | `Frame capture` | 请求了帧捕获 | `SceneColor`、`SceneDepth`、三张 G-buffer | `FrameCapture` |
 
 ### 4.2 Forward
 

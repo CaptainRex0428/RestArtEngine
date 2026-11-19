@@ -288,7 +288,10 @@ void globalIlluminationRoundTrip() {
         loaded.rendering.globalIllumination.denoiseIterations == 2 &&
         loaded.rendering.globalIllumination.screenSpaceSteps == 8 &&
         loaded.rendering.globalIllumination.screenSpaceRadius == 2.0f &&
-        loaded.rendering.globalIllumination.screenSpaceThickness == 0.2f,
+        loaded.rendering.globalIllumination.screenSpaceThickness == 0.2f &&
+        loaded.rendering.globalIllumination.probeGridX == 16 && loaded.rendering.globalIllumination.probeGridY == 8 &&
+        loaded.rendering.globalIllumination.probeGridZ == 16 && loaded.rendering.globalIllumination.probeSpacing == 1.0f &&
+        loaded.rendering.globalIllumination.probeHysteresis == 0.95f,
         "Missing reconstruction fields keep the legacy spatial resolve defaults.");
 
     value["rendering"]["globalIllumination"]["method"] = "pathTracing";
@@ -337,6 +340,20 @@ void globalIlluminationRoundTrip() {
     require(savedSsgi.at("method") == "screenSpace" && savedSsgi.at("screenSpaceSteps") == 12 &&
         savedSsgi.at("screenSpaceRadius") == 4.5f && savedSsgi.at("screenSpaceThickness") == 0.35f,
         "SSGI serializes its stable method name and march settings.");
+    requested.globalIllumination.method = renderer::GlobalIlluminationMethod::ProbeGrid;
+    requested.globalIllumination.probeGridX = 20;
+    requested.globalIllumination.probeGridY = 10;
+    requested.globalIllumination.probeGridZ = 24;
+    requested.globalIllumination.probeSpacing = 1.5f;
+    requested.globalIllumination.probeHysteresis = 0.8f;
+    require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
+    require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
+        "DDGI probe grid settings survive project reload.");
+    const auto savedDdgi = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
+    require(savedDdgi.at("method") == "probeGrid" && savedDdgi.at("probeGridX") == 20 &&
+        savedDdgi.at("probeGridY") == 10 && savedDdgi.at("probeGridZ") == 24 &&
+        savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f,
+        "DDGI serializes its probe grid and history controls.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
 
     requested.hardwareRayTracing = false;
@@ -409,12 +426,21 @@ void globalIlluminationValidation() {
     for (const auto& invalid : {Json(nullptr), Json(false), Json("0.2"), Json(0.0), Json(-1.0),
             Json(10.1), Json::array(), Json::object()})
         reject(Json{{"screenSpaceThickness", invalid}}, "screenSpaceThickness");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json("1"), Json(0.0), Json(-1.0),
+            Json(20.1), Json::array(), Json::object()})
+        reject(Json{{"probeSpacing", invalid}}, "probeSpacing");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json("0.9"), Json(-0.1), Json(1.1),
+            Json::array(), Json::object()})
+        reject(Json{{"probeHysteresis", invalid}}, "probeHysteresis");
 
     struct Bound { const char* key; std::uint32_t maximum; };
     for (const auto& bound : {Bound{"samplesPerFrame", renderer::kGiMaxSamplesPerFrame},
             Bound{"targetSamples", renderer::kGiMaxTargetSamples}, Bound{"maxBounces", renderer::kGiMaxBounces},
             Bound{"denoiseIterations", renderer::kGiMaxDenoiseIterations},
-            Bound{"screenSpaceSteps", renderer::kGiMaxScreenSpaceSteps}}) {
+            Bound{"screenSpaceSteps", renderer::kGiMaxScreenSpaceSteps},
+            Bound{"probeGridX", renderer::kGiMaxProbeGridAxis},
+            Bound{"probeGridY", renderer::kGiMaxProbeGridAxis},
+            Bound{"probeGridZ", renderer::kGiMaxProbeGridAxis}}) {
         for (const auto& invalid : {Json(nullptr), Json(false), Json("4"), Json(1.0), Json(1.5),
                 Json(0), Json(-1), Json(bound.maximum + 1), Json(std::numeric_limits<std::uint64_t>::max()),
                 Json(std::numeric_limits<std::int64_t>::min()), Json::object()})
@@ -423,9 +449,11 @@ void globalIlluminationValidation() {
 
     fixture.write(fixture.original);
     const auto before = bytes(fixture.manifest);
+    int invalidCase = 0;
     const auto invalidRequest = [&](const RenderingSettings& settings) {
+        ++invalidCase;
         require(!saveProjectRenderingSettings(fixture.manifest, settings, error),
-            "Invalid runtime GI settings cannot be saved.");
+            "Invalid runtime GI settings cannot be saved (case " + std::to_string(invalidCase) + "): " + error);
         require(bytes(fixture.manifest) == before && fixture.temporaryCount() == 0,
             "Invalid GI requests cannot damage the project.");
     };
@@ -482,6 +510,18 @@ void globalIlluminationValidation() {
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.screenSpaceThickness = 11.0f;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeGridX = 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeGridY = renderer::kGiMaxProbeGridAxis + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeSpacing = 0.0f;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeHysteresis = 1.1f;
     invalidRequest(invalid);
 }
 
@@ -553,6 +593,10 @@ void editingDependenciesAndRestart() {
         applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
         require(!draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace,
             "SSGI survives an incompatible backend because it is a raster algorithm.");
+        draft.globalIllumination.method = GlobalIlluminationMethod::ProbeGrid;
+        applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
+        require(!draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid,
+            "DDGI survives an incompatible backend because it is a raster algorithm.");
         require(!projectBackendAllowsHardware(backend), "Strict D3D11 variants do not expose hardware/GI editing.");
     }
     require(projectBackendAllowsHardware(MainRenderBackend::D3D11Dxr), "The hybrid backend allows feature requests.");

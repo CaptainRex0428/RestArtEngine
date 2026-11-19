@@ -4,10 +4,11 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 | 维度 | 当前选择 | 含义 |
 | --- | --- | --- |
-| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪。 |
-| 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI 固定为实时。 |
+| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪；DDGI 维护动态漫反射 probe。 |
+| 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI／DDGI 固定为实时。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
 | SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
+| DDGI 参数 | grid X/Y/Z／spacing／hysteresis | 相机目标附近 probe 网格尺寸、世界间距和历史混合速度。 |
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
 
@@ -100,6 +101,12 @@ SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 nati
 
 SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并使用独立的上一帧颜色资源；它不做时域重投影，越过遮挡边界仍可能出现拖影。
 
+### Probe grid (DDGI)
+
+DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染器以 `cameraTarget` 为中心建立 `probeGridX × probeGridY × probeGridZ` 的世界空间 probe 网格，存储在一张 RGBA16F 的 2D atlas（width = X×Z，height = Y）中。每帧的 `DDGI probe update` 全屏 pass 将每个 probe 投影到当前 G-buffer，命中时从当前帧着色颜色按法线余弦得到辐照度，再用 `probe hysteresis` 与上一帧 atlas 混合；Deferred 光照用三线性权重从上一帧 atlas 采样 8 个相邻 probe 作为漫反射间接光。
+
+限制：probe 更新是屏幕空间可见性近似，不是逐 probe 光线追踪；被遮挡或在屏幕外的 probe 保留旧值；网格固定相机目标附近，移动相机时 probe 世界位置随帧重建，可能出现滞后；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+
 ## 历史与资源
 
 首批样本覆盖历史，不读取未初始化资源。相机、视口尺寸、几何／可见性、材质／法线、光照、背景、算法／更新模式、贡献开关、反弹数、相关阴影选项、成功发布的 Shader 及显式重启会使历史失效。材质草稿恢复已提交值同样触发新历史。曝光只改变最终显示，不使历史失效。
@@ -127,11 +134,16 @@ SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径�
   "denoiseIterations": 2,
   "screenSpaceSteps": 8,
   "screenSpaceRadius": 2.0,
-  "screenSpaceThickness": 0.2
+  "screenSpaceThickness": 0.2,
+  "probeGridX": 16,
+  "probeGridY": 8,
+  "probeGridZ": 16,
+  "probeSpacing": 1.0,
+  "probeHysteresis": 0.95
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2。`method` 可为 `disabled`、`pathTracing` 或 `screenSpace`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 
