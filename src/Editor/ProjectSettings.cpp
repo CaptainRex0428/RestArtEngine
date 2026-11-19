@@ -262,6 +262,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         }
         changed |= ImGui::Checkbox("ReSTIR direct", &gi.restirDirect);
         changed |= ImGui::Checkbox("ReSTIR indirect", &gi.restirIndirect);
+        changed |= ImGui::Checkbox("ReSTIR spatial reuse", &gi.restirSpatialReuse);
         ImGui::EndDisabled();
         int denoiser = static_cast<int>(gi.denoiser);
         if (ImGui::Combo("Denoiser", &denoiser, "Off\0Spatial (5x5)\0Temporal + spatial\0")) {

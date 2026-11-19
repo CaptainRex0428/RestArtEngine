@@ -1442,6 +1442,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             if (frame.globalIllumination.restirIndirect) restirPacked += 1000u;
             if (state.restirHistoryValid) restirPacked += 10000u;
             if (state.restirDirectHistoryValid) restirPacked += 100000u;
+            if (frame.globalIllumination.restirSpatialReuse) restirPacked += 1000000u;
         }
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},

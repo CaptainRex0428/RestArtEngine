@@ -395,6 +395,27 @@ float3 PathDirectLightReservoir(float3 position, float3 normal, float3 geometric
                 }
             }
         }
+        bool spatialReuse = (((uint)traceOptions.w / 1000000u) % 10u) > 0u;
+        if (spatialReuse)
+        {
+            float3 spatialSum = 0.0;
+            float spatialCount = 0.0;
+            int2 coordinate = int2(pixel);
+            [unroll] for (int y = -1; y <= 1; ++y)
+            [unroll] for (int x = -1; x <= 1; ++x)
+            {
+                if (x == 0 && y == 0) continue;
+                int2 neighbour = coordinate + int2(x, y);
+                if (any(neighbour < 0) || any(neighbour >= int2(outputInfo.xy))) continue;
+                float4 reservoir = restirPreviousDirect.Load(int3(neighbour, 0));
+                if (reservoir.w > 0.0)
+                {
+                    spatialSum += reservoir.rgb;
+                    spatialCount += 1.0;
+                }
+            }
+            if (spatialCount > 0.0) estimate = lerp(estimate, spatialSum / spatialCount, 0.2);
+        }
         restirDirectReservoir[pixel] = float4(estimate, 1.0);
     }
     return estimate;

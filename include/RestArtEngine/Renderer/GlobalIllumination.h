@@ -70,6 +70,7 @@ struct GlobalIlluminationSettings {
     std::uint32_t restirCandidates = 4;
     bool restirDirect = true;
     bool restirIndirect = true;
+    bool restirSpatialReuse = true;
     bool operator==(const GlobalIlluminationSettings&) const = default;
 };
 

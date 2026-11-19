@@ -278,7 +278,8 @@ RenderingSettings readRenderingSettings(const Json& value) {
         }
         readCount("restirCandidates", settings.globalIllumination.restirCandidates, renderer::kGiMaxRestirCandidates);
         for (const auto& [key, target] : {std::pair{"restirDirect", &settings.globalIllumination.restirDirect},
-                std::pair{"restirIndirect", &settings.globalIllumination.restirIndirect}}) {
+                std::pair{"restirIndirect", &settings.globalIllumination.restirIndirect},
+                std::pair{"restirSpatialReuse", &settings.globalIllumination.restirSpatialReuse}}) {
             if (!gi.contains(key)) continue;
             if (!gi.at(key).is_boolean())
                 throw std::runtime_error(std::string("rendering.globalIllumination.") + key + " must be a boolean.");
@@ -1049,6 +1050,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["restirCandidates"] = settings.globalIllumination.restirCandidates;
         gi["restirDirect"] = settings.globalIllumination.restirDirect;
         gi["restirIndirect"] = settings.globalIllumination.restirIndirect;
+        gi["restirSpatialReuse"] = settings.globalIllumination.restirSpatialReuse;
         gi["screenSpaceSteps"] = settings.globalIllumination.screenSpaceSteps;
         gi["screenSpaceRadius"] = settings.globalIllumination.screenSpaceRadius;
         gi["screenSpaceThickness"] = settings.globalIllumination.screenSpaceThickness;

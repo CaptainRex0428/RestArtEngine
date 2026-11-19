@@ -294,7 +294,8 @@ void globalIlluminationRoundTrip() {
         loaded.rendering.globalIllumination.probeHysteresis == 0.95f &&
         loaded.rendering.globalIllumination.sampling == renderer::GlobalIlluminationSampling::Uniform &&
         loaded.rendering.globalIllumination.restirCandidates == 4 &&
-        loaded.rendering.globalIllumination.restirDirect && loaded.rendering.globalIllumination.restirIndirect,
+        loaded.rendering.globalIllumination.restirDirect && loaded.rendering.globalIllumination.restirIndirect &&
+        loaded.rendering.globalIllumination.restirSpatialReuse,
         "Missing reconstruction fields keep the legacy spatial resolve defaults.");
 
     value["rendering"]["globalIllumination"]["method"] = "pathTracing";
@@ -361,12 +362,14 @@ void globalIlluminationRoundTrip() {
     requested.globalIllumination.restirCandidates = 7;
     requested.globalIllumination.restirDirect = false;
     requested.globalIllumination.restirIndirect = true;
+    requested.globalIllumination.restirSpatialReuse = false;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "ReSTIR sampling settings survive project reload.");
     const auto savedRestir = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
     require(savedRestir.at("sampling") == "restir" && savedRestir.at("restirCandidates") == 7 &&
-        savedRestir.at("restirDirect") == false && savedRestir.at("restirIndirect") == true,
+        savedRestir.at("restirDirect") == false && savedRestir.at("restirIndirect") == true &&
+        savedRestir.at("restirSpatialReuse") == false,
         "ReSTIR serializes its sampling layer controls.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
 
@@ -430,7 +433,7 @@ void globalIlluminationValidation() {
         reject(Json{{"motionVectors", invalid}}, "motionVectors");
     for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("Restir"), Json::array()})
         reject(Json{{"sampling", invalid}}, "sampling");
-    for (const char* restirBool : {"restirDirect", "restirIndirect"})
+    for (const char* restirBool : {"restirDirect", "restirIndirect", "restirSpatialReuse"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{restirBool, invalid}}, restirBool);
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
