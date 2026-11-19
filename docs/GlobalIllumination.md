@@ -114,7 +114,8 @@ DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染�
 
 - `ReSTIR direct`：每个 shading point 从场景非矩形灯中采样 `restirCandidates` 个候选，按亮度做加权 reservoir 选择，再乘灯数校正后作为直接光估计；矩形灯继续走独立面积光估计器。
 - `ReSTIR indirect`：trace pass 对每像素的若干路径候选（数量同 `restirCandidates`）做加权 reservoir 选择，结果写入路径累积；上一帧 reservoir 通过 u7 上一帧世界位置 + 上一帧 ViewProjection 重投影到 t14，按 20% 当前帧权重混合，再回读到下一帧（u8）。
-- `ReSTIR direct` 目前只有单帧空间 reservoir，没有独立历史；`ReSTIR indirect` 已有时域 reservoir 历史，但仍无空间 reuse。
+- `ReSTIR direct`：主表面直接光候选 reservoir 同样通过 t15/u9 做 20% 时域重投影；后续反弹只做当前帧空间 reservoir。
+- 两者都还没有空间 reuse；直接光估计乘灯数并做 reservoir 校正，indirect 按亮度选样本，均不是严格无偏 ReSTIR。
 
 Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path tracing 的实时模式，SSGI/DDGI 不受影响。实现位于 `PathTracing.hlsli`（直接光 reservoir）与 `HardwareRayTracing.hlsl` 的 trace batch（间接路径 reservoir）。
 

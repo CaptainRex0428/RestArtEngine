@@ -335,7 +335,8 @@ float3 PathDirectLight(float3 position, float3 normal, float3 geometricNormal,
 }
 
 float3 PathDirectLightReservoir(float3 position, float3 normal, float3 geometricNormal,
-    float3 view, Surface material, uint candidates, inout uint randomState)
+    float3 view, Surface material, uint candidates, inout uint randomState,
+    uint2 pixel, float3 previousPosition, bool useHistory)
 {
     uint lightCount = min((uint)lightInfo.x, 32u);
     if (lightCount == 0) return 0.0;
@@ -375,7 +376,28 @@ float3 PathDirectLightReservoir(float3 position, float3 normal, float3 geometric
         }
     }
     if (selectedWeight <= 0.0) return 0.0;
-    return selected * (totalWeight / (selectedWeight * max(float(candidates), 1.0)));
+    float3 estimate = selected * (totalWeight / (selectedWeight * max(float(candidates), 1.0)));
+    if (useHistory)
+    {
+        bool directHistory = (((uint)traceOptions.w / 100000u) % 10u) > 0u;
+        if (directHistory)
+        {
+            float4 clip = mul(float4(previousPosition, 1.0), denoisePreviousViewProjection);
+            if (clip.w > 0.0001)
+            {
+                float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+                if (all(uv > 0.0) && all(uv < 1.0))
+                {
+                    float4 previousReservoir = restirPreviousDirect.Load(
+                        int3(int2(uv * float2(outputInfo.xy)), 0));
+                    if (previousReservoir.w > 0.0)
+                        estimate = lerp(previousReservoir.rgb, estimate, 0.2);
+                }
+            }
+        }
+        restirDirectReservoir[pixel] = float4(estimate, 1.0);
+    }
+    return estimate;
 }
 
 void PathPrimaryRay(uint2 pixel, float2 jitter, out float3 origin,
@@ -491,9 +513,11 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
             uint restirPacked = (uint)traceOptions.w;
         uint restirCandidates = restirPacked % 100u;
         bool restirDirect = restirCandidates > 0u && ((restirPacked / 100u) % 10u) > 0u;
+        bool primaryHistory = depth == 0u;
         radiance += throughput * (restirDirect
             ? PathDirectLightReservoir(position, normal, geometricNormal, -direction, material,
-                restirCandidates, randomState)
+                restirCandidates, randomState, pixel,
+                primaryHistory ? TrianglePreviousPosition(tri, position) : position, primaryHistory)
             : PathDirectLight(position, normal, geometricNormal, -direction, material));
             radiance += throughput * PathAreaDirect(position, normal, geometricNormal, -direction, material, randomState);
         }

@@ -15,10 +15,8 @@ RWTexture2D<float4> primaryMaterial : register(u4);
 // Previous-frame world position of the primary surface (w=0 for background).
 RWTexture2D<float4> primaryPreviousPosition : register(u7);
 
-#include "PathTracing.hlsli"
-
-// Realtime reconstruction (resolve pass only). b8 is free in this shader;
-// b6 belongs to GlobalIlluminationConstants in the shared raster contract.
+// Realtime reconstruction and ReSTIR history. Declared before PathTracing.hlsli
+// because the direct-light reservoir updates its history from that header.
 cbuffer DenoiseConstants : register(b8)
 {
     row_major float4x4 denoisePreviousViewProjection;
@@ -29,9 +27,13 @@ cbuffer DenoiseConstants : register(b8)
 Texture2D<float4> denoisePreviousIndirect : register(t12);
 Texture2D<float4> denoisePreviousGeometry : register(t13);
 Texture2D<float4> restirPreviousReservoir : register(t14);
+Texture2D<float4> restirPreviousDirect : register(t15);
 RWTexture2D<float4> denoiseHistoryIndirect : register(u5);
 RWTexture2D<float4> denoiseHistoryGeometry : register(u6);
 RWTexture2D<float4> restirReservoir : register(u8);
+RWTexture2D<float4> restirDirectReservoir : register(u9);
+
+#include "PathTracing.hlsli"
 
 float3 RealtimePosition(uint2 pixel, float distance)
 {
