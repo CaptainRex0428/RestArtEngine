@@ -214,9 +214,30 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         const bool realtimeRequested = gi.mode == renderer::GlobalIlluminationMode::Realtime;
         sampleSlider(realtimeRequested ? "History samples" : "Target samples", gi.targetSamples, renderer::kGiMaxTargetSamples);
         sampleSlider("Max bounces", gi.maxBounces, renderer::kGiMaxBounces);
+        const bool realtimePath = gi.method == renderer::GlobalIlluminationMethod::PathTracing && realtimeRequested;
+        ImGui::BeginDisabled(!realtimePath);
+        int denoiser = static_cast<int>(gi.denoiser);
+        if (ImGui::Combo("Denoiser", &denoiser, "Off\0Spatial (5x5)\0Temporal + spatial\0")) {
+            gi.denoiser = static_cast<renderer::GlobalIlluminationDenoiser>(denoiser);
+            changed = true;
+        }
+        int motionVectors = static_cast<int>(gi.motionVectors);
+        if (ImGui::Combo("Motion vectors", &motionVectors, "Camera only\0Per object\0Automatic\0")) {
+            gi.motionVectors = static_cast<renderer::GlobalIlluminationMotionVectors>(motionVectors);
+            changed = true;
+        }
+        int denoiseIterations = static_cast<int>(std::clamp(gi.denoiseIterations, 1u, renderer::kGiMaxDenoiseIterations));
+        if (ImGui::SliderInt("Denoise iterations", &denoiseIterations, 1,
+                static_cast<int>(renderer::kGiMaxDenoiseIterations), "%d", ImGuiSliderFlags_AlwaysClamp)) {
+            gi.denoiseIterations = static_cast<std::uint32_t>(denoiseIterations);
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        if (realtimePath && gi.denoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial)
+            ImGui::TextWrapped("Temporal denoising is staged for the realtime GI implementation; until wired it falls back to the spatial resolve.");
         ImGui::EndDisabled();
         if (realtimeRequested)
-            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Changes reset history and use spatial filtering; motion reprojection is not available.");
+            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Changes reset history; the spatial resolve is active until the staged temporal denoiser/motion-vector implementation is enabled.");
         else
             ImGui::TextWrapped("Progressive accumulation stops at the target sample count. Keep the view still for a cleaner image; scene and lighting edits automatically restart the affected history.");
 

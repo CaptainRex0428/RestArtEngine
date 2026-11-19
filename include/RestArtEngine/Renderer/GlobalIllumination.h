@@ -12,6 +12,32 @@ enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing 
 // Update policy is independent of the transport algorithm and graphics API.
 enum class GlobalIlluminationMode : std::uint32_t { Progressive = 0, Realtime = 1 };
 
+// Realtime-only reconstruction policy. Spatial keeps the legacy 5x5 resolve;
+// TemporalSpatial adds history reprojection once motion vectors are available.
+enum class GlobalIlluminationDenoiser : std::uint32_t { Off = 0, Spatial = 1, TemporalSpatial = 2 };
+
+// Camera-only reprojection works without object history; PerObject also uses
+// the previous object transform. Automatic falls back when history is missing.
+enum class GlobalIlluminationMotionVectors : std::uint32_t { CameraOnly = 0, PerObject = 1, Automatic = 2 };
+
+inline constexpr std::uint32_t kGiMaxDenoiseIterations = 4;
+inline constexpr const char* giDenoiserKey(GlobalIlluminationDenoiser value) noexcept {
+    switch (value) {
+    case GlobalIlluminationDenoiser::Off: return "off";
+    case GlobalIlluminationDenoiser::Spatial: return "spatial";
+    case GlobalIlluminationDenoiser::TemporalSpatial: return "temporalSpatial";
+    }
+    return "spatial";
+}
+inline constexpr const char* giMotionVectorsKey(GlobalIlluminationMotionVectors value) noexcept {
+    switch (value) {
+    case GlobalIlluminationMotionVectors::CameraOnly: return "cameraOnly";
+    case GlobalIlluminationMotionVectors::PerObject: return "perObject";
+    case GlobalIlluminationMotionVectors::Automatic: return "automatic";
+    }
+    return "automatic";
+}
+
 struct GlobalIlluminationSettings {
     GlobalIlluminationMethod method = GlobalIlluminationMethod::Disabled;
     GlobalIlluminationMode mode = GlobalIlluminationMode::Progressive;
@@ -24,6 +50,10 @@ struct GlobalIlluminationSettings {
     std::uint32_t samplesPerFrame = 1;
     std::uint32_t targetSamples = 256;
     std::uint32_t maxBounces = 4;
+    // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
+    GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
+    GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;
+    std::uint32_t denoiseIterations = 2;
     bool operator==(const GlobalIlluminationSettings&) const = default;
 };
 

@@ -283,6 +283,10 @@ void globalIlluminationRoundTrip() {
     require(loadProject(fixture.manifest, loaded, error), error);
     require(loaded.rendering.globalIllumination == renderer::GlobalIlluminationSettings{},
         "An empty GI settings object preserves compatible defaults.");
+    require(loaded.rendering.globalIllumination.denoiser == renderer::GlobalIlluminationDenoiser::Spatial &&
+        loaded.rendering.globalIllumination.motionVectors == renderer::GlobalIlluminationMotionVectors::Automatic &&
+        loaded.rendering.globalIllumination.denoiseIterations == 2,
+        "Missing reconstruction fields keep the legacy spatial resolve defaults.");
 
     value["rendering"]["globalIllumination"]["method"] = "pathTracing";
     fixture.write(value);
@@ -302,6 +306,9 @@ void globalIlluminationRoundTrip() {
     requested.globalIllumination.samplesPerFrame = 4;
     requested.globalIllumination.targetSamples = 512;
     requested.globalIllumination.maxBounces = 6;
+    requested.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::TemporalSpatial;
+    requested.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::PerObject;
+    requested.globalIllumination.denoiseIterations = 3;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
     require(loadProject(fixture.manifest, loaded, error), error);
     require(loaded.rendering == requested, "GI algorithm and quality settings survive project reload.");
@@ -309,8 +316,10 @@ void globalIlluminationRoundTrip() {
     const auto& gi = saved.at("rendering").at("globalIllumination");
     require(gi.at("method") == "pathTracing" && gi.at("mode") == "realtime" &&
         gi.at("indirectDiffuse") == false && gi.at("indirectSpecular") == true && gi.at("samplesPerFrame") == 4 &&
-        gi.at("targetSamples") == 512 && gi.at("maxBounces") == 6 && gi.at("indirectDiffuseIntensity") == 2.75f,
-        "GI serializes independent algorithm, update mode, contributions and quality controls.");
+        gi.at("targetSamples") == 512 && gi.at("maxBounces") == 6 && gi.at("indirectDiffuseIntensity") == 2.75f &&
+        gi.at("denoiser") == "temporalSpatial" && gi.at("motionVectors") == "perObject" &&
+        gi.at("denoiseIterations") == 3,
+        "GI serializes independent algorithm, update mode, contributions, reconstruction and quality controls.");
     require(gi.at("extension") == value.at("rendering").at("globalIllumination").at("extension") &&
         saved.at("customExtension") == fixture.original.at("customExtension"),
         "Saving GI preserves unknown nested and project fields.");
@@ -369,6 +378,10 @@ void globalIlluminationValidation() {
         reject(Json{{"method", invalid}}, "method");
     for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("Realtime"), Json::array()})
         reject(Json{{"mode", invalid}}, "mode");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("Spatial"), Json::array()})
+        reject(Json{{"denoiser", invalid}}, "denoiser");
+    for (const auto& invalid : {Json(nullptr), Json(false), Json(1), Json("unknown"), Json("PerObject"), Json::array()})
+        reject(Json{{"motionVectors", invalid}}, "motionVectors");
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{contribution, invalid}}, contribution);
@@ -378,7 +391,8 @@ void globalIlluminationValidation() {
 
     struct Bound { const char* key; std::uint32_t maximum; };
     for (const auto& bound : {Bound{"samplesPerFrame", renderer::kGiMaxSamplesPerFrame},
-            Bound{"targetSamples", renderer::kGiMaxTargetSamples}, Bound{"maxBounces", renderer::kGiMaxBounces}}) {
+            Bound{"targetSamples", renderer::kGiMaxTargetSamples}, Bound{"maxBounces", renderer::kGiMaxBounces},
+            Bound{"denoiseIterations", renderer::kGiMaxDenoiseIterations}}) {
         for (const auto& invalid : {Json(nullptr), Json(false), Json("4"), Json(1.0), Json(1.5),
                 Json(0), Json(-1), Json(bound.maximum + 1), Json(std::numeric_limits<std::uint64_t>::max()),
                 Json(std::numeric_limits<std::int64_t>::min()), Json::object()})
@@ -404,6 +418,18 @@ void globalIlluminationValidation() {
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.mode = static_cast<renderer::GlobalIlluminationMode>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.denoiser = static_cast<renderer::GlobalIlluminationDenoiser>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.motionVectors = static_cast<renderer::GlobalIlluminationMotionVectors>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.denoiseIterations = 0;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.denoiseIterations = renderer::kGiMaxDenoiseIterations + 1;
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.samplesPerFrame = 0;

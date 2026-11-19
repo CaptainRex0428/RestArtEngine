@@ -59,6 +59,14 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
         throw std::runtime_error("rendering.globalIllumination.method must be disabled or pathTracing.");
     if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
         throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
+    if (settings.denoiser != renderer::GlobalIlluminationDenoiser::Off &&
+        settings.denoiser != renderer::GlobalIlluminationDenoiser::Spatial &&
+        settings.denoiser != renderer::GlobalIlluminationDenoiser::TemporalSpatial)
+        throw std::runtime_error("rendering.globalIllumination.denoiser must be off, spatial or temporalSpatial.");
+    if (settings.motionVectors != renderer::GlobalIlluminationMotionVectors::CameraOnly &&
+        settings.motionVectors != renderer::GlobalIlluminationMotionVectors::PerObject &&
+        settings.motionVectors != renderer::GlobalIlluminationMotionVectors::Automatic)
+        throw std::runtime_error("rendering.globalIllumination.motionVectors must be cameraOnly, perObject or automatic.");
     if (!std::isfinite(settings.indirectDiffuseIntensity) || settings.indirectDiffuseIntensity < 0.0f ||
         settings.indirectDiffuseIntensity > renderer::kGiMaxIndirectDiffuseIntensity)
         throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
@@ -70,6 +78,7 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     range("samplesPerFrame", settings.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
     range("targetSamples", settings.targetSamples, renderer::kGiMaxTargetSamples);
     range("maxBounces", settings.maxBounces, renderer::kGiMaxBounces);
+    range("denoiseIterations", settings.denoiseIterations, renderer::kGiMaxDenoiseIterations);
 }
 
 RenderingSettings readRenderingSettings(const Json& value) {
@@ -181,6 +190,25 @@ RenderingSettings readRenderingSettings(const Json& value) {
         readCount("samplesPerFrame", settings.globalIllumination.samplesPerFrame, renderer::kGiMaxSamplesPerFrame);
         readCount("targetSamples", settings.globalIllumination.targetSamples, renderer::kGiMaxTargetSamples);
         readCount("maxBounces", settings.globalIllumination.maxBounces, renderer::kGiMaxBounces);
+        readCount("denoiseIterations", settings.globalIllumination.denoiseIterations, renderer::kGiMaxDenoiseIterations);
+        if (gi.contains("denoiser")) {
+            if (!gi.at("denoiser").is_string())
+                throw std::runtime_error("rendering.globalIllumination.denoiser must be off, spatial or temporalSpatial.");
+            const auto& denoiser = gi.at("denoiser").get_ref<const std::string&>();
+            if (denoiser == "off") settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::Off;
+            else if (denoiser == "spatial") settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::Spatial;
+            else if (denoiser == "temporalSpatial") settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::TemporalSpatial;
+            else throw std::runtime_error("rendering.globalIllumination.denoiser must be off, spatial or temporalSpatial.");
+        }
+        if (gi.contains("motionVectors")) {
+            if (!gi.at("motionVectors").is_string())
+                throw std::runtime_error("rendering.globalIllumination.motionVectors must be cameraOnly, perObject or automatic.");
+            const auto& motion = gi.at("motionVectors").get_ref<const std::string&>();
+            if (motion == "cameraOnly") settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::CameraOnly;
+            else if (motion == "perObject") settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::PerObject;
+            else if (motion == "automatic") settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::Automatic;
+            else throw std::runtime_error("rendering.globalIllumination.motionVectors must be cameraOnly, perObject or automatic.");
+        }
     }
     return settings;
 }
@@ -936,6 +964,9 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["samplesPerFrame"] = settings.globalIllumination.samplesPerFrame;
         gi["targetSamples"] = settings.globalIllumination.targetSamples;
         gi["maxBounces"] = settings.globalIllumination.maxBounces;
+        gi["denoiser"] = renderer::giDenoiserKey(settings.globalIllumination.denoiser);
+        gi["motionVectors"] = renderer::giMotionVectorsKey(settings.globalIllumination.motionVectors);
+        gi["denoiseIterations"] = settings.globalIllumination.denoiseIterations;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {
