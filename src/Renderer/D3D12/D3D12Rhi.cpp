@@ -241,6 +241,8 @@ public:
     std::uint64_t uiTextureId(const TextureHandle&) override;
     void copyTextureRegion(const TextureHandle&, const TextureHandle&, std::uint32_t, std::uint32_t,
         std::uint32_t, std::uint32_t, std::uint32_t) override;
+    void copyTextureRegionTo(const TextureHandle&, std::uint32_t, std::uint32_t, const TextureHandle&,
+        std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override;
     TextureReadback readTexture(const TextureHandle&, std::uint32_t) override;
     void beginDiagnosticFrame(std::uint64_t) override;
     void beginDiagnosticPass(std::string_view) override;
@@ -1076,14 +1078,23 @@ TextureHandle Device12::uploadRgba8(std::uint32_t width, std::uint32_t height,
 }
 void Device12::copyTextureRegion(const TextureHandle& destinationHandle, const TextureHandle& sourceHandle,
     std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height, std::uint32_t sourceLayer) {
+    copyTextureRegionTo(destinationHandle, 0, 0, sourceHandle, x, y, width, height, sourceLayer);
+}
+void Device12::copyTextureRegionTo(const TextureHandle& destinationHandle, std::uint32_t destinationX,
+    std::uint32_t destinationY, const TextureHandle& sourceHandle, std::uint32_t sourceX,
+    std::uint32_t sourceY, std::uint32_t width, std::uint32_t height, std::uint32_t sourceLayer) {
     auto& destination = owned<Texture12>(destinationHandle, identity_); auto& source = owned<Texture12>(sourceHandle, identity_);
     require(destination.allocation.Get() != source.allocation.Get(), "Texture copy cannot alias its source.");
     require(sourceLayer < source.desc.arrayLayers, "Texture copy source layer is out of range.");
     require(destination.desc.format == source.desc.format && width && height &&
-        static_cast<UINT64>(x) + width <= source.desc.width && static_cast<UINT64>(y) + height <= source.desc.height &&
-        width <= destination.desc.width && height <= destination.desc.height, "Texture copy region or format is invalid.");
+        static_cast<UINT64>(sourceX) + width <= source.desc.width &&
+        static_cast<UINT64>(sourceY) + height <= source.desc.height &&
+        static_cast<UINT64>(destinationX) + width <= destination.desc.width &&
+        static_cast<UINT64>(destinationY) + height <= destination.desc.height,
+        "Texture copy region or format is invalid.");
     const bool depth = source.desc.format == Format::Depth32Float;
-    if (depth) require(x == 0 && y == 0 && width == source.desc.width && height == source.desc.height &&
+    if (depth) require(sourceX == 0 && sourceY == 0 && destinationX == 0 && destinationY == 0 &&
+        width == source.desc.width && height == source.desc.height &&
         destination.desc.width == source.desc.width && destination.desc.height == source.desc.height,
         "Depth copies require complete, identically sized subresources.");
     require(!activePass_, "Texture copy requires the graphics pass to have ended.");
@@ -1093,8 +1104,8 @@ void Device12::copyTextureRegion(const TextureHandle& destinationHandle, const T
     D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = source.allocation.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     src.SubresourceIndex = sourceLayer;
     D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = destination.allocation.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    const D3D12_BOX box{x, y, 0, x + width, y + height, 1};
-    list_->CopyTextureRegion(&dst, 0, 0, 0, &src, depth ? nullptr : &box);
+    const D3D12_BOX box{sourceX, sourceY, 0, sourceX + width, sourceY + height, 1};
+    list_->CopyTextureRegion(&dst, destinationX, destinationY, 0, &src, depth ? nullptr : &box);
     transition(source, oldSource, sourceLayer); transition(destination, oldDestination, 0);
 }
 TextureReadback Device12::readTexture(const TextureHandle& handle, std::uint32_t layer) {

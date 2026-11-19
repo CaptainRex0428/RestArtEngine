@@ -2215,8 +2215,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                         rhi::TextureDesc{dimensions.first, dimensions.second, 1,
                             rhi::Format::RGBA8Unorm, false, "Native DXR output"},
                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    state.native12->copyTextureRegion(rasterDestinationImage, image, 0, 0,
-                        static_cast<std::uint32_t>(viewportWidth), static_cast<std::uint32_t>(viewportHeight));
+                    state.native12->copyTextureRegionTo(rasterDestinationImage,
+                        static_cast<std::uint32_t>(viewportX), static_cast<std::uint32_t>(viewportY),
+                        image, 0, 0, static_cast<std::uint32_t>(viewportWidth),
+                        static_cast<std::uint32_t>(viewportHeight));
                 }
                 break;
             }

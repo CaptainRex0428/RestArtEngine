@@ -67,6 +67,13 @@ public:
     virtual void copyTextureRegion(const rhi::TextureHandle& destination, const rhi::TextureHandle& source,
         std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height,
         std::uint32_t sourceLayer = 0) = 0;
+    // Same-format rectangle copy with an explicit destination offset. Editor
+    // viewports live in a sub-rectangle of the scene target, so native DXR image
+    // resolve cannot assume the copy starts at (0,0).
+    virtual void copyTextureRegionTo(const rhi::TextureHandle& destination, std::uint32_t destinationX,
+        std::uint32_t destinationY, const rhi::TextureHandle& source, std::uint32_t sourceX,
+        std::uint32_t sourceY, std::uint32_t width, std::uint32_t height,
+        std::uint32_t sourceLayer = 0) = 0;
     [[nodiscard]] virtual TextureReadback readTexture(const rhi::TextureHandle&, std::uint32_t layer = 0) = 0;
     // Main-queue GPU timestamps only, bounded to four in-flight samples and
     // 64 passes per sample. Calls are optional; no query allocations while off.

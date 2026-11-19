@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -516,6 +517,60 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
             require(renderer.hardwareRayTracingActive() &&
                 hasPass(renderer.activePipeline(), renderer::RenderPassKind::HardwareTransport),
                 "Native DXR did not execute the hardware transport pass: " + renderer.hardwareRayTracingStatus());
+            // Editor viewports are a sub-rectangle of the scene target. Resolve
+            // the hardware image at the requested offset and require the same
+            // image as a viewport at (0,0); copying at the target origin would
+            // shift/leave the right band stale.
+            require(renderer.ensureSceneTargetSize(320, 240, error), error);
+            auto editorSettings = settings;
+            editorSettings.editorViewport = true;
+            editorSettings.offscreenTarget = false;
+            editorSettings.viewportVisible = true;
+            editorSettings.viewportWidth = 200;
+            editorSettings.viewportHeight = 140;
+            editorSettings.viewportX = 0;
+            editorSettings.viewportY = 0;
+            settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
+            const auto captureEditorViewport = [&](std::uint32_t x, std::uint32_t y,
+                std::vector<std::uint8_t>& pixels, std::uint32_t& width, std::uint32_t& height) {
+                editorSettings.viewportX = x;
+                editorSettings.viewportY = y;
+                FrameScope frame;
+                require(renderer.render(editorSettings, world, assets, error), error);
+                require(renderer.readScenePixels(pixels, width, height, error), error);
+            };
+            const auto compareViewportOffset = [&](renderer::AntiAliasingMethod method, const char* name) {
+                editorSettings.antiAliasing.method = method;
+                std::vector<std::uint8_t> originScene, offsetScene;
+                std::uint32_t originWidth = 0, originHeight = 0, offsetWidth = 0, offsetHeight = 0;
+                captureEditorViewport(0, 0, originScene, originWidth, originHeight);
+                captureEditorViewport(64, 48, offsetScene, offsetWidth, offsetHeight);
+                require(originWidth == offsetWidth && originHeight == offsetHeight,
+                    "Editor viewport renders changed the scene target size.");
+                savePixels(artifactDirectory / (std::string("native-dxr-editor-") + name + "-offset.bmp"),
+                    offsetScene, offsetWidth, offsetHeight);
+                std::size_t mismatches = 0;
+                // Spatial filters sample a small neighbourhood; the pixels at the
+                // viewport border see different off-viewport leftovers between
+                // the two renders, so compare the interior for AA variants.
+                const std::uint32_t border = method == renderer::AntiAliasingMethod::Disabled ? 0u : 4u;
+                for (std::uint32_t y = border; y < 140 - border; ++y) {
+                    for (std::uint32_t x = border; x < 200 - border; ++x) {
+                        const auto origin = (static_cast<std::size_t>(y) * originWidth + x) * 4;
+                        const auto offset = (static_cast<std::size_t>(y + 48) * offsetWidth + (x + 64)) * 4;
+                        if (std::memcmp(originScene.data() + origin, offsetScene.data() + offset, 4) != 0)
+                            ++mismatches;
+                    }
+                }
+                require(mismatches <= (method == renderer::AntiAliasingMethod::Disabled ? 0u : 8u),
+                    std::string("Native DXR editor viewport image is shifted (") +
+                    name + "): " + std::to_string(mismatches) + " mismatched pixels.");
+                return mismatches;
+            };
+            const auto noAaMismatches = compareViewportOffset(renderer::AntiAliasingMethod::Disabled, "no-aa");
+            const auto fxaaMismatches = compareViewportOffset(renderer::AntiAliasingMethod::FXAA, "fxaa");
+            report["dxrViewport"] = {{"offset", {64, 48}}, {"size", {200, 140}},
+                {"mismatches", {{"disabled", noAaMismatches}, {"fxaa", fxaaMismatches}}}};
             settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
             settings.globalIllumination.mode = renderer::GlobalIlluminationMode::Realtime;
             settings.globalIllumination.indirectDiffuse = true;
