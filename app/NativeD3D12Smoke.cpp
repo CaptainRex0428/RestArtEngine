@@ -578,10 +578,21 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
             settings.globalIllumination.samplesPerFrame = 1;
             settings.globalIllumination.targetSamples = 8;
             settings.globalIllumination.maxBounces = 2;
+            settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::TemporalSpatial;
+            settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::CameraOnly;
+            settings.globalIllumination.denoiseIterations = 2;
             for (int frame = 0; frame < 4; ++frame) renderMain(frame == 3 ? "native-dxr-realtime-gi.bmp" : nullptr);
             const auto gi = renderer.globalIlluminationStatus();
             require(gi.effective == renderer::GlobalIlluminationMethod::PathTracing,
                 "Native realtime GI did not become effective: " + gi.reason);
+            require(gi.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial &&
+                gi.effectiveMotionVectors == renderer::GlobalIlluminationMotionVectors::CameraOnly,
+                "Native realtime GI did not report camera-reprojected temporal denoising.");
+            settings.cameraYaw += 0.08f;
+            renderMain(nullptr);
+            settings.cameraYaw += 0.08f;
+            renderMain("native-dxr-realtime-gi-motion.bmp");
+            require(renderer.hardwareRayTracingActive(), "Camera motion stopped native realtime GI.");
             report["dxr"] = {{"active", true}, {"status", renderer.hardwareRayTracingStatus()},
                 {"realtimeGiSamples", gi.accumulatedSamples}, {"realtimeGiReason", gi.reason}};
             settings = savedSettings;

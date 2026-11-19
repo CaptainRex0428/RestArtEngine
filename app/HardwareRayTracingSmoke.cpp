@@ -652,11 +652,19 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             click(itemRect(popup, label, ImGuiNavLayer_Main, id).GetCenter());
         };
         const bool nativeLaunch = launchBackend.preference == renderer::MainRenderBackend::D3D12;
+        const auto beforeBackendEdit = uiSettings;
         selectBackend(nativeLaunch ? "D3D11 (strict)" : "D3D12 (native DXR)", nativeLaunch ? 2 : 3);
-        require(!uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections &&
-            !uiSettings.hardwareRayTracingShadows &&
-            uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::Disabled,
-            "Choosing native12 did not clear unsupported dependent requests.");
+        if (nativeLaunch) {
+            require(!uiSettings.hardwareRayTracing && !uiSettings.hardwareRayTracingReflections &&
+                !uiSettings.hardwareRayTracingShadows &&
+                uiSettings.globalIllumination.method == renderer::GlobalIlluminationMethod::Disabled,
+                "Choosing strict D3D11 did not clear hardware requests it cannot execute.");
+        } else {
+            require(uiSettings.hardwareRayTracing == beforeBackendEdit.hardwareRayTracing &&
+                uiSettings.hardwareRayTracingReflections == beforeBackendEdit.hardwareRayTracingReflections &&
+                uiSettings.hardwareRayTracingShadows == beforeBackendEdit.hardwareRayTracingShadows,
+                "Choosing native D3D12 cleared requests that its native DXR path supports.");
+        }
         // The suite may launch with a CLI backend override, so the persisted
         // backend can already equal the newly selected one. Both the saved and
         // unsaved restart notices are valid; require one, not a specific form.

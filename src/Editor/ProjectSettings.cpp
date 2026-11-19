@@ -237,7 +237,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             ImGui::TextWrapped("Temporal denoising is staged for the realtime GI implementation; until wired it falls back to the spatial resolve.");
         ImGui::EndDisabled();
         if (realtimeRequested)
-            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Changes reset history; the spatial resolve is active until the staged temporal denoiser/motion-vector implementation is enabled.");
+            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Temporal denoising reprojects history with camera motion; per-object motion vectors are the next extension.");
         else
             ImGui::TextWrapped("Progressive accumulation stops at the target sample count. Keep the view still for a cleaner image; scene and lighting edits automatically restart the affected history.");
 
@@ -258,6 +258,16 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
                 const std::string label = std::to_string(progress) + " / " + std::to_string(target) + " samples";
                 ImGui::ProgressBar(static_cast<float>(progress) / static_cast<float>(target), ImVec2(-FLT_MIN, 0), label.c_str());
             }
+        }
+        if (giEffective && giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) {
+            const char* denoiser = giStatus.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial
+                ? "Temporal + spatial" : giStatus.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::Spatial
+                    ? "Spatial (5x5)" : "Off";
+            const char* motion = giStatus.effectiveMotionVectors == renderer::GlobalIlluminationMotionVectors::PerObject
+                ? "Per object" : giStatus.effectiveMotionVectors == renderer::GlobalIlluminationMotionVectors::CameraOnly
+                    ? "Camera only" : "Automatic";
+            ImGui::Text("GI denoiser: %s", denoiser);
+            ImGui::Text("GI motion vectors: %s", motion);
         }
         if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
         ImGui::BeginDisabled(!giEffective);

@@ -67,6 +67,10 @@ struct GlobalIlluminationStatus {
     GlobalIlluminationMethod effective = GlobalIlluminationMethod::Disabled;
     GlobalIlluminationMode requestedMode = GlobalIlluminationMode::Progressive;
     GlobalIlluminationMode effectiveMode = GlobalIlluminationMode::Progressive;
+    GlobalIlluminationDenoiser requestedDenoiser = GlobalIlluminationDenoiser::Spatial;
+    GlobalIlluminationDenoiser effectiveDenoiser = GlobalIlluminationDenoiser::Spatial;
+    GlobalIlluminationMotionVectors requestedMotionVectors = GlobalIlluminationMotionVectors::Automatic;
+    GlobalIlluminationMotionVectors effectiveMotionVectors = GlobalIlluminationMotionVectors::Automatic;
     std::uint32_t accumulatedSamples = 0;
     std::uint32_t targetSamples = 256;
     std::uint64_t historyRevision = 0;

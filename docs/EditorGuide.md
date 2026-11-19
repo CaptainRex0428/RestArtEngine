@@ -285,7 +285,7 @@ F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板�
 
 同页 `Anti-aliasing` 提供 Off、FXAA、TAA，旧工程默认 FXAA。FXAA 在当前图像上平滑边缘，TAA 结合投影抖动与历史帧改善细小轮廓的稳定性。TAA 的 `Current frame weight` 越低越偏向稳定，越高越快响应运动和光照变化；拖动后实时生效。界面显示请求方案、实际方案、TAA 历史帧数及降级原因，保存与其他工程渲染配置一致。配置格式见 [工程管理](ProjectManagement.md#抗锯齿配置)。
 
-同页通过 `GI method → Path tracing` 开启 GI 和硬件依赖，`GI mode` 独立选择 Progressive accumulation 或 Realtime。`Indirect diffuse (color bleeding)` 与 `Indirect specular (reflections)` 分别控制颜色传递和间接反射，直接光保持独立。实时模式持续采样并将间接光交给 Forward／Deferred，`History samples` 限制历史权重；渐进模式到 `Target samples` 停止。每帧样本、反弹数和贡献开关立即生效，Restart accumulation 可重建历史；曝光不重置累积。实时模式带边缘感知空间滤波，运动时清除旧历史，尚无运动重投影。完整行为和项目字段见 [全局光照](GlobalIllumination.md)。
+同页通过 `GI method → Path tracing` 开启 GI 和硬件依赖，`GI mode` 独立选择 Progressive accumulation 或 Realtime。`Indirect diffuse (color bleeding)` 与 `Indirect specular (reflections)` 分别控制颜色传递和间接反射，直接光保持独立。实时模式持续采样并将间接光交给 Forward／Deferred，`History samples` 限制路径样本权重；渐进模式到 `Target samples` 停止。每帧样本、反弹数和贡献开关立即生效，Restart accumulation 可重建历史；曝光不重置累积。实时模式的 `Denoiser` 可选 Off／Spatial／Temporal+spatial，`Motion vectors` 可选 Camera only／Per object／Automatic，`Denoise iterations` 控制滤波轮数；当前 temporal 已接入相机重投影，Per-object 仍回退 Camera only，状态区会显示实际降噪和运动向量。完整行为和项目字段见 [全局光照](GlobalIllumination.md)。
 
 解析光追同时追踪内置 Sphere / Plane / Cube 与通用 MeshAsset。前 32 个内置对象使用精确解析求交，超出的内置对象、OBJ 和未来网格类型通过结构化三角形缓冲参与环境反射、相互反射和阴影。通用路径不设置引擎层三角形预算，实际可用范围取决于 D3D11 资源创建和显存。它仍是 GPU 解析求交，不是 DXR。
 
