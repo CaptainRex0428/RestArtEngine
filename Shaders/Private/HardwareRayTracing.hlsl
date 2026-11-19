@@ -12,6 +12,8 @@ RWTexture2D<float4> primaryGeometry : register(u2);
 // Linear HDR, shared with raster lighting. It never contains primary direct light.
 RWTexture2D<float4> indirectLightingOutput : register(u3);
 RWTexture2D<float4> primaryMaterial : register(u4);
+// Previous-frame world position of the primary surface (w=0 for background).
+RWTexture2D<float4> primaryPreviousPosition : register(u7);
 
 #include "PathTracing.hlsli"
 
@@ -91,7 +93,9 @@ void ResolveRealtimeGi(uint2 pixel)
         float historyWeight = 0.0;
         if (denoiseOptions.z < 0.5)
         {
-            float4 clip = mul(float4(position, 1.0), denoisePreviousViewProjection);
+            float4 previousPosition = primaryPreviousPosition[pixel];
+            float3 reprojectionPosition = previousPosition.w > 0.5 ? previousPosition.xyz : position;
+            float4 clip = mul(float4(reprojectionPosition, 1.0), denoisePreviousViewProjection);
             if (clip.w > 0.0001)
             {
                 float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
@@ -153,12 +157,14 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
             [loop] for (uint sampleOrdinal = 0; sampleOrdinal < batchSamples; ++sampleOrdinal)
             {
                 float4 geometry, material;
+                float3 previousPosition;
                 batchSum += PathRadiance(thread.xy,
-                    (realtime ? giOptions.w : previousSamples) + sampleOrdinal, geometry, material);
+                    (realtime ? giOptions.w : previousSamples) + sampleOrdinal, geometry, material, previousPosition);
                 if (realtime && sampleOrdinal == 0)
                 {
                     primaryGeometry[thread.xy] = geometry;
                     primaryMaterial[thread.xy] = material;
+                    primaryPreviousPosition[thread.xy] = float4(previousPosition, 1.0);
                 }
             }
             float3 batchMean = batchSum / float(batchSamples);

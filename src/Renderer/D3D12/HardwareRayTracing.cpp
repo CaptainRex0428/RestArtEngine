@@ -28,6 +28,7 @@
 #include <mutex>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace rae::renderer::d3d12 {
@@ -194,6 +195,9 @@ public:
 struct RayTriangle {
     XMFLOAT3 position0, position1, position2, normal;
     XMFLOAT4 color, properties;
+    // Previous frame world positions for per-object motion vectors. Static or
+    // newly-created objects carry their current positions.
+    XMFLOAT3 previousPosition0, previousPosition1, previousPosition2;
 };
 struct HardwareConstants {
     std::array<float, 16> inverseViewProjection;
@@ -204,7 +208,7 @@ struct HardwareConstants {
     std::array<float, 16> areaLight;
     std::array<float, 4> thinLens;
 };
-static_assert(sizeof(RayTriangle) == 80 && sizeof(HardwareConstants) == 208);
+static_assert(sizeof(RayTriangle) == 116 && sizeof(HardwareConstants) == 208);
 // Bound as b6 for the resolve/temporal dispatch. Kept out of HardwareConstants
 // so the trace pass keeps its existing 256-byte constant slot.
 struct DenoiseConstants {
@@ -287,9 +291,16 @@ std::vector<SceneInput> sceneInputs(const scene::World& world, const assets::Ass
 }
 
 bool gather(const scene::World& world, const assets::AssetLibrary& assets,
-            const assets::MaterialAsset* preview, std::vector<RayTriangle>& triangles,
+            const assets::MaterialAsset* preview, const std::vector<SceneInput>* previousInputs,
+            std::vector<RayTriangle>& triangles,
             std::vector<XMFLOAT3>& positions, std::vector<XMFLOAT3>& normals,
             meshAttributes::RayUvData& uvData, std::string& error) {
+    std::unordered_map<scene::ActorId, std::array<float, 9>> previousTransforms;
+    if (previousInputs) {
+        for (const auto& input : *previousInputs)
+            previousTransforms[input.actor] = {input.values[0], input.values[1], input.values[2],
+                input.values[3], input.values[4], input.values[5], input.values[6], input.values[7], input.values[8]};
+    }
     // Reserve once from topology counts. At ten million triangles, geometric
     // vector growth otherwise briefly retains gigabytes of superseded storage.
     std::size_t expectedTriangles = 0;
@@ -326,17 +337,28 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             XMMatrixTranslation(t.position[0], t.position[1], t.position[2]);
         const XMMATRIX normalMatrix = XMMatrixTranspose(XMMatrixInverse(nullptr, matrix));
         const bool mirrored = std::signbit(t.scale[0]) ^ std::signbit(t.scale[1]) ^ std::signbit(t.scale[2]);
+        const std::array<float, 9> currentTransform = {t.position[0], t.position[1], t.position[2],
+            t.rotation[0], t.rotation[1], t.rotation[2], t.scale[0], t.scale[1], t.scale[2]};
+        auto previousTransform = currentTransform;
+        if (const auto found = previousTransforms.find(actor.id); found != previousTransforms.end())
+            previousTransform = found->second;
+        const XMMATRIX previousMatrix = XMMatrixScaling(previousTransform[6], previousTransform[7], previousTransform[8]) *
+            XMMatrixRotationRollPitchYaw(XMConvertToRadians(previousTransform[3]),
+                XMConvertToRadians(previousTransform[4]), XMConvertToRadians(previousTransform[5])) *
+            XMMatrixTranslation(previousTransform[0], previousTransform[1], previousTransform[2]);
         for (std::size_t index = 0; index < mesh->indices.size(); index += 3) {
             const auto slot = mesh->materialSlotForIndex(static_cast<std::uint32_t>(index));
             if (slot >= materials.size()) { error = "DXR material section index is invalid."; return false; }
             const auto* material = materials[slot];
             if (!material) continue;
-            XMVECTOR points[3], vertexNormals[3];
+            XMVECTOR points[3], previousPoints[3], vertexNormals[3];
             for (unsigned vertex = 0; vertex < 3; ++vertex) {
                 const auto offset = mesh->indices[index + vertex];
                 if (offset >= mesh->vertices.size()) { error = "DXR mesh index out of range: " + mesh->name; return false; }
                 const auto& input = mesh->vertices[offset];
-                points[vertex] = XMVector3TransformCoord(XMVectorSet(input.position[0], input.position[1], input.position[2], 1), matrix);
+                const XMVECTOR local = XMVectorSet(input.position[0], input.position[1], input.position[2], 1);
+                points[vertex] = XMVector3TransformCoord(local, matrix);
+                previousPoints[vertex] = XMVector3TransformCoord(local, previousMatrix);
                 vertexNormals[vertex] = XMVector3TransformNormal(XMVectorSet(input.normal[0], input.normal[1], input.normal[2], 0), normalMatrix);
                 if (!finite3(points[vertex])) { error = "DXR mesh has a non-finite world position: " + mesh->name; return false; }
             }
@@ -351,6 +373,9 @@ bool gather(const scene::World& world, const assets::AssetLibrary& assets,
             RayTriangle triangle{};
             XMStoreFloat3(&triangle.position0, points[0]); XMStoreFloat3(&triangle.position1, points[1]);
             XMStoreFloat3(&triangle.position2, points[2]); XMStoreFloat3(&triangle.normal, faceNormal);
+            XMStoreFloat3(&triangle.previousPosition0, previousPoints[0]);
+            XMStoreFloat3(&triangle.previousPosition1, previousPoints[1]);
+            XMStoreFloat3(&triangle.previousPosition2, previousPoints[2]);
             triangle.color = {material->baseColor[0], material->baseColor[1], material->baseColor[2],
                 uvData.appendTriangle(*mesh, index, uvOffset)};
             triangle.properties = {material->roughness, material->metallic, 3,
@@ -512,16 +537,18 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
                 error = std::string("Cannot read DXR structured element: ") + binding.Name; return false;
             }
             if (binding.BindPoint == 4) {
-                if (variable.Size != sizeof(RayTriangle) || elementType.Class != D3D_SVC_STRUCT || elementType.Members != 6) {
-                    error = "DXR rayTriangles requires the renderer's 80-byte RayTriangle structure."; return false;
+                if (variable.Size != sizeof(RayTriangle) || elementType.Class != D3D_SVC_STRUCT || elementType.Members != 9) {
+                    error = "DXR rayTriangles requires the renderer's 116-byte RayTriangle structure."; return false;
                 }
-                const char* names[] = {"position0", "position1", "position2", "normal", "color", "properties"};
-                const UINT offsets[] = {0, 12, 24, 36, 48, 64};
+                const char* names[] = {"position0", "position1", "position2", "normal", "color", "properties",
+                    "previousPosition0", "previousPosition1", "previousPosition2"};
+                const UINT offsets[] = {0, 12, 24, 36, 48, 64, 80, 92, 104};
                 for (UINT memberIndex = 0; memberIndex < std::size(names); ++memberIndex) {
                     D3D12_SHADER_TYPE_DESC member{};
+                    const UINT columns = (memberIndex == 4 || memberIndex == 5) ? 4u : 3u;
                     if (FAILED(element->GetType()->GetMemberTypeByName(names[memberIndex])->GetDesc(&member)) ||
                         member.Offset != offsets[memberIndex] || member.Type != D3D_SVT_FLOAT ||
-                        member.Class != D3D_SVC_VECTOR || member.Rows != 1 || member.Columns != (memberIndex < 4 ? 3u : 4u)) {
+                        member.Class != D3D_SVC_VECTOR || member.Rows != 1 || member.Columns != columns) {
                         error = std::string("DXR RayTriangle layout mismatch: ") + names[memberIndex]; return false;
                     }
                 }
@@ -547,7 +574,7 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             }
         }
         else if (binding.Type == D3D_SIT_RTACCELERATIONSTRUCTURE && binding.BindPoint == 7) acceleration = true;
-        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 6 &&
+        else if (binding.Type == D3D_SIT_UAV_RWTYPED && binding.BindPoint <= 7 &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
             uavMask |= 1u << binding.BindPoint;
         }
@@ -559,8 +586,8 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
     }
     UINT x = 0, y = 0, z = 0; reflection->GetThreadGroupSize(&x, &y, &z);
     if (!(scene && hardware && lighting && acceleration && triangles && normals && denoise) ||
-        uavMask != 0x7fu || historySrvs != ((1u << 12) | (1u << 13)) || x != 8 || y != 8 || z != 1) {
-        error = "DXR shader must preserve b0/b5/b7/b8, t4/t7/t8/t12/t13, u0..u6 and the 8x8x1 thread-group contract.";
+        uavMask != 0xffu || historySrvs != ((1u << 12) | (1u << 13)) || x != 8 || y != 8 || z != 1) {
+        error = "DXR shader must preserve b0/b5/b7/b8, t4/t7/t8/t12/t13, u0..u7 and the 8x8x1 thread-group contract.";
         return false;
     }
     return true;
@@ -589,6 +616,9 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12Resource> outputTexture, accumulationTexture, normalGuide, indirectTexture, albedoGuide;
+    // Per-object motion: world position of the primary surface in the previous
+    // frame. RGBA32F with w=0 for background.
+    ComPtr<ID3D12Resource> primaryPreviousPosition;
     // Realtime temporal reconstruction: fixed read/write history pairs, copied
     // read<-write after each resolve so descriptors never need swapping.
     ComPtr<ID3D12Resource> historyIndirectRead, historyIndirectWrite;
@@ -719,6 +749,8 @@ struct HardwareRayTracing::Impl {
         uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         device->CreateUnorderedAccessView(geometryWrite.Get(), nullptr, &uav, descriptor);
         descriptor.ptr += stride;
+        // u7 is the primary previous-position image, written by prepareOutput.
+        descriptor.ptr += stride;
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -736,8 +768,8 @@ struct HardwareRayTracing::Impl {
     bool prepareOutput(std::uint32_t w, std::uint32_t h, UINT64 dx11Done, std::string& error) {
         if (native) {
             if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
-                historyIndirectRead && historyIndirectWrite && historyGeometryRead && historyGeometryWrite &&
-                width == w && height == h) return true;
+                primaryPreviousPosition && historyIndirectRead && historyIndirectWrite &&
+                historyGeometryRead && historyGeometryWrite && width == w && height == h) return true;
             // Native resources are consumed through the shared raster queue; no
             // cross-device ownership is involved, so only the previous native
             // submission must complete before replacing the image set.
@@ -755,7 +787,7 @@ struct HardwareRayTracing::Impl {
                 return !failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &description,
                     initialState, nullptr, IID_PPV_ARGS(&resource)), operation, error);
             };
-            ComPtr<ID3D12Resource> candidateOutput, accumulationCandidate, normalCandidate, albedoCandidate, indirectCandidate;
+            ComPtr<ID3D12Resource> candidateOutput, accumulationCandidate, normalCandidate, albedoCandidate, indirectCandidate, previousCandidate;
             if (!makeImage(DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COMMON, candidateOutput, "Create native DXR image") ||
                 !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -765,7 +797,9 @@ struct HardwareRayTracing::Impl {
                 !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, albedoCandidate, "Create native realtime GI material guide") ||
                 !makeImage(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                    D3D12_RESOURCE_STATE_COMMON, indirectCandidate, "Create native HDR indirect lighting image")) return false;
+                    D3D12_RESOURCE_STATE_COMMON, indirectCandidate, "Create native HDR indirect lighting image") ||
+                !makeImage(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, previousCandidate, "Create native primary previous-position image")) return false;
             D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
             view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             auto descriptor = descriptors->GetCPUDescriptorHandleForHeapStart();
@@ -776,10 +810,14 @@ struct HardwareRayTracing::Impl {
                 device->CreateUnorderedAccessView(resource, nullptr, &view, descriptor);
                 descriptor.ptr += descriptorStride;
             }
+            descriptor.ptr += descriptorStride * 2; // u5/u6 history write slots
+            view.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            device->CreateUnorderedAccessView(previousCandidate.Get(), nullptr, &view, descriptor);
             outputTexture = std::move(candidateOutput);
             accumulationTexture = std::move(accumulationCandidate);
             normalGuide = std::move(normalCandidate); albedoGuide = std::move(albedoCandidate);
             indirectTexture = std::move(indirectCandidate);
+            primaryPreviousPosition = std::move(previousCandidate);
             width = w; height = h;
             nativeOutputState = nativeIndirectState = D3D12_RESOURCE_STATE_COMMON;
             indirectReady = false;
@@ -788,8 +826,8 @@ struct HardwareRayTracing::Impl {
             return true;
         }
         if (outputTexture && accumulationTexture && normalGuide && indirectTexture && albedoGuide &&
-            historyIndirectRead && historyIndirectWrite && historyGeometryRead && historyGeometryWrite &&
-            indirectView && width == w && height == h) return true;
+            primaryPreviousPosition && historyIndirectRead && historyIndirectWrite &&
+            historyGeometryRead && historyGeometryWrite && indirectView && width == w && height == h) return true;
         // Previous DX11 reads must finish before replacing a shared allocation
         // or its descriptor. Normal frame reuse remains GPU ordered.
         if (!wait(dx11Done, error)) return false;
@@ -819,14 +857,15 @@ struct HardwareRayTracing::Impl {
         D3D12_RESOURCE_DESC hdrDescription = description;
         hdrDescription.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         hdrDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        ComPtr<ID3D12Resource> accumulationCandidate, normalCandidate, albedoCandidate;
+        ComPtr<ID3D12Resource> accumulationCandidate, normalCandidate, albedoCandidate, previousCandidate;
         const auto createPrivateImage = [&](ComPtr<ID3D12Resource>& resource, const char* operation) {
             return !failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &hdrDescription,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)), operation, error);
         };
         if (!createPrivateImage(accumulationCandidate, "Create HDR path accumulation image") ||
             !createPrivateImage(normalCandidate, "Create realtime GI normal/depth guide") ||
-            !createPrivateImage(albedoCandidate, "Create realtime GI material guide")) return false;
+            !createPrivateImage(albedoCandidate, "Create realtime GI material guide") ||
+            !createPrivateImage(previousCandidate, "Create primary previous-position guide")) return false;
         auto sharedHdrDescription = description;
         // DX11/DX12 interoperable HDR format. The estimator remains FP32;
         // only its resolved consumer image uses half precision.
@@ -858,9 +897,13 @@ struct HardwareRayTracing::Impl {
             view.Format = resource->GetDesc().Format;
             device->CreateUnorderedAccessView(resource, nullptr, &view, descriptor);
         }
+        descriptor.ptr += descriptorStride * 2; // u5/u6 history write slots
+        view.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        device->CreateUnorderedAccessView(previousCandidate.Get(), nullptr, &view, descriptor);
         outputTexture = std::move(candidate); sharedOutput = std::move(candidate11); width = w; height = h;
         accumulationTexture = std::move(accumulationCandidate);
         normalGuide = std::move(normalCandidate); albedoGuide = std::move(albedoCandidate);
+        primaryPreviousPosition = std::move(previousCandidate);
         indirectTexture = std::move(indirectCandidate); sharedIndirect = std::move(indirectCandidate11);
         indirectView = std::move(indirectViewCandidate); indirectReady = false;
         historyValid = false; accumulatedSamples = 0; sampleSequence = 0;
@@ -1006,7 +1049,7 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
     if (!candidate->event.value) { error = "Cannot create DXR completion event."; return fail(); }
     D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
     descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 9; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    descriptors.NumDescriptors = 10; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)), "Create DXR descriptors", error)) return fail();
     candidate->device.As(&candidate->infoQueue);
     candidate->capable = true;
@@ -1080,7 +1123,7 @@ bool HardwareRayTracing::initializeNative(ID3D12Device* device, ID3D12CommandQue
     if (!candidate->event.value) { error = "Cannot create native DXR completion event."; return fail(); }
     D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
     descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 9; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    descriptors.NumDescriptors = 10; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)),
             "Create native DXR descriptors", error)) return fail();
     candidate->device.As(&candidate->infoQueue);
@@ -1140,7 +1183,7 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     parameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[8].Descriptor.ShaderRegister = 11;
     parameters[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[9].Descriptor.ShaderRegister = 8;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 7; range.BaseShaderRegister = 0;
+    range.NumDescriptors = 8; range.BaseShaderRegister = 0;
     parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[5].DescriptorTable.NumDescriptorRanges = 1; parameters[5].DescriptorTable.pDescriptorRanges = &range;
     D3D12_DESCRIPTOR_RANGE srvs{}; srvs.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -1242,7 +1285,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         auto triangleCount = state.triangleCount;
         if (sceneChanged) {
             rae::diagnostics::TraceScope gatherTrace("DXR scene rebuild", "Renderer CPU");
-            if (!gather(world, assets, materialOverride, triangles, positions, normals, uvData, error)) return fail();
+            if (!gather(world, assets, materialOverride,
+                    state.sceneInputsValid ? &state.cachedSceneInputs : nullptr,
+                    triangles, positions, normals, uvData, error)) return fail();
             positionHash = hashBytes(positions.data(), positions.size() * sizeof(XMFLOAT3));
             triangleHash = hashBytes(triangles.data(), triangles.size() * sizeof(RayTriangle));
             normalHash = hashBytes(normals.data(), normals.size() * sizeof(XMFLOAT3));
@@ -1315,6 +1360,17 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         // reprojection can reuse history across camera motion; geometry,
         // lighting, materials and projection changes still reset it.
         auto nextDenoiseKey = nextHistory;
+        // Moving actors change world-space triangle hashes but must keep the
+        // temporal history; hash topology/material identity instead of positions.
+        std::uint64_t denoiseTopology = 1469598103934665603ull;
+        for (const auto& input : nextSceneInputs) {
+            SceneInput identity = input;
+            identity.values.fill(0.0f);
+            const auto hash = hashBytes(&identity, sizeof(identity));
+            denoiseTopology ^= hash + 0x9e3779b97f4a7c15ull + (denoiseTopology << 6) + (denoiseTopology >> 2);
+        }
+        nextDenoiseKey.positions = 0; nextDenoiseKey.normals = 0;
+        nextDenoiseKey.triangles = denoiseTopology;
         std::fill(nextDenoiseKey.sceneConstants.begin(), nextDenoiseKey.sceneConstants.begin() + 16, 0.0f);
         std::fill(nextDenoiseKey.sceneConstants.begin() + 16, nextDenoiseKey.sceneConstants.begin() + 20, 0.0f);
         std::fill(nextDenoiseKey.sceneConstants.begin() + 36, nextDenoiseKey.sceneConstants.begin() + 40, 0.0f);
@@ -1387,7 +1443,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.list->SetComputeRootShaderResourceView(8, state.uvTriangleData->GetGPUVirtualAddress());
         state.list->SetComputeRootConstantBufferView(9, state.constants->GetGPUVirtualAddress() + denoiseOffset);
         const auto historySrvOffset = static_cast<UINT64>(state.device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 7;
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 8;
         auto historyTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
         historyTable.ptr += historySrvOffset;
         state.list->SetComputeRootDescriptorTable(10, historyTable);
@@ -1479,9 +1535,10 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             ? (denoiseMode == 2 ? GlobalIlluminationDenoiser::TemporalSpatial
                 : denoiseMode == 1 ? GlobalIlluminationDenoiser::Spatial : GlobalIlluminationDenoiser::Off)
             : GlobalIlluminationDenoiser::Off;
-        state.giStatus.effectiveMotionVectors = GlobalIlluminationMotionVectors::CameraOnly;
-        if (realtimeLit && frame.globalIllumination.motionVectors != GlobalIlluminationMotionVectors::CameraOnly)
-            state.giStatus.reason += " Per-object motion vectors are not available; camera reprojection is active.";
+        state.giStatus.effectiveMotionVectors = (realtimeLit && denoiseMode == 2)
+            ? (frame.globalIllumination.motionVectors == GlobalIlluminationMotionVectors::CameraOnly
+                ? GlobalIlluminationMotionVectors::CameraOnly : GlobalIlluminationMotionVectors::PerObject)
+            : GlobalIlluminationMotionVectors::CameraOnly;
         state.giStatus.accumulatedSamples = state.accumulatedSamples;
         state.indirectReady = realtimeLit;
         state.dispatches += realtimeLit ? 2u : 1u;
@@ -1524,6 +1581,26 @@ std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::nativeOutputSize() c
     return {impl_->width, impl_->height};
 }
 std::string HardwareRayTracing::status() const { return impl_->message; }
+std::vector<std::string> HardwareRayTracing::debugMessages() const {
+    std::vector<std::string> result;
+    const auto& queue = impl_->infoQueue;
+    if (!queue) return result;
+    const UINT64 total = queue->GetNumStoredMessages();
+    const UINT64 first = total > 128 ? total - 128 : 0;
+    for (UINT64 index = first; index < total; ++index) {
+        SIZE_T bytes = 0;
+        if (FAILED(queue->GetMessage(index, nullptr, &bytes)) || bytes > 1024 * 1024) continue;
+        std::vector<unsigned char> storage(bytes);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(queue->GetMessage(index, message, &bytes))) continue;
+        const char* severity = message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION ? "Corruption"
+            : message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ? "Error"
+            : message->Severity == D3D12_MESSAGE_SEVERITY_WARNING ? "Warning" : "Info";
+        result.push_back(std::string(severity) + " [" + std::to_string(message->ID) + "] " +
+            std::string(message->pDescription, message->DescriptionByteLength ? message->DescriptionByteLength - 1 : 0));
+    }
+    return result;
+}
 std::uint64_t HardwareRayTracing::dispatchCount() const { return impl_->dispatches; }
 GlobalIlluminationStatus HardwareRayTracing::globalIlluminationStatus() const { return impl_->giStatus; }
 std::uint32_t HardwareRayTracing::validationErrorCount() const {

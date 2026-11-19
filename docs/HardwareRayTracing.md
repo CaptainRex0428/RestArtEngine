@@ -66,7 +66,7 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | b5 | `HardwareConstants`：逆 ViewProjection、输出与效果参数、样本批次／反弹数／算法、更新模式／贡献位／解析阶段／独立序列索引、兼容矩形参数与薄透镜参数，208 字节。 |
 | b7 | `LightingConstants`：灯光计数／模式、Sky 聚合及 32 个光源；3104 字节，与光栅共享布局且纳入 GI 历史键。 |
 | b8 | `DenoiseConstants`：上一帧 ViewProjection、降噪模式／当前帧权重／重置标志／迭代数，80 字节。 |
-| t4 | 共用 `RayTriangle`，80 字节，包含位置、几何法线、颜色与材质标志。 |
+| t4 | 共用 `RayTriangle`，116 字节：当前/上一帧位置、几何法线、颜色与材质标志。 |
 | t7 | TLAS。 |
 | t8 | 每个三角形三个世界空间平滑顶点法线，float3。 |
 | t10 | 可选 UV 顶点属性，两个 float4 打包 UV0–3，由同一网格的实例共享。 |
@@ -80,8 +80,9 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | u4 | 非共享 RGBA32_FLOAT 主表面 albedo 与粗糙度引导。 |
 | u5 | 时域重建间接光写入历史（RGBA16_FLOAT）。 |
 | u6 | 时域重建几何写入历史（RGBA32_FLOAT）。 |
+| u7 | 主表面上一帧世界位置（RGBA32_FLOAT；w=0 表示背景），用于逐物体重投影。 |
 
-DX11 光照入口另使用 b6 的 16 字节 `GlobalIlluminationConstants` 和 t9 的共享间接光 SRV。实时采样完成后执行独立解析 Dispatch，使空间滤波只读取已完成的历史与引导；UAV barrier 及共享 fence 保护阶段和 API 之间的依赖。`Temporal + spatial` 在同一解析 Dispatch 内用上一帧 ViewProjection 做相机重投影，读取 t12/t13，写 u3 与 u5/u6，随后在 DXR 队列内 `CopyResource` 到固定读取历史，避免每帧换 descriptor；历史键不包含相机位姿，场景／光照／材质变化才重置。
+DX11 光照入口另使用 b6 的 16 字节 `GlobalIlluminationConstants` 和 t9 的共享间接光 SRV。实时采样完成后执行独立解析 Dispatch，使空间滤波只读取已完成的历史与引导；UAV barrier 及共享 fence 保护阶段和 API 之间的依赖。`Temporal + spatial` 在同一解析 Dispatch 内用上一帧 ViewProjection 与 u7 的主表面上一帧世界位置做相机/逐物体重投影，读取 t12/t13，写 u3 与 u5/u6，随后在 DXR 队列内 `CopyResource` 到固定读取历史，避免每帧换 descriptor；重建历史键不包含相机位姿和 Actor 世界矩阵，拓扑／材质／光照变化才重置。
 
 开启硬件模式时，Shader Apply／Reload 将全部光栅阶段与硬件计算管线视为一次候选，编译、反射或管线创建失败保留上一版。关闭硬件模式时，合法像素 Shader 材质仍可使用 `ddx`／`ddy`／`fwidth`；若该源码不兼容计算 Shader，光栅更新正常生效，硬件管线被明确标为不可用，不能使用旧硬件源码渲染新材质。修复并重新 Apply 后恢复。运行时数值和材质草稿不重新编译 Shader。
 
@@ -108,4 +109,4 @@ RestArtEngine.exe --project Projects/Sandbox --no-hardware-rt
 
 风险最高的是资源与同步：共享图像格式、fence 等待、命令 allocator 复用都在 `HardwareRayTracing.cpp`；原生模式还要保证 DXR 队列提交顺序与 RHI 导入纹理的 resource state 一致（HardwareResolve 复制输出，Realtime 间接光复制到 RHI 纹理后再采样）。改完要跑 `--hardware-rt-self-test`、`--native-d3d12-self-test` 和 `--gi-self-test`，并确认降级路径仍然保留光栅画面——真实故障里最常见的不是花屏，而是黑屏或挂起。加速结构目前每次几何变化整场重建，按 Mesh BLAS 实例化的优化还没做。
 
-没做的清单单独列出来：DispatchRays/SBT（当前是内联 `RayQuery`）、逐物体运动向量（相机重投影已接入）、透明与 alpha-test、蒙皮、Vulkan 光追、多视图历史。这些不是配置项，每一项都要单独设计，别在提交说明里写成「已支持」。
+没做的清单单独列出来：DispatchRays/SBT（当前是内联 `RayQuery`）、透明与 alpha-test、蒙皮、Vulkan 光追、多视图历史。这些不是配置项，每一项都要单独设计，别在提交说明里写成「已支持」。

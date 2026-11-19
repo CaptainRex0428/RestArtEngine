@@ -961,6 +961,7 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         report["failure"] = failure.what();
         report["validationErrors"] = renderer.validationErrorCount();
         report["status"] = renderer.hardwareRayTracingStatus();
+        for (const auto& message : renderer.debugMessages()) std::cerr << "[hardware-validation] " << message << '\n';
         try { saveReport(); } catch (...) {}
         throw;
     }

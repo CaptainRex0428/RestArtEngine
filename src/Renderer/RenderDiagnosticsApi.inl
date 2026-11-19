@@ -262,7 +262,13 @@ bool SceneRenderer::loadFrameCapture(const std::filesystem::path& path, std::str
 std::vector<std::string> SceneRenderer::debugMessages() const {
     if (impl_->native12) return impl_->native12->debugMessages();
     std::vector<std::string> result;
-    if (!impl_->infoQueue) return result;
+    if (!impl_->infoQueue) {
+        if (impl_->hardwareRayTracing) {
+            const auto hardware = impl_->hardwareRayTracing->debugMessages();
+            result.insert(result.end(), hardware.begin(), hardware.end());
+        }
+        return result;
+    }
     const auto total = impl_->infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
     const auto first = total > 128 ? total - 128 : 0;
     for (auto i = first; i < total; ++i) {
@@ -275,6 +281,10 @@ std::vector<std::string> SceneRenderer::debugMessages() const {
                 : message->Severity == D3D11_MESSAGE_SEVERITY_ERROR ? "Error" : message->Severity == D3D11_MESSAGE_SEVERITY_WARNING ? "Warning" : "Info";
             result.push_back(std::string(severity) + " [" + std::to_string(message->ID) + "] " + std::string(message->pDescription, message->DescriptionByteLength ? message->DescriptionByteLength - 1 : 0));
         }
+    }
+    if (impl_->hardwareRayTracing) {
+        const auto hardware = impl_->hardwareRayTracing->debugMessages();
+        result.insert(result.end(), hardware.begin(), hardware.end());
     }
     return result;
 }

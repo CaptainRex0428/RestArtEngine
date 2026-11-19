@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -75,6 +76,7 @@ public:
     // unbind its SRV before the next render; the bridge orders GPU ownership.
     [[nodiscard]] ID3D11ShaderResourceView* indirectLighting() const;
     [[nodiscard]] std::string status() const;
+    [[nodiscard]] std::vector<std::string> debugMessages() const;
     [[nodiscard]] std::uint32_t validationErrorCount() const;
     [[nodiscard]] std::uint64_t dispatchCount() const;
     [[nodiscard]] GlobalIlluminationStatus globalIlluminationStatus() const;

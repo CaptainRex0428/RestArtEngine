@@ -42,6 +42,10 @@ struct RayTriangle
     float4 color;
     // roughness, metallic, primitive-reserved, material flags
     float4 properties;
+    // Previous-frame world positions for per-object motion vectors.
+    float3 previousPosition0;
+    float3 previousPosition1;
+    float3 previousPosition2;
 };
 StructuredBuffer<RayTriangle> rayTriangles : register(t4);
 // UV vertices are shared by mesh instances; only UV-bearing triangles have lookup records.

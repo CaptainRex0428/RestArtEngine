@@ -117,13 +117,17 @@ struct alignas(16) AntiAliasingConstants {
     XMFLOAT4 viewport, parameters;
 };
 static_assert(sizeof(AntiAliasingConstants) == 224);
-struct alignas(16) RayTriangle {
+struct RayTriangle {
     XMFLOAT3 position0;
     XMFLOAT3 position1;
     XMFLOAT3 position2;
     XMFLOAT3 normal;
     XMFLOAT4 color;
     XMFLOAT4 properties;
+    // Previous-frame world positions; raster analytic paths use current values.
+    XMFLOAT3 previousPosition0;
+    XMFLOAT3 previousPosition1;
+    XMFLOAT3 previousPosition2;
 };
 struct alignas(16) ShadowConstants {
     XMFLOAT4X4 lightViewProjection;
@@ -131,7 +135,7 @@ struct alignas(16) ShadowConstants {
     XMFLOAT4 parameters; // texel size, depth bias, normal bias, filter/cascade mode
     XMFLOAT4 cascadeParameters; // split distance, enabled, reserved, reserved
 };
-static_assert(sizeof(ObjectConstants) == 160 && sizeof(RayConstants) == 5136 && sizeof(RayTriangle) == 80);
+static_assert(sizeof(ObjectConstants) == 160 && sizeof(RayConstants) == 5136 && sizeof(RayTriangle) == 116);
 static_assert(sizeof(ShadowConstants) == 160);
 // Editor-only outline constants, kept out of SceneConstants so the runtime scene
 // contract is unchanged when no editor selection exists.
@@ -868,6 +872,9 @@ struct SceneRenderer::Impl {
                 XMStoreFloat3(&triangle.position0, p0);
                 XMStoreFloat3(&triangle.position1, p1);
                 XMStoreFloat3(&triangle.position2, p2);
+                XMStoreFloat3(&triangle.previousPosition0, p0);
+                XMStoreFloat3(&triangle.previousPosition1, p1);
+                XMStoreFloat3(&triangle.previousPosition2, p2);
                 XMStoreFloat3(&triangle.normal, XMVectorScale(XMVector3Normalize(crossProduct),
                     mirroredTransform(actor) ? -1.0f : 1.0f));
                 triangle.color = XMFLOAT4(material->baseColor[0], material->baseColor[1], material->baseColor[2],

@@ -237,7 +237,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             ImGui::TextWrapped("Temporal denoising is staged for the realtime GI implementation; until wired it falls back to the spatial resolve.");
         ImGui::EndDisabled();
         if (realtimeRequested)
-            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Temporal denoising reprojects history with camera motion; per-object motion vectors are the next extension.");
+            ImGui::TextWrapped("Realtime GI updates continuously. History samples controls the rolling sample window while the view is still. Temporal denoising reprojects history with camera motion and per-object motion vectors; scene/lighting/material changes reset the reconstruction history.");
         else
             ImGui::TextWrapped("Progressive accumulation stops at the target sample count. Keep the view still for a cleaner image; scene and lighting edits automatically restart the affected history.");
 

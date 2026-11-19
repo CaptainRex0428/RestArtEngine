@@ -579,22 +579,33 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
             settings.globalIllumination.targetSamples = 8;
             settings.globalIllumination.maxBounces = 2;
             settings.globalIllumination.denoiser = renderer::GlobalIlluminationDenoiser::TemporalSpatial;
-            settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::CameraOnly;
+            settings.globalIllumination.motionVectors = renderer::GlobalIlluminationMotionVectors::Automatic;
             settings.globalIllumination.denoiseIterations = 2;
             for (int frame = 0; frame < 4; ++frame) renderMain(frame == 3 ? "native-dxr-realtime-gi.bmp" : nullptr);
             const auto gi = renderer.globalIlluminationStatus();
             require(gi.effective == renderer::GlobalIlluminationMethod::PathTracing,
                 "Native realtime GI did not become effective: " + gi.reason);
             require(gi.effectiveDenoiser == renderer::GlobalIlluminationDenoiser::TemporalSpatial &&
-                gi.effectiveMotionVectors == renderer::GlobalIlluminationMotionVectors::CameraOnly,
-                "Native realtime GI did not report camera-reprojected temporal denoising.");
+                gi.effectiveMotionVectors == renderer::GlobalIlluminationMotionVectors::PerObject,
+                "Native realtime GI did not report temporal denoising with per-object motion vectors.");
             settings.cameraYaw += 0.08f;
             renderMain(nullptr);
             settings.cameraYaw += 0.08f;
             renderMain("native-dxr-realtime-gi-motion.bmp");
             require(renderer.hardwareRayTracingActive(), "Camera motion stopped native realtime GI.");
+            scene::Actor* moving = nullptr;
+            for (auto& actor : world.actors)
+                if (!actor.light && !actor.camera && actor.visible) { moving = &actor; break; }
+            require(moving != nullptr, "Native DXR smoke has no movable actor for motion-vector coverage.");
+            const auto savedTransform = moving->transform;
+            moving->transform.position[0] += 0.3f;
+            renderMain(nullptr);
+            renderMain("native-dxr-realtime-gi-object-motion.bmp");
+            require(renderer.hardwareRayTracingActive(), "Object motion stopped native realtime GI.");
+            moving->transform = savedTransform;
             report["dxr"] = {{"active", true}, {"status", renderer.hardwareRayTracingStatus()},
-                {"realtimeGiSamples", gi.accumulatedSamples}, {"realtimeGiReason", gi.reason}};
+                {"realtimeGiSamples", gi.accumulatedSamples}, {"realtimeGiReason", gi.reason},
+                {"effectiveMotionVectors", "perObject"}};
             settings = savedSettings;
             pass("Native DXR hardware preview and realtime GI render on the raster D3D12 device.");
         } else {

@@ -342,10 +342,26 @@ void PathPrimaryRay(uint2 pixel, float2 jitter, out float3 origin,
     CameraPrimaryRay(ndc,origin,direction,farDistance);
 }
 
-float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, out float4 primaryMaterial)
+float3 TrianglePreviousPosition(RayTriangle tri, float3 position)
+{
+    float3 edge1 = tri.position1 - tri.position0;
+    float3 edge2 = tri.position2 - tri.position0;
+    float3 delta = position - tri.position0;
+    float d00 = dot(edge1, edge1), d01 = dot(edge1, edge2), d11 = dot(edge2, edge2);
+    float d20 = dot(delta, edge1), d21 = dot(delta, edge2);
+    float denominator = max(d00 * d11 - d01 * d01, 1e-12);
+    float v = (d11 * d20 - d01 * d21) / denominator;
+    float w = (d00 * d21 - d01 * d20) / denominator;
+    float u = 1.0 - v - w;
+    return tri.previousPosition0 * u + tri.previousPosition1 * v + tri.previousPosition2 * w;
+}
+
+float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, out float4 primaryMaterial,
+    out float3 primaryPreviousPosition)
 {
     primaryGeometry = 0.0;
     primaryMaterial = 0.0;
+    primaryPreviousPosition = 0.0;
     bool realtime = giOptions.x == 1;
     uint randomState = PathHash(pixel.x + pixel.y * outputInfo.x)
         ^ PathHash(sampleIndex + 0x9e3779b9u);
@@ -422,6 +438,7 @@ float3 PathRadiance(uint2 pixel, uint sampleIndex, out float4 primaryGeometry, o
         {
             primaryGeometry = float4(normal, distance);
             primaryMaterial = float4(material.albedo, material.roughness);
+            primaryPreviousPosition = TrianglePreviousPosition(tri, position);
         }
         // Realtime exports only indirect radiance; the raster lighting pass
         // owns the primary direct light, shadows and background.
