@@ -2054,11 +2054,17 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     state.lastGiMethod = settings.globalIllumination.method;
     state.lastScreenSpaceGi = screenSpaceGi;
+    const bool dxrProbeCapable = hardwareBackendAllowed && state.hardwareRayTracing &&
+        state.hardwareRayTracing->supported();
     const bool rasterProbeGi = diagnosticMainScene &&
         (settings.debugView == 0 || debugGiIndirect || debugGiProbes) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
-        settings.path == RenderPath::Deferred && !hardwareTransport;
+        settings.path == RenderPath::Deferred && !hardwareTransport &&
+        // On a DXR-capable backend the screen-space probe update is only a
+        // compatibility path. Do not silently run it when the user can enable
+        // ray-traced probes; strict D3D11 and non-DXR adapters keep the fallback.
+        !dxrProbeCapable;
     const bool probeGridGi = rasterProbeGi || hardwareProbeGi;
     const bool giDebugProbes = debugGiProbes && probeGridGi;
     state.probeDebugOverlay = giDebugProbes;
@@ -2075,6 +2081,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             ? "Realtime DDGI updates a camera-centred diffuse probe atlas from the deferred G-buffer."
             : settings.path == RenderPath::Forward ? "DDGI requires the Deferred raster path."
             : !(settings.editorViewport || settings.offscreenTarget) ? "DDGI currently requires the editor/offscreen scene target."
+            : dxrProbeCapable && !settings.hardwareRayTracing
+                ? "This backend supports ray-traced DDGI. Enable Hardware ray tracing to run ray-traced probes; its screen-space fallback is disabled here."
             : "DDGI is unavailable for this frame.";
     }
     if (diagnosticMainScene && settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace) {
@@ -2927,12 +2935,13 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         const bool rayTracedProbe = impl_->hardwareActive &&
             impl_->hardwareStatus.find("Ray-traced DDGI") != std::string::npos;
         status.reason = impl_->lastProbeGridGi
-            ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Realtime DDGI") +
+            ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Realtime DDGI (raster fallback)") +
                 " updates a scene-fitted diffuse probe atlas. Probe spacing " +
                 std::to_string(impl_->probeEffectiveSpacing) + " m" +
                 (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".") +
                 (impl_->hardwareActive ? " Backend: " + impl_->hardwareStatus : "")
-            : "DDGI is unavailable for the current frame.";
+            : (impl_->giStatus.reason.empty() ? "DDGI is unavailable for the current frame."
+                : impl_->giStatus.reason);
     }
     return status;
 }

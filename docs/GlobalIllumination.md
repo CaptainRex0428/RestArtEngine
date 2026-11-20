@@ -109,9 +109,9 @@ SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径�
 
 ### Probe grid (DDGI)
 
-DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。strict D3D11 没有 DXR，保留屏幕空间 3×3 footprint 更新作为 fallback。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
+DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。只有 strict D3D11 或 DXR 不可用的适配器才保留屏幕空间 3×3 footprint fallback；DXR-capable 后端如果关闭 Hardware ray tracing，DDGI 会报告不可用，而不是静默走慢速 fallback。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
 
-限制：DXR 后端为逐 probe 光线追踪；strict D3D11 fallback 仍是屏幕空间投影更新，被遮挡/屏幕外 probe 保留旧值。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+限制：DXR 后端为逐 probe 光线追踪；strict D3D11 fallback 仍是屏幕空间投影更新，被遮挡/屏幕外 probe 保留旧值。DXR-capable 后端关闭 Hardware ray tracing 时 DDGI 不可用（避免静默走慢速 fallback）。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
 ### Debug views
 

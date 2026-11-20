@@ -196,6 +196,10 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         }
         if (gi.method == renderer::GlobalIlluminationMethod::ProbeGrid) {
             ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; strict D3D11 falls back to a screen-space update. Probe rays controls the per-probe ray budget.");
+            if (!settings.hardwareRayTracing &&
+                projectBackendAllowsHardware(projectRenderingDraft_.backendPreference) &&
+                renderer.hardwareRayTracingSupported())
+                ImGui::TextWrapped("This backend supports ray-traced DDGI but Hardware ray tracing is off. The raster screen-space fallback is disabled on DXR-capable backends; enable Hardware ray tracing above to run DDGI.");
             changed |= ImGui::Checkbox("Auto-fit probe grid to scene", &gi.probeAutoFit);
             int rays = static_cast<int>(gi.probeRayCount);
             if (ImGui::SliderInt("Probe rays", &rays, 1, static_cast<int>(renderer::kGiMaxProbeRays),
