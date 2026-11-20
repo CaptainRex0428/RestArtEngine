@@ -103,7 +103,7 @@ SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 nati
 1. `SSGI trace`：用当前帧 position G-buffer 做世界空间屏幕追踪，命中点采样**当前帧 direct-lit colour 副本**（在 SSGI composite 写入前复制，不含 SSGI），因此不会采样自身形成能量反馈。
 2. `SSGI composite`：对 raw indirect 做 3×3 几何加权空域滤波，再用当前世界位置 + 上一帧 ViewProjection 重投影上一帧 indirect history、clamp 到当前邻域后做时域混合；最后按接收面 albedo 调制并与当前 direct colour 相加。composite 显式绑定 albedo；debug `GI indirect` 视图保留 direct 输出给 trace 使用，再只显示间接结果。
 
-`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；厚度有 `0.5 * radius` 的最小值，避免小 thickness 在远距离/大场景把所有样本拒绝导致全黑。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；厚度有 `0.5 * radius` 的最小值，避免小 thickness 在远距离/大场景把所有样本拒绝导致全黑。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。SSGI 参数或 GI history epoch 变化时直接丢弃 temporal history，composite 当前帧权重为 25%；`GI indirect` debug 视图不做 temporal 混合，保证参数/相机调整后当前帧即可看到 raw 间接结果。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
 
 SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并在 display-space 颜色上合成；历史为独立 indirect buffer，不读取最终 scene colour，因此不会再出现首版的自反馈 firefly。快速相机运动/屏幕外信息仍限制屏幕空间 GI 的准确性。
 
