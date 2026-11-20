@@ -1032,7 +1032,11 @@ ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
         output.corner = 0.0;
         return output;
     }
-    clip.xy += input.corner * 0.020 * clip.w;
+    // Keep probe markers round in pixels, not in NDC: equal NDC radii become
+    // ellipses whenever the viewport is wider than it is tall.
+    float2 viewportSize = max(giViewport.yz, float2(1.0, 1.0));
+    float2 aspect = float2(viewportSize.y / viewportSize.x, 1.0);
+    clip.xy += input.corner * 0.006 * clip.w * aspect;
     clip.z -= 0.0001 * clip.w;
     output.position = clip;
     output.corner = input.corner;
@@ -1043,12 +1047,9 @@ ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
 
 float4 PSProbeDebug(ProbeDebugOutput input) : SV_TARGET
 {
-    float radiusSquared = dot(input.corner, input.corner);
-    if (radiusSquared > 1.0) discard;
-    float z = sqrt(saturate(1.0 - radiusSquared));
-    float3 sphere = input.color.rgb * (0.35 + 0.65 * z);
-    if (radiusSquared > 0.82) sphere *= 0.45;
-    return float4(saturate(sphere), 1.0);
+    if (dot(input.corner, input.corner) > 1.0) discard;
+    float3 dotColor = max(input.color.rgb, 0.08);
+    return float4(saturate(dotColor), 1.0);
 }
 #endif
 
