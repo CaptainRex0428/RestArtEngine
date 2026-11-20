@@ -902,7 +902,7 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
         high = max(high, sample);
     }
     float3 indirect = spatialSum / max(spatialWeight, 1e-5);
-    if (giHistory.x > 0.5)
+    if (giHistory.x > 0.5 && giHistory.w < 1.5)
     {
         float4 clip = mul(float4(position.xyz, 1.0), giPreviousViewProjection);
         if (clip.w > 0.0001)

@@ -560,6 +560,9 @@ struct SceneRenderer::Impl {
     bool lastScreenSpaceGi = false;
     std::uint64_t giHistoryEpoch = 0;
     bool ssgiHistoryValid = false;
+    GlobalIlluminationSettings ssgiLastSettings{};
+    bool ssgiLastSettingsValid = false;
+    std::uint64_t ssgiHistoryEpoch = 0;
     bool lastProbeGridGi = false;
     bool probeDebugOverlay = false;
     float probeEffectiveSpacing = 0.0f;
@@ -2073,6 +2076,19 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.ssgiHistoryValid = false;
         state.ssgiViewId = settings.viewId;
     }
+    const bool ssgiSettingsChanged = !state.ssgiLastSettingsValid ||
+        !(settings.globalIllumination == state.ssgiLastSettings) ||
+        state.ssgiHistoryEpoch != state.giHistoryEpoch;
+    if (diagnosticMainScene && ssgiSettingsChanged) {
+        // SSGI's temporal history is tied to the march parameters. A parameter
+        // change must not keep blending the old indirect image for dozens of
+        // frames, or the slider appears to do nothing.
+        state.ssgiHistoryValid = false;
+        state.ssgiFrameCounter = 0;
+        state.ssgiLastSettings = settings.globalIllumination;
+        state.ssgiHistoryEpoch = state.giHistoryEpoch;
+        state.ssgiLastSettingsValid = true;
+    }
     state.lastGiMethod = settings.globalIllumination.method;
     state.lastScreenSpaceGi = screenSpaceGi;
     const bool dxrProbeCapable = hardwareBackendAllowed && state.hardwareRayTracing &&
@@ -2163,7 +2179,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.globalIllumination.indirectDiffuseIntensity);
     giData.previousViewProjection = state.ssgiPreviousViewProjection;
     giData.history = XMFLOAT4(ssgiHistoryReady ? 1.0f : 0.0f,
-        static_cast<float>(state.ssgiFrameCounter), 0.1f, debugGiIndirect ? 2.0f : 1.0f);
+        static_cast<float>(state.ssgiFrameCounter), 0.25f, debugGiIndirect ? 2.0f : 1.0f);
     state.uploadConstants(state.giBuffer, giData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
     ProbeConstants probeData{};
