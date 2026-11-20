@@ -147,7 +147,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             applyEdit(ProjectRenderingEdit::HardwareRayTracing);
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("Enabling hardware tracing selects reflections and shadows. Disabling it also disables dependent effects and GI.");
+        ImGui::TextWrapped("Path tracing and ray-traced DDGI probes require hardware ray tracing. SSGI is a screen-space raster method and does not. Disabling hardware tracing disables path-traced effects; on DXR-capable backends DDGI reports unavailable instead of running its slow raster fallback.");
         const bool giEnabled = gi.method != renderer::GlobalIlluminationMethod::Disabled;
         const bool realtimeGi = giEnabled && gi.mode == renderer::GlobalIlluminationMode::Realtime;
         const bool reflectionsEditable = hardware && !giEnabled;
