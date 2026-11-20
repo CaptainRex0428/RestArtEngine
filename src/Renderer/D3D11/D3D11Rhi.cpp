@@ -242,7 +242,8 @@ public:
             const DXGI_FORMAT format = attribute.components == 2 ? DXGI_FORMAT_R32G32_FLOAT :
                 attribute.components == 3 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
             attributes.push_back({attribute.semantic.c_str(), attribute.semanticIndex, format, attribute.slot,
-                attribute.offset, D3D11_INPUT_PER_VERTEX_DATA, 0});
+                attribute.offset, attribute.perInstance ? D3D11_INPUT_PER_INSTANCE_DATA : D3D11_INPUT_PER_VERTEX_DATA,
+                attribute.perInstance ? 1u : 0u});
         }
         if (!attributes.empty()) check(device_->CreateInputLayout(attributes.data(), static_cast<UINT>(attributes.size()),
             vertex.bytecode.data(), vertex.bytecode.size(), &result->layout), "Create input layout");
@@ -469,6 +470,19 @@ public:
         ++statistics_.drawCalls;
         ++statistics_.indexedDrawCalls;
     }
+    void drawIndexedInstanced(std::uint32_t indexCount, std::uint32_t instanceCount,
+        std::uint32_t firstIndex, std::int32_t baseVertex, std::uint32_t firstInstance) override {
+        if (!indexCount || !instanceCount) return;
+        validateDraw();
+        auto& indices = owned<D3D11Buffer>(indices_, identity_);
+        const auto last = static_cast<std::uint64_t>(firstIndex) + indexCount;
+        require(static_cast<std::uint64_t>(indexOffset_) + last * sizeof(std::uint32_t) <= indices.desc.byteSize,
+            "Instanced indexed draw exceeds the index buffer byte range.");
+        validateVertices(0, 1);
+        context_->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        ++statistics_.drawCalls;
+        ++statistics_.indexedDrawCalls;
+    }
     void draw(std::uint32_t count, std::uint32_t first) override {
         validateDraw();
         validateVertices(first, count);
@@ -571,6 +585,7 @@ private:
         if (!count) return;
         const auto& pipeline = owned<D3D11Pipeline>(pipeline_, identity_);
         for (const auto& attribute : pipeline.desc.attributes) {
+            if (attribute.perInstance) continue;
             const auto& binding = vertices_[attribute.slot];
             const auto& buffer = owned<D3D11Buffer>(binding.buffer, identity_);
             const auto vertex = static_cast<std::uint64_t>(first) + count - 1;

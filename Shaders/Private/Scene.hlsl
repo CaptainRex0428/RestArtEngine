@@ -1068,46 +1068,80 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
 struct ProbeDebugVertex
 {
     float3 position : POSITION;
-    float2 atlas : TEXCOORD0;
-    float2 corner : TEXCOORD1;
+    float3 normal : NORMAL;
+    float3 instancePosition : TEXCOORD1;
+    float2 atlas : TEXCOORD2;
+    float2 radius : TEXCOORD3;
 };
 
 struct ProbeDebugOutput
 {
     float4 position : SV_POSITION;
+    float3 worldPosition : TEXCOORD0;
+    float3 worldNormal : TEXCOORD1;
     float4 color : COLOR;
-    float2 corner : TEXCOORD0;
 };
+
+float3 ProbeMarkerLighting(float3 position, float3 normal)
+{
+    float3 lighting = 0.0;
+    // Directional term keeps the spheres readable even when the scene only has
+    // an environment/area light that is not represented in sceneLights.
+    float3 sunDirection = normalize(lightDirectionIntensity.xyz);
+    float sunNdl = saturate(dot(normal, sunDirection));
+    lighting += float3(0.7, 0.7, 0.7) * sunNdl * max(lightDirectionIntensity.w, 0.5);
+    [loop] for (uint index = 0; index < min((uint)lightInfo.x, 32u); ++index)
+    {
+        SceneLight source = sceneLights[index];
+        [loop] for (uint sampleIndex = 0; sampleIndex < SceneLightSampleCount(source); ++sampleIndex)
+        {
+            SceneLightSample lightSample;
+            if (!SampleSceneLight(source, sampleIndex, position, lightSample)) continue;
+            float ndl = saturate(dot(normal, lightSample.direction));
+            lighting += lightSample.irradiance * ndl;
+        }
+    }
+    lighting += Environment(normal, 1.0) * 0.35;
+    return lighting;
+}
 
 ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
 {
     ProbeDebugOutput output;
-    float4 clip = mul(float4(input.position, 1.0), viewProjection);
+    float3 worldPosition = input.instancePosition + input.position * input.radius.x;
+    float4 clip = mul(float4(worldPosition, 1.0), viewProjection);
     if (clip.w <= 0.0001)
     {
         output.position = float4(2.0, 2.0, 2.0, 1.0);
+        output.worldPosition = worldPosition;
+        output.worldNormal = input.normal;
         output.color = 0.0;
-        output.corner = 0.0;
         return output;
     }
-    // Keep probe markers round in pixels, not in NDC: equal NDC radii become
-    // ellipses whenever the viewport is wider than it is tall.
-    float2 viewportSize = max(giViewport.yz, float2(1.0, 1.0));
-    float2 aspect = float2(viewportSize.y / viewportSize.x, 1.0);
-    clip.xy += input.corner * 0.006 * clip.w * aspect;
     clip.z -= 0.0001 * clip.w;
     output.position = clip;
-    output.corner = input.corner;
+    output.worldPosition = worldPosition;
+    output.worldNormal = input.normal;
     float4 probe = probeAtlasRead.Load(int3(int2(input.atlas), 0));
-    output.color = float4(saturate(probe.rgb) * 2.0, 1.0);
+    output.color = float4(saturate(probe.rgb), 1.0);
     return output;
 }
 
 float4 PSProbeDebug(ProbeDebugOutput input) : SV_TARGET
 {
-    if (dot(input.corner, input.corner) > 1.0) discard;
-    float3 dotColor = max(input.color.rgb, 0.08);
-    return float4(saturate(dotColor), 1.0);
+    float3 normal = normalize(input.worldNormal);
+    float3 lighting = ProbeMarkerLighting(input.worldPosition, normal);
+    // Keep the marker readable against dark scenes and show the key-light
+    // direction through a small specular highlight. Probe irradiance tints the
+    // otherwise neutral sphere.
+    float3 keyDirection = normalize(float3(0.35, 0.8, 0.45));
+    float keyNdl = saturate(dot(normal, keyDirection));
+    float3 viewDirection = normalize(cameraPosition.xyz - input.worldPosition);
+    float3 halfDirection = normalize(keyDirection + viewDirection);
+    float specular = pow(saturate(dot(normal, halfDirection)), 24.0) * 0.35;
+    float3 albedo = lerp(float3(0.5, 0.5, 0.5), saturate(input.color.rgb), 0.65);
+    float3 color = albedo * (0.35 + 0.65 * keyNdl) + albedo * lighting + specular;
+    return float4(saturate(color), 1.0);
 }
 #endif
 

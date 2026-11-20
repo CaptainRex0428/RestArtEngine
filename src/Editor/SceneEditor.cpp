@@ -3779,7 +3779,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             "Direct diffuse: direct-light diffuse contribution with current exposure and tone mapping; excludes ambient and reflections.",
             "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections.",
             "GI indirect: the active realtime GI algorithm's indirect contribution (SSGI/DDGI or path-traced indirect).",
-            "GI probes: scene colour plus DDGI probe spheres; sphere colour is the probe irradiance, cyan means an invalid/empty probe."
+            "GI probes: scene colour plus real shaded DDGI probe spheres sampled from the engine sphere mesh; sphere tint comes from the probe irradiance and shading shows the light direction."
         };
         const int mode = std::clamp(settings.debugView, 0, static_cast<int>(std::size(legends)) - 1);
         ImGui::TextWrapped("%s", legends[mode]);

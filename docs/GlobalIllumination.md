@@ -118,7 +118,7 @@ DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 
 编辑器视口 debug combo 新增两项：
 
 - **GI indirect**（`debugView == 11`）：只显示当前 GI 算法的间接贡献。SSGI 会照常执行 trace/composite，但 composite 只输出 indirect；DDGI 输出 probe 辐照度 × 接收面 albedo；Path tracing 实时模式显示硬件间接图并应用当前曝光；GI 关闭时输出黑色。
-- **GI probes**（`debugView == 12`）：正常场景叠加每个 DDGI probe 的着色小球。球颜色来自 probe atlas 辐照度，青色表示该 probe 尚未有效更新。该视图仍执行 `DDGI probe update` 保持 atlas 活跃。
+- **GI probes**（`debugView == 12`）：正常场景叠加每个 DDGI probe 的**真实球体网格**。球体取自引擎内置 Sphere 模型，按 debug LOD 采样后 instanced 绘制（一个 sphere mesh + per-probe instance buffer），带 NORMAL 输入，用 sceneLights 与固定 key light 做方向性着色，再用 probe atlas 辐照度染色，因此能直接看到 probe 所在位置、受光面和明暗走向；该视图仍执行 `DDGI probe update` 保持 atlas 活跃。球体/实例几何按 probe 网格缓存，origin/grid 不变时不重复上传。
 
 编辑器外可用 `--debug-view 11`／`--debug-view 12` 配合 `--frames` 和 `--capture-temp` 复现；参数在项目加载后应用。
 

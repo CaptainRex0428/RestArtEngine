@@ -120,12 +120,17 @@ struct alignas(16) ProbeConstants {
     XMFLOAT4 parameters; // enabled, valid, intensity, reserved
 };
 static_assert(sizeof(ProbeConstants) == 48);
-struct ProbeDebugVertex {
+struct ProbeDebugMeshVertex {
+    float position[3];
+    float normal[3];
+};
+static_assert(sizeof(ProbeDebugMeshVertex) == 24);
+struct ProbeDebugInstance {
     float position[3];
     float atlas[2];
-    float corner[2];
+    float radius[2];
 };
-static_assert(sizeof(ProbeDebugVertex) == 28);
+static_assert(sizeof(ProbeDebugInstance) == 28);
 struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
 static_assert(sizeof(DepthOfFieldConstants) == 32);
 struct alignas(16) AntiAliasingConstants {
@@ -519,7 +524,17 @@ struct SceneRenderer::Impl {
     rhi::ShaderHandle probeDebugVS, probeDebugPS;
     rhi::GraphicsPipelineHandle probeDebugPipeline;
     rhi::BufferHandle probeDebugVertices;
+    rhi::BufferHandle probeDebugIndices;
+    rhi::BufferHandle probeDebugInstances;
     std::uint32_t probeDebugVertexCount = 0;
+    std::uint32_t probeDebugIndexCount = 0;
+    std::uint32_t probeDebugInstanceCount = 0;
+    std::uint32_t probeDebugMeshVertexCount = 0;
+    std::uint32_t probeDebugMeshIndexCount = 0;
+    XMFLOAT4 probeDebugOrigin{};
+    std::uint32_t probeDebugGrid[3]{};
+    bool probeDebugGeometryValid = false;
+    bool probeDebugSphereValid = false;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
     std::array<rhi::ShaderHandle, 14> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
@@ -755,7 +770,9 @@ struct SceneRenderer::Impl {
         probeDebugDesc.vertexShader = probeDebugVS;
         probeDebugDesc.pixelShader = probeDebugPS;
         probeDebugDesc.attributes = {
-            {"POSITION", 0, 0, 0, 3}, {"TEXCOORD", 0, 0, 12, 2}, {"TEXCOORD", 1, 0, 20, 2}};
+            {"POSITION", 0, 0, 0, 3}, {"NORMAL", 0, 0, 12, 3},
+            {"TEXCOORD", 1, 1, 0, 3, true}, {"TEXCOORD", 2, 1, 12, 2, true},
+            {"TEXCOORD", 3, 1, 20, 2, true}};
         probeDebugDesc.depthEnable = true;
         probeDebugDesc.depthWrite = false;
         probeDebugDesc.depthCompare = rhi::CompareOperation::LessEqual;
@@ -2218,37 +2235,126 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         probeGridGi && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
         probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : 0.0f));
     state.probeDebugVertexCount = 0;
+    state.probeDebugIndexCount = 0;
+    state.probeDebugInstanceCount = 0;
     if (giDebugProbes && state.probeDebugPipeline) {
-        std::vector<ProbeDebugVertex> vertices;
-        const std::uint32_t probeCount = probeSettings.probeGridX * probeSettings.probeGridY * probeSettings.probeGridZ;
-        vertices.reserve(static_cast<std::size_t>(probeCount) * 6u);
-        static constexpr float corners[6][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, -1}, {1, 1}, {-1, 1}};
-        for (std::uint32_t iy = 0; iy < probeSettings.probeGridY; ++iy) {
-            for (std::uint32_t iz = 0; iz < probeSettings.probeGridZ; ++iz) {
-                for (std::uint32_t ix = 0; ix < probeSettings.probeGridX; ++ix) {
-                    const float world[3] = {
-                        probeData.origin.x + (ix + 0.5f) * probeSpacing,
-                        probeData.origin.y + (iy + 0.5f) * probeSpacing,
-                        probeData.origin.z + (iz + 0.5f) * probeSpacing};
-                    const float atlas[2] = {
-                        static_cast<float>(ix + iz * probeSettings.probeGridX) + 0.5f,
-                        static_cast<float>(iy) + 0.5f};
-                    for (const auto& corner : corners) {
-                        ProbeDebugVertex vertex{};
-                        std::copy_n(world, 3, vertex.position);
-                        std::copy_n(atlas, 2, vertex.atlas);
-                        vertex.corner[0] = corner[0];
-                        vertex.corner[1] = corner[1];
+        if (!state.probeDebugSphereValid) {
+            const auto* sphere = assets.findMesh(assets::EngineSphereMeshId);
+            if (sphere && !sphere->vertices.empty() && !sphere->indices.empty()) {
+                // Use the engine's built-in sphere asset, sampled at a debug LOD.
+                // The full 64x96 asset would draw millions of triangles for a
+                // dense probe grid; subsampling keeps the same sphere while
+                // staying cheap enough for a debug overlay.
+                constexpr std::uint32_t sourceRings = 64, sourceSegments = 96;
+                constexpr std::uint32_t ringStep = 4, segmentStep = 4;
+                std::vector<ProbeDebugMeshVertex> vertices;
+                std::vector<std::uint32_t> indices;
+                const std::size_t expectedVertices =
+                    (static_cast<std::size_t>(sourceRings) + 1) * (sourceSegments + 1);
+                if (sphere->vertices.size() == expectedVertices) {
+                    const std::uint32_t rows = sourceRings / ringStep + 1;
+                    const std::uint32_t columns = sourceSegments / segmentStep + 1;
+                    vertices.reserve(static_cast<std::size_t>(rows) * columns);
+                    for (std::uint32_t ring = 0; ring <= sourceRings; ring += ringStep) {
+                        for (std::uint32_t segment = 0; segment <= sourceSegments; segment += segmentStep) {
+                            const auto& source = sphere->vertices[ring * (sourceSegments + 1) + segment];
+                            ProbeDebugMeshVertex vertex{};
+                            std::copy_n(source.position, 3, vertex.position);
+                            std::copy_n(source.normal, 3, vertex.normal);
+                            vertices.push_back(vertex);
+                        }
+                    }
+                    for (std::uint32_t ring = 0; ring + 1 < rows; ++ring) {
+                        for (std::uint32_t segment = 0; segment + 1 < columns; ++segment) {
+                            const std::uint32_t a = ring * columns + segment;
+                            const std::uint32_t b = (ring + 1) * columns + segment;
+                            if (ring != 0) {
+                                indices.push_back(a);
+                                indices.push_back(a + 1);
+                                indices.push_back(b);
+                            }
+                            if (ring + 2 != rows) {
+                                indices.push_back(a + 1);
+                                indices.push_back(b + 1);
+                                indices.push_back(b);
+                            }
+                        }
+                    }
+                } else {
+                    vertices.reserve(sphere->vertices.size());
+                    for (const auto& source : sphere->vertices) {
+                        ProbeDebugMeshVertex vertex{};
+                        std::copy_n(source.position, 3, vertex.position);
+                        std::copy_n(source.normal, 3, vertex.normal);
                         vertices.push_back(vertex);
                     }
+                    indices = sphere->indices;
+                }
+                if (!vertices.empty() && !indices.empty()) {
+                    state.probeDebugVertices = state.rhiDevice->createBuffer(
+                        {static_cast<std::uint32_t>(vertices.size() * sizeof(ProbeDebugMeshVertex)),
+                            rhi::BufferUsage::Vertex, false, "GI probe debug sphere mesh"},
+                        std::as_bytes(std::span(vertices)));
+                    state.probeDebugIndices = state.rhiDevice->createBuffer(
+                        {static_cast<std::uint32_t>(indices.size() * sizeof(std::uint32_t)),
+                            rhi::BufferUsage::Index, false, "GI probe debug sphere mesh indices"},
+                        std::as_bytes(std::span(indices)));
+                    state.probeDebugVertexCount = static_cast<std::uint32_t>(vertices.size());
+                    state.probeDebugIndexCount = static_cast<std::uint32_t>(indices.size());
+                    state.probeDebugMeshVertexCount = state.probeDebugVertexCount;
+                    state.probeDebugMeshIndexCount = state.probeDebugIndexCount;
+                    state.probeDebugSphereValid = true;
                 }
             }
         }
-        state.probeDebugVertices = state.rhiDevice->createBuffer(
-            {static_cast<std::uint32_t>(vertices.size() * sizeof(ProbeDebugVertex)),
-                rhi::BufferUsage::Vertex, false, "GI probe debug vertices"},
-            std::as_bytes(std::span(vertices)));
-        state.probeDebugVertexCount = static_cast<std::uint32_t>(vertices.size());
+        if (state.probeDebugSphereValid) {
+            const bool geometryMatches = state.probeDebugGeometryValid &&
+                state.probeDebugOrigin.x == probeData.origin.x &&
+                state.probeDebugOrigin.y == probeData.origin.y &&
+                state.probeDebugOrigin.z == probeData.origin.z &&
+                state.probeDebugOrigin.w == probeData.origin.w &&
+                state.probeDebugGrid[0] == probeSettings.probeGridX &&
+                state.probeDebugGrid[1] == probeSettings.probeGridY &&
+                state.probeDebugGrid[2] == probeSettings.probeGridZ;
+            if (!geometryMatches) {
+                const std::uint32_t probeCount =
+                    probeSettings.probeGridX * probeSettings.probeGridY * probeSettings.probeGridZ;
+                const float radius = std::clamp(probeSpacing * 0.05f, 0.008f, 0.06f);
+                std::vector<ProbeDebugInstance> instances;
+                instances.reserve(probeCount);
+                for (std::uint32_t iy = 0; iy < probeSettings.probeGridY; ++iy) {
+                    for (std::uint32_t iz = 0; iz < probeSettings.probeGridZ; ++iz) {
+                        for (std::uint32_t ix = 0; ix < probeSettings.probeGridX; ++ix) {
+                            ProbeDebugInstance instance{};
+                            instance.position[0] = probeData.origin.x + (ix + 0.5f) * probeSpacing;
+                            instance.position[1] = probeData.origin.y + (iy + 0.5f) * probeSpacing;
+                            instance.position[2] = probeData.origin.z + (iz + 0.5f) * probeSpacing;
+                            instance.atlas[0] =
+                                static_cast<float>(ix + iz * probeSettings.probeGridX) + 0.5f;
+                            instance.atlas[1] = static_cast<float>(iy) + 0.5f;
+                            instance.radius[0] = radius;
+                            instance.radius[1] = 0.0f;
+                            instances.push_back(instance);
+                        }
+                    }
+                }
+                state.probeDebugInstances = state.rhiDevice->createBuffer(
+                    {static_cast<std::uint32_t>(instances.size() * sizeof(ProbeDebugInstance)),
+                        rhi::BufferUsage::Vertex, false, "GI probe debug instances"},
+                    std::as_bytes(std::span(instances)));
+                state.probeDebugInstanceCount = static_cast<std::uint32_t>(instances.size());
+                state.probeDebugOrigin = probeData.origin;
+                state.probeDebugGrid[0] = probeSettings.probeGridX;
+                state.probeDebugGrid[1] = probeSettings.probeGridY;
+                state.probeDebugGrid[2] = probeSettings.probeGridZ;
+                state.probeDebugGeometryValid = true;
+            } else {
+                state.probeDebugInstanceCount =
+                    probeSettings.probeGridX * probeSettings.probeGridY * probeSettings.probeGridZ;
+                state.probeDebugVertexCount = state.probeDebugMeshVertexCount;
+                state.probeDebugIndexCount = state.probeDebugMeshIndexCount;
+            }
+        }
     }
     state.uploadConstants(state.probeBuffer, probeData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 9, std::span(&state.probeBuffer, 1));
@@ -2658,7 +2764,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             break;
         }
         case RenderPassKind::GiDebugOverlay: {
-            if (!state.probeDebugPipeline || state.probeDebugVertexCount == 0) break;
+            if (!state.probeDebugPipeline || state.probeDebugVertexCount == 0 ||
+                state.probeDebugIndexCount == 0 || state.probeDebugInstanceCount == 0 ||
+                !state.probeDebugIndices || !state.probeDebugInstances) break;
             state.beginDiagnosticPass(pass.name);
             rhi::RenderPassDesc debugPass;
             debugPass.name = pass.name;
@@ -2667,11 +2775,16 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             debugPass.reads = {{state.probeAtlasA, 14}};
             commands.beginRenderPass(debugPass);
             commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 0, std::span(&state.sceneBuffer, 1));
+            commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 7, std::span(&state.lightingBuffer, 1));
             commands.bindGraphicsPipeline(state.probeDebugPipeline);
-            const rhi::VertexBufferBinding stream{state.probeDebugVertices,
-                static_cast<std::uint32_t>(sizeof(ProbeDebugVertex)), 0};
-            commands.bindVertexBuffers(0, std::span(&stream, 1));
-            commands.draw(state.probeDebugVertexCount);
+            const rhi::VertexBufferBinding streams[2] = {
+                {state.probeDebugVertices,
+                    static_cast<std::uint32_t>(sizeof(ProbeDebugMeshVertex)), 0},
+                {state.probeDebugInstances,
+                    static_cast<std::uint32_t>(sizeof(ProbeDebugInstance)), 0}};
+            commands.bindVertexBuffers(0, std::span(streams, 2));
+            commands.bindIndexBuffer(state.probeDebugIndices);
+            commands.drawIndexedInstanced(state.probeDebugIndexCount, state.probeDebugInstanceCount);
             commands.endRenderPass();
             state.recordDraw(0, 0, 0, state.probeDebugVertexCount, 0);
             break;

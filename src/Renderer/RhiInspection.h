@@ -83,6 +83,11 @@ public:
         target_.drawIndexed(count, first, base);
         if (enabled_) snapshot(true, first, base);
     }
+    void drawIndexedInstanced(std::uint32_t indexCount, std::uint32_t instanceCount,
+        std::uint32_t firstIndex = 0, std::int32_t baseVertex = 0, std::uint32_t firstInstance = 0) override {
+        target_.drawIndexedInstanced(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        if (enabled_) snapshot(true, firstIndex, baseVertex);
+    }
     void draw(std::uint32_t count, std::uint32_t first = 0) override {
         target_.draw(count, first);
         if (enabled_) snapshot(false, first, 0);

@@ -54,6 +54,7 @@ using ShaderHandle = std::shared_ptr<Shader>;
 struct VertexAttribute {
     std::string semantic;
     std::uint32_t semanticIndex = 0, slot = 0, offset = 0, components = 3;
+    bool perInstance = false;
 };
 struct GraphicsPipelineDesc {
     ShaderHandle vertexShader, pixelShader;
@@ -131,6 +132,8 @@ public:
     // A null buffer with offset zero explicitly unbinds the index stream.
     virtual void bindIndexBuffer(const BufferHandle&, std::uint32_t offset = 0) = 0;
     virtual void drawIndexed(std::uint32_t count, std::uint32_t first = 0, std::int32_t base = 0) = 0;
+    virtual void drawIndexedInstanced(std::uint32_t indexCount, std::uint32_t instanceCount,
+        std::uint32_t firstIndex = 0, std::int32_t baseVertex = 0, std::uint32_t firstInstance = 0) = 0;
     virtual void draw(std::uint32_t count, std::uint32_t first = 0) = 0;
 };
 class Device {

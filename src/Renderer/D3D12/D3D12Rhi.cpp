@@ -218,6 +218,7 @@ public:
     void bindVertexBuffers(std::uint32_t, std::span<const VertexBufferBinding>) override;
     void bindIndexBuffer(const BufferHandle&, std::uint32_t) override;
     void drawIndexed(std::uint32_t, std::uint32_t, std::int32_t) override;
+    void drawIndexedInstanced(std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override;
     void draw(std::uint32_t, std::uint32_t) override;
     void attachWindow(void*, std::uint32_t, std::uint32_t) override;
     void detachWindow() override;
@@ -557,7 +558,9 @@ GraphicsPipelineHandle Device12::createGraphicsPipeline(const GraphicsPipelineDe
             attribute.components <= 4 && attribute.offset <= 2048 - attribute.components * 4, "Invalid vertex attribute.");
         inputs.push_back({attribute.semantic.c_str(), attribute.semanticIndex,
             attribute.components == 2 ? DXGI_FORMAT_R32G32_FLOAT : attribute.components == 3 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT,
-            attribute.slot, attribute.offset, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0});
+            attribute.slot, attribute.offset,
+            attribute.perInstance ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+            attribute.perInstance ? 1u : 0u});
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC native{};
     native.pRootSignature = root_.Get();
@@ -810,6 +813,7 @@ void Device12::validateVertices(std::uint32_t first, std::uint32_t count) const 
     if (!count) return;
     const auto& pipeline = owned<Pipeline12>(pipeline_, identity_);
     for (const auto& attribute : pipeline.desc.attributes) {
+        if (attribute.perInstance) continue;
         const auto& binding = vertices_[attribute.slot];
         const auto& buffer = owned<Buffer12>(binding.buffer, identity_);
         const UINT64 last = static_cast<UINT64>(first) + count - 1;
@@ -864,6 +868,17 @@ void Device12::draw(std::uint32_t count, std::uint32_t first) {
     require(activePass_, "Draw issued outside a render pass.");
     validateVertices(first, count); bindDrawState();
     list_->DrawInstanced(count, 1, first, 0); ++statistics_.drawCalls;
+}
+void Device12::drawIndexedInstanced(std::uint32_t indexCount, std::uint32_t instanceCount,
+    std::uint32_t firstIndex, std::int32_t baseVertex, std::uint32_t firstInstance) {
+    if (!indexCount || !instanceCount) return;
+    require(activePass_, "Instanced indexed draw issued outside a render pass.");
+    const auto& indices = owned<Buffer12>(index_, identity_);
+    require(static_cast<UINT64>(indexOffset_) + (static_cast<UINT64>(firstIndex) + indexCount) * 4 <= indices.desc.byteSize,
+        "Instanced indexed draw exceeds its index buffer.");
+    validateVertices(0, 1); bindDrawState();
+    list_->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+    ++statistics_.drawCalls; ++statistics_.indexedDrawCalls;
 }
 
 void Device12::waitFence(UINT64 value) {

@@ -44,6 +44,9 @@ struct ForwardingContext final : rhi::CommandContext {
     void bindVertexBuffers(std::uint32_t, std::span<const rhi::VertexBufferBinding>) override { accept("vertices"); }
     void bindIndexBuffer(const rhi::BufferHandle&, std::uint32_t) override { accept("index"); }
     void drawIndexed(std::uint32_t, std::uint32_t, std::int32_t) override { accept("indexed"); }
+    void drawIndexedInstanced(std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::uint32_t) override {
+        accept("indexedInstanced");
+    }
     void draw(std::uint32_t, std::uint32_t) override { accept("draw"); }
 };
 template<class Operation>
