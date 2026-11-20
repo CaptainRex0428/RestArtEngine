@@ -195,7 +195,8 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
         }
         if (gi.method == renderer::GlobalIlluminationMethod::ProbeGrid) {
-            ImGui::TextWrapped("DDGI maintains a camera-centred 3D probe grid in a 2D atlas. Probes update from the deferred G-buffer and feed diffuse indirect light back in the next frame; it is a raster algorithm and does not require DXR.");
+            ImGui::TextWrapped("DDGI fits a 3D probe grid to the scene bounds (or uses cameraTarget when auto-fit is off) and stores probes in a 2D atlas. Probes update from the deferred G-buffer and feed diffuse indirect light back in the next frame; it is a raster algorithm and does not require DXR.");
+            changed |= ImGui::Checkbox("Auto-fit probe grid to scene", &gi.probeAutoFit);
             int x = static_cast<int>(gi.probeGridX), y = static_cast<int>(gi.probeGridY), z = static_cast<int>(gi.probeGridZ);
             const int axisMax = static_cast<int>(renderer::kGiMaxProbeGridAxis);
             if (ImGui::SliderInt("Probe grid X", &x, 2, axisMax, "%d", ImGuiSliderFlags_AlwaysClamp)) {
@@ -207,8 +208,10 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             if (ImGui::SliderInt("Probe grid Z", &z, 2, axisMax, "%d", ImGuiSliderFlags_AlwaysClamp)) {
                 gi.probeGridZ = static_cast<std::uint32_t>(z); changed = true;
             }
+            ImGui::BeginDisabled(gi.probeAutoFit);
             changed |= ImGui::SliderFloat("Probe spacing", &gi.probeSpacing, 0.1f,
                 renderer::kGiMaxProbeSpacing, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::EndDisabled();
             changed |= ImGui::SliderFloat("Probe hysteresis", &gi.probeHysteresis, 0.0f, 1.0f,
                 "%.2f", ImGuiSliderFlags_AlwaysClamp);
         }

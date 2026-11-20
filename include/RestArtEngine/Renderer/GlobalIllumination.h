@@ -62,6 +62,7 @@ struct GlobalIlluminationSettings {
     std::uint32_t probeGridX = 16, probeGridY = 8, probeGridZ = 16;
     float probeSpacing = 1.0f;
     float probeHysteresis = 0.95f;
+    bool probeAutoFit = true;
     // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;

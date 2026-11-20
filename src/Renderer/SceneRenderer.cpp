@@ -530,6 +530,8 @@ struct SceneRenderer::Impl {
     std::uint64_t giHistoryEpoch = 0;
     bool ssgiHistoryValid = false;
     bool lastProbeGridGi = false;
+    float probeEffectiveSpacing = 0.0f;
+    bool probeAutoFitUsed = false;
     std::uint64_t ssgiViewId = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
@@ -2092,17 +2094,70 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     probeData.grid = XMFLOAT4(static_cast<float>(probeSettings.probeGridX),
         static_cast<float>(probeSettings.probeGridY), static_cast<float>(probeSettings.probeGridZ),
         probeSettings.probeHysteresis);
-    const float probeSpacing = std::max(probeSettings.probeSpacing, 0.01f);
-    const XMFLOAT3 probeCenter{settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2]};
+    float probeSpacing = std::max(probeSettings.probeSpacing, 0.01f);
+    XMFLOAT3 probeCenter{settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2]};
+    bool autoFitApplied = false;
+    if (probeSettings.probeAutoFit) {
+        float minimum[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max()};
+        float maximum[3] = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest()};
+        bool hasBounds = false;
+        for (const auto& actor : world.actors) {
+            if (actor.light || !actor.visible) continue;
+            const auto* mesh = assets.findMesh(actor.mesh.meshId);
+            if (!mesh) continue;
+            const auto& bounds = mesh->localBounds();
+            if (!bounds.valid) continue;
+            const XMMATRIX matrix = actorMatrix(actor);
+            for (unsigned corner = 0; corner < 8; ++corner) {
+                const XMVECTOR local = XMVectorSet(
+                    (corner & 1u) ? bounds.maximum[0] : bounds.minimum[0],
+                    (corner & 2u) ? bounds.maximum[1] : bounds.minimum[1],
+                    (corner & 4u) ? bounds.maximum[2] : bounds.minimum[2], 1.0f);
+                XMFLOAT3 point{};
+                XMStoreFloat3(&point, XMVector3TransformCoord(local, matrix));
+                const float coordinate[3] = {point.x, point.y, point.z};
+                for (int axis = 0; axis < 3; ++axis) {
+                    minimum[axis] = std::min(minimum[axis], coordinate[axis]);
+                    maximum[axis] = std::max(maximum[axis], coordinate[axis]);
+                }
+                hasBounds = true;
+            }
+        }
+        if (hasBounds) {
+            constexpr float padding = 0.5f;
+            const float extent[3] = {
+                std::max(maximum[0] - minimum[0] + padding * 2.0f, 0.5f),
+                std::max(maximum[1] - minimum[1] + padding * 2.0f, 0.5f),
+                std::max(maximum[2] - minimum[2] + padding * 2.0f, 0.5f)};
+            probeCenter = XMFLOAT3((minimum[0] + maximum[0]) * 0.5f,
+                (minimum[1] + maximum[1]) * 0.5f, (minimum[2] + maximum[2]) * 0.5f);
+            probeSpacing = std::max({
+                extent[0] / std::max(probeSettings.probeGridX - 1, 1u),
+                extent[1] / std::max(probeSettings.probeGridY - 1, 1u),
+                extent[2] / std::max(probeSettings.probeGridZ - 1, 1u)});
+            probeSpacing = std::max(probeSpacing, 0.05f);
+            autoFitApplied = true;
+        }
+    }
     // Snap the grid origin to a world-space spacing lattice so probes do not
     // swim every frame while the orbit target moves within one probe cell.
     const auto snapProbe = [probeSpacing](float value) {
         return std::floor(value / probeSpacing + 0.5f) * probeSpacing;
     };
-    probeData.origin = XMFLOAT4(
-        snapProbe(probeCenter.x - (probeSettings.probeGridX - 1) * probeSpacing * 0.5f),
-        snapProbe(probeCenter.y - (probeSettings.probeGridY - 1) * probeSpacing * 0.5f),
-        snapProbe(probeCenter.z - (probeSettings.probeGridZ - 1) * probeSpacing * 0.5f), probeSpacing);
+    const float originX = probeCenter.x - (probeSettings.probeGridX - 1) * probeSpacing * 0.5f;
+    const float originY = probeCenter.y - (probeSettings.probeGridY - 1) * probeSpacing * 0.5f;
+    const float originZ = probeCenter.z - (probeSettings.probeGridZ - 1) * probeSpacing * 0.5f;
+    probeData.origin = XMFLOAT4(autoFitApplied ? originX : snapProbe(originX),
+        autoFitApplied ? originY : snapProbe(originY),
+        autoFitApplied ? originZ : snapProbe(originZ), probeSpacing);
+    state.probeEffectiveSpacing = probeSpacing;
+    state.probeAutoFitUsed = autoFitApplied;
+    if (probeGridGi) {
+        state.giStatus.reason += " Probe spacing " + std::to_string(probeSpacing) +
+            (autoFitApplied ? " m (scene auto-fit)." : " m.");
+    }
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
         probeGridGi && state.probeAtlasValid ? 1.0f : 0.0f, probeSettings.indirectDiffuseIntensity, 0.0f);
     state.uploadConstants(state.probeBuffer, probeData);
@@ -2365,7 +2420,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
                 {state.probeAtlasA, 14}, {rasterDestinationImage, 15}};
             commands.beginRenderPass(rasterPass);
+            commands.setViewport({0.0f, 0.0f, 1024.0f, 32.0f, 0.0f, 1.0f});
             state.drawRhiFullscreen(11, false);
+            commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
+                sceneViewport.Width, sceneViewport.Height});
             commands.endRenderPass();
             std::swap(state.probeAtlasA, state.probeAtlasB);
             state.probeAtlasValid = true;
@@ -2724,7 +2782,9 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         status.accumulatedSamples = impl_->lastProbeGridGi ? 1u : 0u;
         status.targetSamples = 1;
         status.reason = impl_->lastProbeGridGi
-            ? "Realtime DDGI updates a camera-centred diffuse probe atlas from the deferred G-buffer."
+            ? "Realtime DDGI updates a scene-fitted diffuse probe atlas from the deferred G-buffer. Probe spacing " +
+                std::to_string(impl_->probeEffectiveSpacing) + " m" +
+                (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".")
             : "DDGI is unavailable for the current frame.";
     }
     return status;

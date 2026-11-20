@@ -241,6 +241,11 @@ RenderingSettings readRenderingSettings(const Json& value) {
             settings.globalIllumination.probeGridZ < 2)
             throw std::runtime_error("rendering.globalIllumination.probeGrid axes must be integers from 2 to 32.");
         readPositiveFloat("probeSpacing", settings.globalIllumination.probeSpacing, renderer::kGiMaxProbeSpacing);
+        if (gi.contains("probeAutoFit")) {
+            if (!gi.at("probeAutoFit").is_boolean())
+                throw std::runtime_error("rendering.globalIllumination.probeAutoFit must be a boolean.");
+            settings.globalIllumination.probeAutoFit = gi.at("probeAutoFit").get<bool>();
+        }
         if (gi.contains("probeHysteresis")) {
             const auto& encoded = gi.at("probeHysteresis");
             if (!encoded.is_number())
@@ -1059,6 +1064,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["probeGridZ"] = settings.globalIllumination.probeGridZ;
         gi["probeSpacing"] = settings.globalIllumination.probeSpacing;
         gi["probeHysteresis"] = settings.globalIllumination.probeHysteresis;
+        gi["probeAutoFit"] = settings.globalIllumination.probeAutoFit;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

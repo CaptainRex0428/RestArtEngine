@@ -292,6 +292,7 @@ void globalIlluminationRoundTrip() {
         loaded.rendering.globalIllumination.probeGridX == 16 && loaded.rendering.globalIllumination.probeGridY == 8 &&
         loaded.rendering.globalIllumination.probeGridZ == 16 && loaded.rendering.globalIllumination.probeSpacing == 1.0f &&
         loaded.rendering.globalIllumination.probeHysteresis == 0.95f &&
+        loaded.rendering.globalIllumination.probeAutoFit &&
         loaded.rendering.globalIllumination.sampling == renderer::GlobalIlluminationSampling::Uniform &&
         loaded.rendering.globalIllumination.restirCandidates == 4 &&
         loaded.rendering.globalIllumination.restirDirect && loaded.rendering.globalIllumination.restirIndirect &&
@@ -350,13 +351,15 @@ void globalIlluminationRoundTrip() {
     requested.globalIllumination.probeGridZ = 24;
     requested.globalIllumination.probeSpacing = 1.5f;
     requested.globalIllumination.probeHysteresis = 0.8f;
+    requested.globalIllumination.probeAutoFit = false;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "DDGI probe grid settings survive project reload.");
     const auto savedDdgi = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
     require(savedDdgi.at("method") == "probeGrid" && savedDdgi.at("probeGridX") == 20 &&
         savedDdgi.at("probeGridY") == 10 && savedDdgi.at("probeGridZ") == 24 &&
-        savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f,
+        savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f &&
+        savedDdgi.at("probeAutoFit") == false,
         "DDGI serializes its probe grid and history controls.");
     requested.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
     requested.globalIllumination.restirCandidates = 7;
@@ -436,6 +439,8 @@ void globalIlluminationValidation() {
     for (const char* restirBool : {"restirDirect", "restirIndirect", "restirSpatialReuse"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{restirBool, invalid}}, restirBool);
+    for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
+        reject(Json{{"probeAutoFit", invalid}}, "probeAutoFit");
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{contribution, invalid}}, contribution);
