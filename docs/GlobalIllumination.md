@@ -4,11 +4,11 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 | 维度 | 当前选择 | 含义 |
 | --- | --- | --- |
-| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪；DDGI 维护动态漫反射 probe。 |
+| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪；DDGI 在 DXR 后端逐 probe 光线追踪，strict D3D11 退回屏幕空间更新。 |
 | 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI／DDGI 固定为实时。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
 | SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
-| DDGI 参数 | grid X/Y/Z／spacing／hysteresis | 相机目标附近 probe 网格尺寸、世界间距和历史混合速度。 |
+| DDGI 参数 | grid X/Y/Z／spacing／hysteresis／auto-fit／probe rays | probe 网格尺寸、世界间距、历史混合、场景自动拟合，以及每个 probe 的光线数。 |
 | 采样策略 `sampling` | Uniform／ReSTIR | Path tracing 实时模式可选择加权 reservoir 采样；direct/indirect 各自开关，候选数控制每像素候选。 |
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
@@ -109,9 +109,9 @@ SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径�
 
 ### Probe grid (DDGI)
 
-DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`），网格原点对齐到世界格点以避免相机目标小幅移动时 probe 漂移；probe 存在 RGBA16F 的 2D atlas（width = X×Z，height = Y）中。每帧的 `DDGI probe update` 全屏 pass 将每个 probe 投影到当前 G-buffer，读取 3×3 屏幕 footprint 的法线余弦加权辐照度，再用 `probe hysteresis` 与上一帧 atlas 混合；atlas alpha 记录 probe 有效置信度，Deferred 光照按三线性权重采样 8 个相邻 probe 并用置信度加权作为漫反射间接光。
+DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。strict D3D11 没有 DXR，保留屏幕空间 3×3 footprint 更新作为 fallback。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
 
-限制：probe 更新是屏幕空间可见性近似，不是逐 probe 光线追踪；被遮挡或在屏幕外的 probe 保留旧值；网格固定相机目标附近，移动相机时 probe 世界位置随帧重建，可能出现滞后；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+限制：DXR 后端为逐 probe 光线追踪；strict D3D11 fallback 仍是屏幕空间投影更新，被遮挡/屏幕外 probe 保留旧值。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
 ### Debug views
 
@@ -168,6 +168,7 @@ Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path
   "probeSpacing": 1.0,
   "probeHysteresis": 0.95,
   "probeAutoFit": true,
+  "probeRayCount": 16,
   "sampling": "restir",
   "restirCandidates": 4,
   "restirDirect": true,
@@ -176,7 +177,7 @@ Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95／auto-fit 开启，缺失采样字段默认 `uniform`／4／true／true／true。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；`sampling` 可为 `uniform` 或 `restir`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95／auto-fit 开启／16 rays，缺失采样字段默认 `uniform`／4／true／true／true。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；`sampling` 可为 `uniform` 或 `restir`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 

@@ -4,6 +4,15 @@
 #define RAE_HARDWARE_RAYTRACING 1
 #include "Scene.hlsl"
 
+// The raster scene header hides the DDGI constants in the hardware build, but
+// the probe-update dispatch shares the same 48-byte b9 layout.
+cbuffer ProbeConstants : register(b9)
+{
+    float4 probeGrid;
+    float4 probeOrigin;
+    float4 probeParameters;
+};
+
 RWTexture2D<float4> hardwareOutput : register(u0);
 // Persistent linear-HDR mean. Alpha records the accumulated sample count for
 // inspection; CPU b5 remains the authoritative sample/reset contract.
@@ -14,6 +23,12 @@ RWTexture2D<float4> indirectLightingOutput : register(u3);
 RWTexture2D<float4> primaryMaterial : register(u4);
 // Previous-frame world position of the primary surface (w=0 for background).
 RWTexture2D<float4> primaryPreviousPosition : register(u7);
+// Ray-traced DDGI irradiance atlas (RGB irradiance, A confidence).
+RWTexture2D<float4> probeAtlasOutput : register(u10);
+// Probe depth moments: x = mean hit distance, y = mean squared hit distance,
+// z = hit ratio, w = reserved.
+RWTexture2D<float4> probeDepthOutput : register(u11);
+Texture2D<float4> probeAtlasPrevious : register(t16);
 
 // Realtime reconstruction and ReSTIR history. Declared before PathTracing.hlsli
 // because the direct-light reservoir updates its history from that header.
@@ -155,9 +170,88 @@ void ResolveRealtimeGi(uint2 pixel)
     indirectLightingOutput[pixel] = float4(clamp(resolved, 0.0, 65504.0), 1.0);
 }
 
+//------------------------------------------------------------------------------
+// Ray-traced DDGI probe update. One atlas pixel is one probe; every probe
+// traces a small fixed set of sphere directions and stores the mean incident
+// radiance. The raster deferred pass samples this atlas unchanged.
+//------------------------------------------------------------------------------
+void ResolveProbeAtlas(uint2 pixel)
+{
+    int3 dimensions = int3(probeGrid.xyz);
+    if (dimensions.x <= 0 || dimensions.y <= 0 || dimensions.z <= 0)
+    {
+        probeAtlasOutput[pixel] = 0.0;
+        return;
+    }
+    int ix = int(pixel.x) % dimensions.x;
+    int iz = int(pixel.x) / dimensions.x;
+    int iy = int(pixel.y);
+    if (iz >= dimensions.z || iy >= dimensions.y || ix >= dimensions.x)
+    {
+        probeAtlasOutput[pixel] = 0.0;
+        return;
+    }
+    float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
+    float3 sum = 0.0;
+    float distanceSum = 0.0;
+    float distanceSquaredSum = 0.0;
+    uint hitCount = 0;
+    uint directionCount = clamp((uint)probeParameters.x, 1u, 32u);
+    [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
+    {
+        float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
+        float radial = sqrt(max(1.0 - z * z, 0.0));
+        float phi = float(directionIndex) * 2.39996323;
+        float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
+        float distance;
+        float3 hitNormal;
+        int object;
+        if (TraceScene(world, direction, distance, hitNormal, object, false))
+        {
+            float3 position = world + direction * distance;
+            Surface material = TriangleMaterialAt(position, hitNormal, (uint)(-object - 2));
+            float3 view = -direction;
+            uint randomState = (pixel.x * 1973u + pixel.y * 9277u + directionIndex * 26699u + 1u);
+            sum += PathDirectLight(position, hitNormal, hitNormal, view, material);
+            sum += PathAreaDirect(position, hitNormal, hitNormal, view, material, randomState);
+            distanceSum += distance;
+            distanceSquaredSum += distance * distance;
+            ++hitCount;
+        }
+        else
+        {
+            sum += Environment(direction, 0.0);
+        }
+    }
+    float4 current = float4(clamp(sum / float(directionCount), 0.0, 65504.0), 1.0);
+    if (probeParameters.y > 0.5)
+    {
+        float4 previous = probeAtlasPrevious.Load(int3(int2(pixel), 0));
+        current = lerp(previous, current, saturate(1.0 - probeGrid.w));
+    }
+    probeAtlasOutput[pixel] = current;
+    if (hitCount > 0)
+    {
+        float inverseHits = 1.0 / float(hitCount);
+        float meanDistance = distanceSum * inverseHits;
+        float meanSquared = distanceSquaredSum * inverseHits;
+        probeDepthOutput[pixel] = float4(meanDistance, meanSquared,
+            float(hitCount) / float(directionCount), 1.0);
+    }
+    else
+    {
+        probeDepthOutput[pixel] = 0.0;
+    }
+}
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 thread : SV_DispatchThreadID)
 {
+    if (probeParameters.w > 0.5)
+    {
+        ResolveProbeAtlas(thread.xy);
+        return;
+    }
     if (any(thread.xy >= outputInfo.xy)) return;
     if (accumulationInfo.w == 1 && viewportDebug.z < 0.5)
     {

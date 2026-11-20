@@ -246,6 +246,14 @@ RenderingSettings readRenderingSettings(const Json& value) {
                 throw std::runtime_error("rendering.globalIllumination.probeAutoFit must be a boolean.");
             settings.globalIllumination.probeAutoFit = gi.at("probeAutoFit").get<bool>();
         }
+        if (gi.contains("probeRayCount")) {
+            const auto& encoded = gi.at("probeRayCount");
+            if (!encoded.is_number_integer() || encoded.get<std::int64_t>() < 1 ||
+                encoded.get<std::int64_t>() > static_cast<std::int64_t>(renderer::kGiMaxProbeRays))
+                throw std::runtime_error("rendering.globalIllumination.probeRayCount must be an integer from 1 to 32.");
+            settings.globalIllumination.probeRayCount =
+                static_cast<std::uint32_t>(encoded.get<std::int64_t>());
+        }
         if (gi.contains("probeHysteresis")) {
             const auto& encoded = gi.at("probeHysteresis");
             if (!encoded.is_number())
@@ -1065,6 +1073,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["probeSpacing"] = settings.globalIllumination.probeSpacing;
         gi["probeHysteresis"] = settings.globalIllumination.probeHysteresis;
         gi["probeAutoFit"] = settings.globalIllumination.probeAutoFit;
+        gi["probeRayCount"] = settings.globalIllumination.probeRayCount;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

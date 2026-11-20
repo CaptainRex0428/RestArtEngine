@@ -195,8 +195,14 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
         }
         if (gi.method == renderer::GlobalIlluminationMethod::ProbeGrid) {
-            ImGui::TextWrapped("DDGI fits a 3D probe grid to the scene bounds (or uses cameraTarget when auto-fit is off) and stores probes in a 2D atlas. Probes update from the deferred G-buffer and feed diffuse indirect light back in the next frame; it is a raster algorithm and does not require DXR.");
+            ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; strict D3D11 falls back to a screen-space update. Probe rays controls the per-probe ray budget.");
             changed |= ImGui::Checkbox("Auto-fit probe grid to scene", &gi.probeAutoFit);
+            int rays = static_cast<int>(gi.probeRayCount);
+            if (ImGui::SliderInt("Probe rays", &rays, 1, static_cast<int>(renderer::kGiMaxProbeRays),
+                    "%d", ImGuiSliderFlags_AlwaysClamp)) {
+                gi.probeRayCount = static_cast<std::uint32_t>(rays);
+                changed = true;
+            }
             int x = static_cast<int>(gi.probeGridX), y = static_cast<int>(gi.probeGridY), z = static_cast<int>(gi.probeGridZ);
             const int axisMax = static_cast<int>(renderer::kGiMaxProbeGridAxis);
             if (ImGui::SliderInt("Probe grid X", &x, 2, axisMax, "%d", ImGuiSliderFlags_AlwaysClamp)) {

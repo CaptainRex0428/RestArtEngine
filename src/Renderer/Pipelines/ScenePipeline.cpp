@@ -110,6 +110,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     if (inputs.hardwareTransport) {
         PipelineResource writes = PipelineResource::HardwareImage;
         if (inputs.realtimeIndirect) writes |= PipelineResource::IndirectLighting;
+        if (inputs.hardwareProbeGi) writes |= PipelineResource::ProbeAtlas;
         add(RenderPassKind::HardwareTransport, "Hardware ray tracing transport",
             PipelineResource::None, writes);
     }
@@ -134,7 +135,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                     PipelineResource::GBufferNormal | PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
-        if (inputs.probeGridGi)
+        if (inputs.probeGridGi && !inputs.hardwareTransport)
             add(RenderPassKind::ProbeUpdate, "DDGI probe update",
                 PipelineResource::SceneDepth |
                     PipelineResource::GBufferNormal | rasterColor,
@@ -150,7 +151,9 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     }
 
     // A resolved hardware image replaces the raster colour after lighting.
-    if (inputs.hardwareTransport)
+    // DDGI hardware transport only publishes the probe atlas; the raster scene
+    // still owns the colour image.
+    if (inputs.hardwareTransport && !inputs.hardwareProbeGi)
         add(RenderPassKind::HardwareResolve, "Hardware image resolve",
             PipelineResource::HardwareImage, rasterColor);
 

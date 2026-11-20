@@ -85,6 +85,7 @@ Texture2D<float4> ssgiRawIndirect : register(t18);
 Texture2D<float4> ssgiHistoryIndirect : register(t19);
 Texture2D<float4> probeAtlasRead : register(t14);
 Texture2D<float4> probeColorSource : register(t15);
+Texture2D<float4> probeDepthAtlas : register(t20);
 cbuffer ProbeConstants : register(b9)
 {
     float4 probeGrid;    // x, y, z probe counts, history hysteresis
@@ -940,8 +941,25 @@ float3 ProbeIrradiance(float3 position)
             (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
         int2 atlas = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
         float4 sample = probeAtlasRead.Load(int3(atlas, 0));
-        sum += sample.rgb * weight * sample.a;
-        weightSum += weight * sample.a;
+        float confidence = probeParameters.w > 1.5 ? 1.0 : sample.a;
+        if (probeParameters.w > 1.5)
+        {
+            // Ray-traced probes publish mean hit distance and mean squared hit
+            // distance. Chebyshev visibility rejects probes whose receiver is
+            // probably behind the geometry that produced the probe irradiance.
+            float4 depthSample = probeDepthAtlas.Load(int3(atlas, 0));
+            float3 probeCenter = probeOrigin.xyz + (float3(coordinate) + 0.5) * probeOrigin.w;
+            float receiverDistance = length(position - probeCenter);
+            float meanDistance = depthSample.x;
+            float meanSquared = depthSample.y;
+            float variance = max(meanSquared - meanDistance * meanDistance, 1e-4);
+            float difference = meanDistance - receiverDistance;
+            float visibility = difference >= 0.0 ? 1.0
+                : saturate(variance / (variance + difference * difference));
+            confidence *= saturate(0.35 + 0.65 * visibility * saturate(depthSample.z));
+        }
+        sum += sample.rgb * weight * confidence;
+        weightSum += weight * confidence;
     }
     return sum / max(weightSum, 1e-5) * probeParameters.z;
 }
@@ -1019,7 +1037,7 @@ ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
     output.position = clip;
     output.corner = input.corner;
     float4 probe = probeAtlasRead.Load(int3(int2(input.atlas), 0));
-    output.color = probe.a > 0.05 ? float4(saturate(probe.rgb), 1.0) : float4(0.0, 0.9, 1.0, 1.0);
+    output.color = float4(saturate(probe.rgb) * 2.0, 1.0);
     return output;
 }
 
@@ -1044,7 +1062,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     if (debugMode == 11)
     {
         if (probeParameters.x > 0.5)
-            return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb), 1.0);
+            return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb * 4.0), 1.0);
         if (giViewport.x > 0.5)
             return float4(DisplayColor(indirectLightingBuffer.Load(pixel).rgb), 1.0);
         return 0.0;
@@ -1060,7 +1078,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
     if (debugMode != 12 && probeParameters.x > 0.5)
-        color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz));
+        color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz) * albedo.rgb * 2.0);
 #endif
     return color;
 }

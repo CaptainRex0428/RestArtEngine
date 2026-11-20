@@ -34,8 +34,12 @@ struct Frame {
     // Centre/enabled, half-axis U/environment scale, half-axis V/reserved,
     // emitted radiance/reserved. Kept outside the locked raster b0 contract.
     std::array<float, 16> areaLight{0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,0};
+    std::array<float, 4> probeGrid{}; // X, Y, Z, hysteresis
+    std::array<float, 4> probeOrigin{}; // x, y, z, spacing
+    std::uint32_t probeRayCount = 16;
     std::uint32_t width = 0, height = 0;
     bool reflections = true, shadows = true;
+    bool probeUpdate = false;
     GlobalIlluminationSettings globalIllumination;
     // Changed by the owning scene renderer for explicit restart or re-enable.
     std::uint64_t historyEpoch = 0;
@@ -58,6 +62,13 @@ public:
     // this module and remain alive until resize/shutdown.
     [[nodiscard]] ID3D12Resource* nativeOutput() const;
     [[nodiscard]] ID3D12Resource* nativeIndirect() const;
+    // Ray-traced DDGI irradiance atlas, RGBA16F 1024x32. Native mode exposes
+    // the D3D12 resource; hybrid mode exposes the shared DX11 texture.
+    [[nodiscard]] ID3D12Resource* nativeProbeAtlas() const;
+    [[nodiscard]] ID3D11Texture2D* probeAtlas() const;
+    [[nodiscard]] ID3D12Resource* nativeProbeDepth() const;
+    [[nodiscard]] ID3D11Texture2D* probeDepth() const;
+    [[nodiscard]] std::pair<std::uint32_t, std::uint32_t> probeAtlasSize() const;
     [[nodiscard]] std::pair<std::uint32_t, std::uint32_t> nativeOutputSize() const;
     [[nodiscard]] bool supported() const;
     // Builds, reflects and creates a complete candidate before publishing it.

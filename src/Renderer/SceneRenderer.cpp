@@ -253,6 +253,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ssgiHistoryIndirect", D3D_SIT_TEXTURE, 19, 0},
         {"probeAtlasRead", D3D_SIT_TEXTURE, 14, 0},
         {"probeColorSource", D3D_SIT_TEXTURE, 15, 0},
+        {"probeDepthAtlas", D3D_SIT_TEXTURE, 20, 0},
         {"dofColor", D3D_SIT_TEXTURE, 12, 0},
         {"aaSource", D3D_SIT_TEXTURE, 7, 0}, {"aaHistory", D3D_SIT_TEXTURE, 8, 0},
         {"rayUvVertices", D3D_SIT_STRUCTURED, 10, 0}, {"rayUvTriangles", D3D_SIT_STRUCTURED, 11, 0}
@@ -511,6 +512,7 @@ struct SceneRenderer::Impl {
     // DDGI probe irradiance atlas ping-pong. Fixed 1024x32 covers a 32x32x32
     // grid (width = gridX*gridZ, height = gridY).
     rhi::TextureHandle probeAtlasA, probeAtlasB;
+    rhi::TextureHandle probeDepthAtlasImage;
     bool probeAtlasValid = false;
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
@@ -619,7 +621,7 @@ struct SceneRenderer::Impl {
     struct SceneTargets {
         rhi::TextureHandle colorImage, depthImage;
         rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiHistoryRead, ssgiHistoryWrite;
-        rhi::TextureHandle probeAtlasA, probeAtlasB;
+        rhi::TextureHandle probeAtlasA, probeAtlasB, probeDepthAtlas;
         std::array<rhi::TextureHandle, 3> images;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
@@ -671,6 +673,7 @@ struct SceneRenderer::Impl {
             retired.ssgiHistoryWrite = std::move(ssgiIndirectHistoryWriteImage);
             retired.probeAtlasA = std::move(probeAtlasA);
             retired.probeAtlasB = std::move(probeAtlasB);
+        retired.probeDepthAtlas = std::move(probeDepthAtlasImage);
             retired.images = std::move(gbufferImages);
             retired.colorTarget = std::move(sceneTarget);
             retired.color = std::move(sceneTexture);
@@ -2031,6 +2034,11 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible && hardwareBackendAllowed &&
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
+    const bool hardwareProbeGi = hardwareTransport &&
+        (settings.debugView == 0 || settings.debugView == 11 || settings.debugView == 12) &&
+        (settings.editorViewport || settings.offscreenTarget) &&
+        settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
+        settings.path == RenderPath::Deferred;
     const bool debugGiIndirect = settings.debugView == 11;
     const bool debugGiProbes = settings.debugView == 12;
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested &&
@@ -2046,11 +2054,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     state.lastGiMethod = settings.globalIllumination.method;
     state.lastScreenSpaceGi = screenSpaceGi;
-    const bool probeGridGi = diagnosticMainScene &&
+    const bool rasterProbeGi = diagnosticMainScene &&
         (settings.debugView == 0 || debugGiIndirect || debugGiProbes) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
         settings.path == RenderPath::Deferred && !hardwareTransport;
+    const bool probeGridGi = rasterProbeGi || hardwareProbeGi;
     const bool giDebugProbes = debugGiProbes && probeGridGi;
     state.probeDebugOverlay = giDebugProbes;
     state.lastProbeGridGi = probeGridGi;
@@ -2090,6 +2099,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.rasterShadowMap = rasterShadowMap;
     pipelineInputs.rayTriangleScene = wantsRayScene;
     pipelineInputs.hardwareTransport = hardwareTransport;
+    pipelineInputs.hardwareProbeGi = hardwareProbeGi;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
     pipelineInputs.probeGridGi = probeGridGi;
@@ -2201,7 +2211,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             (autoFitApplied ? " m (scene auto-fit)." : " m.");
     }
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
-        probeGridGi && state.probeAtlasValid ? 1.0f : 0.0f, probeSettings.indirectDiffuseIntensity, 0.0f);
+        probeGridGi && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
+        probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : 0.0f);
     state.probeDebugVertexCount = 0;
     if (giDebugProbes && state.probeDebugPipeline) {
         std::vector<ProbeDebugVertex> vertices;
@@ -2354,6 +2365,15 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             frame.reflections = settings.hardwareRayTracingReflections;
             frame.shadows = settings.hardwareRayTracingShadows && settings.shadowMethod != ShadowMethod::Disabled;
             frame.globalIllumination = settings.globalIllumination;
+            frame.probeUpdate = hardwareProbeGi;
+            if (hardwareProbeGi) {
+                frame.probeGrid = {static_cast<float>(probeSettings.probeGridX),
+                    static_cast<float>(probeSettings.probeGridY),
+                    static_cast<float>(probeSettings.probeGridZ), probeSettings.probeHysteresis};
+                frame.probeOrigin = {probeData.origin.x, probeData.origin.y, probeData.origin.z,
+                    probeData.origin.w};
+                frame.probeRayCount = probeSettings.probeRayCount;
+            }
             if (depthOfFieldEligible(cameraView.lens) && settings.debugView == 0 &&
                 settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
                 settings.globalIllumination.mode == GlobalIlluminationMode::Progressive) {
@@ -2406,6 +2426,33 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                         indirectView = state.hardwareRayTracing->indirectLighting();
                     }
                 }
+                if (hardwareProbeGi) {
+                    const auto probeSize = state.hardwareRayTracing->probeAtlasSize();
+                    if (state.native12) {
+                        if (auto* probeAtlas = state.hardwareRayTracing->nativeProbeAtlas()) {
+                            const auto imported = state.native12->importTexture(probeAtlas,
+                                rhi::TextureDesc{probeSize.first, probeSize.second, 1,
+                                    rhi::Format::RGBA16Float, false, "Native DXR probe atlas"},
+                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                            state.native12->copyTextureRegion(state.probeAtlasA, imported, 0, 0,
+                                probeSize.first, probeSize.second);
+                            if (auto* probeDepth = state.hardwareRayTracing->nativeProbeDepth()) {
+                                const auto importedDepth = state.native12->importTexture(probeDepth,
+                                    rhi::TextureDesc{probeSize.first, probeSize.second, 1,
+                                        rhi::Format::RGBA16Float, false, "Native DXR probe depth"},
+                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                                state.native12->copyTextureRegion(state.probeDepthAtlasImage, importedDepth,
+                                    0, 0, probeSize.first, probeSize.second);
+                            }
+                            state.probeAtlasValid = true;
+                        }
+                    } else if (auto* probeAtlas = state.hardwareRayTracing->probeAtlas()) {
+                        state.context->CopyResource(d3d11::nativeTexture(state.probeAtlasA), probeAtlas);
+                        if (auto* probeDepth = state.hardwareRayTracing->probeDepth())
+                            state.context->CopyResource(d3d11::nativeTexture(state.probeDepthAtlasImage), probeDepth);
+                        state.probeAtlasValid = true;
+                    }
+                }
                 state.hardwareActive = true;
                 state.hardwareStatus = state.hardwareRayTracing->status();
                 state.giStatus = state.hardwareRayTracing->globalIlluminationStatus();
@@ -2449,6 +2496,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
             if (probeGridGi)
                 rasterPass.reads.push_back({state.probeAtlasA, 14});
+            if (hardwareProbeGi && state.probeDepthAtlasImage)
+                rasterPass.reads.push_back({state.probeDepthAtlasImage, 20});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(2, false);
             commands.endRenderPass();
@@ -2875,10 +2924,14 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         status.effectiveMode = GlobalIlluminationMode::Realtime;
         status.accumulatedSamples = impl_->lastProbeGridGi ? 1u : 0u;
         status.targetSamples = 1;
+        const bool rayTracedProbe = impl_->hardwareActive &&
+            impl_->hardwareStatus.find("Ray-traced DDGI") != std::string::npos;
         status.reason = impl_->lastProbeGridGi
-            ? "Realtime DDGI updates a scene-fitted diffuse probe atlas from the deferred G-buffer. Probe spacing " +
+            ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Realtime DDGI") +
+                " updates a scene-fitted diffuse probe atlas. Probe spacing " +
                 std::to_string(impl_->probeEffectiveSpacing) + " m" +
-                (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".")
+                (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".") +
+                (impl_->hardwareActive ? " Backend: " + impl_->hardwareStatus : "")
             : "DDGI is unavailable for the current frame.";
     }
     return status;

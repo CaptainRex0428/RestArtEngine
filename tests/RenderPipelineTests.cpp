@@ -153,6 +153,20 @@ void hardwareTransport() {
         "Raster lighting must declare the indirect image it consumes.");
     require(hasKind(pipeline, RenderPassKind::HardwareResolve), "Hardware resolve pass missing.");
     require(validatePipeline(pipeline).valid, "Hardware pipeline is inconsistent.");
+    build.hardwareProbeGi = true;
+    build.probeGridGi = true;
+    const auto ddgiPipeline = buildScenePipeline(build);
+    const auto ddgiTransport = indexOf(ddgiPipeline, RenderPassKind::HardwareTransport);
+    require(contains(passAt(ddgiPipeline, ddgiTransport).writes, PipelineResource::ProbeAtlas),
+        "Hardware DDGI transport must publish the probe atlas.");
+    require(!hasKind(ddgiPipeline, RenderPassKind::ProbeUpdate),
+        "Hardware DDGI must not run the raster probe update pass.");
+    require(!hasKind(ddgiPipeline, RenderPassKind::HardwareResolve),
+        "Hardware DDGI must leave raster scene colour untouched.");
+    const auto ddgiDeferred = indexOf(ddgiPipeline, RenderPassKind::DeferredLighting);
+    require(contains(passAt(ddgiPipeline, ddgiDeferred).reads, PipelineResource::ProbeAtlas),
+        "Hardware DDGI deferred lighting must read the ray-traced probe atlas.");
+    require(validatePipeline(ddgiPipeline).valid, "Hardware DDGI pipeline is inconsistent.");
 }
 
 void postChain() {

@@ -25,6 +25,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA16Float, true, "DDGI probe atlas A"});
         candidate.probeAtlasB = rhiDevice->createTexture({1024, 32, 1,
             rhi::Format::RGBA16Float, true, "DDGI probe atlas B"});
+        candidate.probeDepthAtlas = rhiDevice->createTexture({1024, 32, 1,
+            rhi::Format::RGBA16Float, true, "DDGI probe depth atlas"});
         if (device) {
             candidate.color = d3d11::nativeTexture(candidate.colorImage);
             candidate.colorTarget = d3d11::nativeColorTarget(candidate.colorImage);
@@ -49,6 +51,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         ssgiIndirectHistoryWriteImage = std::move(candidate.ssgiHistoryWrite);
         probeAtlasA = std::move(candidate.probeAtlasA);
         probeAtlasB = std::move(candidate.probeAtlasB);
+        probeDepthAtlasImage = std::move(candidate.probeDepthAtlas);
         gbufferImages = std::move(candidate.images);
         sceneTarget = std::move(candidate.colorTarget);
         sceneTexture = std::move(candidate.color);

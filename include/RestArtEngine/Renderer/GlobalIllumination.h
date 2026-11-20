@@ -63,6 +63,7 @@ struct GlobalIlluminationSettings {
     float probeSpacing = 1.0f;
     float probeHysteresis = 0.95f;
     bool probeAutoFit = true;
+    std::uint32_t probeRayCount = 16;
     // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;
@@ -80,6 +81,7 @@ inline constexpr std::uint32_t kGiMaxTargetSamples = 65536;
 inline constexpr std::uint32_t kGiMaxBounces = 12;
 inline constexpr std::uint32_t kGiMaxScreenSpaceSteps = 32;
 inline constexpr std::uint32_t kGiMaxProbeGridAxis = 32;
+inline constexpr std::uint32_t kGiMaxProbeRays = 32;
 inline constexpr std::uint32_t kGiMaxRestirCandidates = 16;
 inline constexpr float kGiMaxProbeSpacing = 20.0f;
 inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;

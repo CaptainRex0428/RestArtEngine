@@ -132,6 +132,7 @@ struct PipelineBuildInputs {
     bool rayTriangleScene = false;
     bool hardwareTransport = false;
     bool realtimeIndirect = false;
+    bool hardwareProbeGi = false;
     bool screenSpaceGi = false;
     bool probeGridGi = false;
     bool giDebugProbes = false;
