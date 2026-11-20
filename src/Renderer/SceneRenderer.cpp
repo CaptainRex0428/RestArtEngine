@@ -535,6 +535,10 @@ struct SceneRenderer::Impl {
     std::uint32_t probeDebugGrid[3]{};
     bool probeDebugGeometryValid = false;
     bool probeDebugSphereValid = false;
+    std::array<std::uint32_t, 3> probeLayoutGrid{};
+    float probeLayoutSpacing = 0.0f;
+    bool probeLayoutAutoFit = false;
+    bool probeLayoutValid = false;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
     std::array<rhi::ShaderHandle, 14> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
@@ -2227,6 +2231,25 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         autoFitApplied ? originZ : snapProbe(originZ), probeSpacing);
     state.probeEffectiveSpacing = probeSpacing;
     state.probeAutoFitUsed = autoFitApplied;
+    const bool probeLayoutChanged = !state.probeLayoutValid ||
+        state.probeLayoutGrid[0] != probeSettings.probeGridX ||
+        state.probeLayoutGrid[1] != probeSettings.probeGridY ||
+        state.probeLayoutGrid[2] != probeSettings.probeGridZ ||
+        std::abs(state.probeLayoutSpacing - probeSpacing) > 1e-5f ||
+        state.probeLayoutAutoFit != autoFitApplied;
+    if (probeLayoutChanged) {
+        // Grid/spacing changes remap atlas pixels. Old probe values must not be
+        // blended into the new layout, otherwise the first frames show large
+        // stale blocks after moving a grid slider.
+        state.probeAtlasValid = false;
+        state.probeDebugGeometryValid = false;
+        ++state.giHistoryEpoch;
+        state.probeLayoutGrid = {probeSettings.probeGridX, probeSettings.probeGridY,
+            probeSettings.probeGridZ};
+        state.probeLayoutSpacing = probeSpacing;
+        state.probeLayoutAutoFit = autoFitApplied;
+        state.probeLayoutValid = true;
+    }
     if (probeGridGi) {
         state.giStatus.reason += " Probe spacing " + std::to_string(probeSpacing) +
             (autoFitApplied ? " m (scene auto-fit)." : " m.");
