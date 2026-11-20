@@ -6,7 +6,7 @@
 
 启动时先出现无边框加载页（占主屏 28% 宽、按图片比例、居中），加载完成后面板窗口按主屏 80% 大小居中显示，带原生边框与自定义标题栏。在 Rider 打开根目录 `RestArtEngine.sln`，编译并运行 `RestArtEngine`（输出文件名为 `RestArtEngine.exe`）。无参数启动会先进入 Project Manager；选择工程后再进入编辑器。本页解释当前基础编辑器的数据关系、保存方式，以及引擎内编辑 HLSL 后 Apply 的工作流。界面使用 Dear ImGui；功能代码位于 `src/Editor/`。
 
-工程管理器列出 `Projects/` 下的所有示例工程（`Sandbox`、`RayTracing_Simple`、`PathTracing_CornellBox`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。
+工程管理器列出 `Projects/` 下的所有示例工程（当前为 `Sandbox`、`RayTracing_Simple`）。`--project` 接受工程目录或 `.raproject` 文件，例如从引擎根目录运行时使用 `--project Projects/Sandbox`，或 `--project Projects/Sandbox/Sandbox.raproject`，可绕过工程管理器直接打开。工程描述决定引擎目录、Content、可编辑 Shader 与默认场景的位置，截图目录独立设置。
 
 加载页显示当前阶段与资源详情：逐个 Shader 编译、图形管线组、可选硬件光追初始化、Engine 和工程材质／网格、场景读取、Content 索引及缩略图。资源阶段显示当前项／总数和文件名；长名称缩略显示，百分比保留独立位置。所有加载阶段（包括最后的场景与工作区准备）都保持开头相同的无边框小窗口、图片比例和居中位置；首帧完成后才显示正常大小的编辑器，加载图不放大到编辑器窗口。进度按实际完成的工作推进；百分比表示阶段预算，不是剩余时间估算。工程管理器只初始化自身的图形设备与 UI，选择工程后再构建场景管线。
 
@@ -34,7 +34,7 @@ Scene 面板的 `Store current view` 把当前轨道相机与曝光记录为场�
 
 Outliner 的 `+ Light` 提供 Directional、Sky、Rect、Spot 和 Point。选中后在 Details 编辑颜色、强度及对应范围／角度／尺寸，参数实时生效且支持撤销重做；视口标记可点击，支持 Gizmo 与 F 聚焦。灯光沿局部 -Z 发射，缩放不改变光参数。存在任何灯光 Actor（包括隐藏灯）时，Scene 的旧灯光控件禁用，避免同时使用两套光源。完整约定见 [灯光模块](Lighting.md)。
 
-无灯光 Actor 时，`Save lighting in scene` 继续保存旧方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸、辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。旧 [PathTracing_CornellBox](../Projects/PathTracing_CornellBox/README.md) 仍按此配置加载，渐进式 Path Tracing 保留可见发光面和 MIS 采样。
+无灯光 Actor 时，`Save lighting in scene` 继续保存旧方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸、辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。旧场景仍按此配置加载，渐进式 Path Tracing 保留可见发光面和 MIS 采样。
 
 ## 底栏与命令控制台
 
@@ -297,5 +297,5 @@ F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板�
 
 Scene 面板的 Store current view 把当前轨道相机与曝光记录为场景初始视角，Restore view 恢复，Clear opening view 清除；Save Scene 将其写入场景，普通相机导航不会自动修改这份书签。打开／重新加载场景时自动应用；旧场景没有书签则保持现有视角。
 
-Save lighting in scene 保存方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸和辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。[PathTracing_CornellBox](../Projects/PathTracing_CornellBox/README.md) 使用这组配置。矩形发光面当前只支持渐进式 Path Tracing，其他模式会提示限制。
+Save lighting in scene 保存方向光强度、环境倍率与单个矩形发光面；矩形位置、尺寸和辐亮度在 Scene 调整，轴方向保存在场景 JSON 中。矩形发光面当前只支持渐进式 Path Tracing，其他模式会提示限制。
 

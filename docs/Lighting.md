@@ -4,7 +4,7 @@
 
 ![矩形顶灯与路径追踪](images/pathtracing-cornell.png)
 
-*PathTracing_CornellBox 的矩形顶灯是唯一光源。普通光栅用四点面积近似，Progressive PathTracing 用面积／BRDF 采样与 MIS，因此这里能看到可见发光面本身，以及金属球上对顶灯的锐利反射。*
+*矩形顶灯作为唯一光源的示例：普通光栅用四点面积近似，Progressive PathTracing 用面积／BRDF 采样与 MIS，因此这里能看到可见发光面本身，以及金属球上对顶灯的锐利反射。*
 
 ## 创建与编辑
 

@@ -285,10 +285,6 @@ Projects/Sandbox/                 <- 纯数据示例工程
   Content/Scenes/Default.rascene
   Content/Materials/*.ramat|.rasset
   Shaders/Materials/Standard.hlsli
-Projects/PathTracing_CornellBox/   <- 渐进路径追踪示例
-  PathTracing_CornellBox.raproject
-  Content/Scenes/CornellBox.rascene
-  Content/Materials/*.rasset
 ```
 
 `.raproject` 示例：
@@ -331,7 +327,7 @@ Project Manager 递归扫描 `Projects/**/*.raproject` 并列出可打开的示�
 | 工程 | 用途 |
 | --- | --- |
 | `Projects/Sandbox` | 实时 GI 演示：球 / 立方体 / 平面网格、程序化网格材质、金属反射与 2048² 阴影。工程启用硬件光追 + 实时 GI（4 / 512 / 4）。 |
-| [`Projects/PathTracing_CornellBox`](Projects/PathTracing_CornellBox/README.md) | 渐进路径追踪：红 / 绿侧墙、白色地面与顶面、矩形顶灯、三颗不同粗糙度金属球。工程启用硬件光追 + progressive GI（16 / 65536 / 12），并保存初始视角与曝光。 |
+| `Projects/RayTracing_Simple` | 硬件光追与实时 GI 的最小场景，用于验证 native D3D12 / hybrid DXR 路径。 |
 
 ## 渲染管线
 
