@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 17> resourceNames{{
+constexpr std::array<ResourceName, 20> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -30,6 +30,9 @@ constexpr std::array<ResourceName, 17> resourceNames{{
     {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
     {PipelineResource::ScreenSpaceHistory, "ScreenSpaceHistory"},
     {PipelineResource::ProbeAtlas, "ProbeAtlas"},
+    {PipelineResource::ScreenSpaceDirectHistory, "ScreenSpaceDirectHistory"},
+    {PipelineResource::ScreenSpaceDirectCurrent, "ScreenSpaceDirectCurrent"},
+    {PipelineResource::ScreenSpaceRawIndirect, "ScreenSpaceRawIndirect"},
 }};
 
 bool isForwardOnly(RenderPassKind kind) noexcept {
@@ -38,6 +41,7 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 
 bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
+        kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiComposite ||
         kind == RenderPassKind::ProbeUpdate;
 }
 
@@ -64,6 +68,8 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::HardwareTransport: return "Hardware transport";
     case RenderPassKind::GBuffer: return "G-Buffer";
     case RenderPassKind::DeferredLighting: return "Deferred lighting";
+    case RenderPassKind::ScreenSpaceGi: return "SSGI trace";
+    case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
     case RenderPassKind::ForwardBackground: return "Forward background";
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
@@ -94,7 +100,6 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     if (inputs.rayTriangleScene) directLightingReads |= PipelineResource::RayTriangleScene;
     if (inputs.rasterShadowMap) directLightingReads |= PipelineResource::ShadowMap;
     if (inputs.realtimeIndirect) directLightingReads |= PipelineResource::IndirectLighting;
-    if (inputs.screenSpaceGi) directLightingReads |= PipelineResource::ScreenSpaceHistory;
     if (inputs.probeGridGi) directLightingReads |= PipelineResource::ProbeAtlas;
 
     if (inputs.rasterShadowMap)
@@ -117,6 +122,17 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | directLightingReads,
             rasterColor);
+        if (inputs.screenSpaceGi) {
+            add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
+                PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
+                    PipelineResource::GBufferPosition | PipelineResource::ScreenSpaceDirectHistory,
+                PipelineResource::ScreenSpaceRawIndirect);
+            add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
+                PipelineResource::ScreenSpaceDirectCurrent | PipelineResource::ScreenSpaceRawIndirect |
+                    PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
+                    PipelineResource::GBufferNormal | PipelineResource::GBufferPosition,
+                rasterColor | PipelineResource::ScreenSpaceHistory);
+        }
         if (inputs.probeGridGi)
             add(RenderPassKind::ProbeUpdate, "DDGI probe update",
                 PipelineResource::SceneDepth |

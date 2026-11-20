@@ -110,8 +110,10 @@ struct alignas(16) RayConstants { XMFLOAT4 info; RayObject objects[32]; };
 struct alignas(16) GlobalIlluminationConstants {
     XMFLOAT4 viewport; // enabled, width, height, screen-space steps
     XMFLOAT4 screenSpace; // enabled, radius, thickness, intensity
+    XMFLOAT4X4 previousViewProjection;
+    XMFLOAT4 history; // valid, frame index, current-frame weight, spatial taps
 };
-static_assert(sizeof(GlobalIlluminationConstants) == 32);
+static_assert(sizeof(GlobalIlluminationConstants) == 112);
 struct alignas(16) ProbeConstants {
     XMFLOAT4 grid; // x, y, z, hysteresis
     XMFLOAT4 origin; // x, y, z, spacing
@@ -239,6 +241,10 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
         {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
         {"screenSpaceHistory", D3D_SIT_TEXTURE, 13, 0},
+        {"ssgiDirectHistory", D3D_SIT_TEXTURE, 16, 0},
+        {"ssgiDirectCurrent", D3D_SIT_TEXTURE, 17, 0},
+        {"ssgiRawIndirect", D3D_SIT_TEXTURE, 18, 0},
+        {"ssgiHistoryIndirect", D3D_SIT_TEXTURE, 19, 0},
         {"probeAtlasRead", D3D_SIT_TEXTURE, 14, 0},
         {"probeColorSource", D3D_SIT_TEXTURE, 15, 0},
         {"dofColor", D3D_SIT_TEXTURE, 12, 0},
@@ -300,6 +306,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"OutlineConstants","outlineParams",16,16},
         {"GlobalIlluminationConstants","giViewport",0,16},
         {"GlobalIlluminationConstants","giScreenSpace",16,16},
+        {"GlobalIlluminationConstants","giPreviousViewProjection",32,64},
+        {"GlobalIlluminationConstants","giHistory",96,16},
         {"ProbeConstants","probeGrid",0,16},
         {"ProbeConstants","probeOrigin",16,16},
         {"ProbeConstants","probeParameters",32,16},
@@ -378,7 +386,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         }
     }
     if (entry[0] == 'P' && entry[1] == 'S') {
-        const UINT outputs = std::strcmp(entry, "PSGBuffer") == 0 ? 3u : 1u;
+        const UINT outputs = std::strcmp(entry, "PSGBuffer") == 0 ? 3u
+            : std::strcmp(entry, "PSScreenSpaceGiComposite") == 0 ? 2u : 1u;
         if (desc.OutputParameters != outputs) { error = std::string(entry) + ": incompatible render-target count."; return false; }
         for (UINT i = 0; i < outputs; ++i) {
             D3D11_SIGNATURE_PARAMETER_DESC output{}; reflection->GetOutputParameterDesc(i, &output);
@@ -482,9 +491,13 @@ struct SceneRenderer::Impl {
     std::string diagnosticVS, diagnosticPS;
     std::shared_ptr<d3d12::D3D12RhiDevice> native12;
     rhi::TextureHandle swapchainImage, sceneColorImage, sceneDepthImage, shadowImage;
-    // Last frame's resolved raster colour for deferred SSGI. Sampled by the
-    // deferred pass at t12; copied from the final scene colour after present.
-    rhi::TextureHandle ssgiHistoryImage;
+    // SSGI: previous/current direct colour, raw current indirect, and a
+    // ping-pong denoised indirect history. Keeping indirect out of the colour
+    // sampled by the trace avoids the feedback-firefly problem.
+    rhi::TextureHandle ssgiDirectHistoryImage, ssgiDirectCurrentImage;
+    rhi::TextureHandle ssgiRawImage, ssgiIndirectHistoryImage, ssgiIndirectHistoryWriteImage;
+    XMFLOAT4X4 ssgiPreviousViewProjection{};
+    std::uint32_t ssgiFrameCounter = 0;
     // The native DXR module owns and transitions its HDR indirect image; the
     // raster lighting samples an RHI-owned copy so both state machines stay
     // independent.
@@ -496,7 +509,7 @@ struct SceneRenderer::Impl {
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 12> pixelModules;
+    std::array<rhi::ShaderHandle, 14> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
     rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
@@ -591,7 +604,9 @@ struct SceneRenderer::Impl {
     std::uint32_t width = 0, height = 0;
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
-        rhi::TextureHandle colorImage, depthImage, historyImage, probeAtlasA, probeAtlasB;
+        rhi::TextureHandle colorImage, depthImage;
+        rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiHistoryRead, ssgiHistoryWrite;
+        rhi::TextureHandle probeAtlasA, probeAtlasB;
         std::array<rhi::TextureHandle, 3> images;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
@@ -636,7 +651,11 @@ struct SceneRenderer::Impl {
             auto& retired = retiredSceneTargets.emplace_back();
             retired.colorImage = std::move(sceneColorImage);
             retired.depthImage = std::move(sceneDepthImage);
-            retired.historyImage = std::move(ssgiHistoryImage);
+            retired.ssgiDirectHistory = std::move(ssgiDirectHistoryImage);
+            retired.ssgiDirectCurrent = std::move(ssgiDirectCurrentImage);
+            retired.ssgiRaw = std::move(ssgiRawImage);
+            retired.ssgiHistoryRead = std::move(ssgiIndirectHistoryImage);
+            retired.ssgiHistoryWrite = std::move(ssgiIndirectHistoryWriteImage);
             retired.probeAtlasA = std::move(probeAtlasA);
             retired.probeAtlasB = std::move(probeAtlasB);
             retired.images = std::move(gbufferImages);
@@ -703,6 +722,9 @@ struct SceneRenderer::Impl {
             !pixelShader("PSAntiAliasingPresent",aaPixel)) return false;
         ComPtr<ID3D11PixelShader> probeUpdatePS;
         if (!pixelShader("PSProbeUpdate", probeUpdatePS)) return false;
+        ComPtr<ID3D11PixelShader> ssgiTracePS, ssgiCompositePS;
+        if (!pixelShader("PSScreenSpaceGi", ssgiTracePS) ||
+            !pixelShader("PSScreenSpaceGiComposite", ssgiCompositePS)) return false;
         if (device) {
             progress.report(0.70f, "Preparing selection outline");
             if (!outline) outline = std::make_unique<SelectionOutlinePass>();
@@ -2060,6 +2082,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     giData.screenSpace = XMFLOAT4(ssgiHistoryReady ? 1.0f : 0.0f,
         settings.globalIllumination.screenSpaceRadius, settings.globalIllumination.screenSpaceThickness,
         settings.globalIllumination.indirectDiffuseIntensity);
+    giData.previousViewProjection = state.ssgiPreviousViewProjection;
+    giData.history = XMFLOAT4(ssgiHistoryReady ? 1.0f : 0.0f,
+        static_cast<float>(state.ssgiFrameCounter), 0.1f, 1.0f);
     state.uploadConstants(state.giBuffer, giData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
     ProbeConstants probeData{};
@@ -2069,10 +2094,15 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         probeSettings.probeHysteresis);
     const float probeSpacing = std::max(probeSettings.probeSpacing, 0.01f);
     const XMFLOAT3 probeCenter{settings.cameraTarget[0], settings.cameraTarget[1], settings.cameraTarget[2]};
+    // Snap the grid origin to a world-space spacing lattice so probes do not
+    // swim every frame while the orbit target moves within one probe cell.
+    const auto snapProbe = [probeSpacing](float value) {
+        return std::floor(value / probeSpacing + 0.5f) * probeSpacing;
+    };
     probeData.origin = XMFLOAT4(
-        probeCenter.x - (probeSettings.probeGridX - 1) * probeSpacing * 0.5f,
-        probeCenter.y - (probeSettings.probeGridY - 1) * probeSpacing * 0.5f,
-        probeCenter.z - (probeSettings.probeGridZ - 1) * probeSpacing * 0.5f, probeSpacing);
+        snapProbe(probeCenter.x - (probeSettings.probeGridX - 1) * probeSpacing * 0.5f),
+        snapProbe(probeCenter.y - (probeSettings.probeGridY - 1) * probeSpacing * 0.5f),
+        snapProbe(probeCenter.z - (probeSettings.probeGridZ - 1) * probeSpacing * 0.5f), probeSpacing);
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
         probeGridGi && state.probeAtlasValid ? 1.0f : 0.0f, probeSettings.indirectDiffuseIntensity, 0.0f);
     state.uploadConstants(state.probeBuffer, probeData);
@@ -2118,6 +2148,15 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const auto destinationImage = (settings.editorViewport || settings.offscreenTarget)
         ? state.sceneColorImage : state.swapchainImage;
     const auto rasterDestinationImage = antiAliasing ? state.aaSourceImage : destinationImage;
+    const auto copyColorTexture = [&](rhi::TextureHandle destination, rhi::TextureHandle source) {
+        if (!destination || !source) return;
+        if (state.native12) {
+            state.native12->copyTextureRegionTo(destination, 0, 0, source, 0, 0,
+                state.sceneWidth, state.sceneHeight);
+        } else if (state.context) {
+            state.context->CopyResource(d3d11::nativeTexture(destination), d3d11::nativeTexture(source));
+        }
+    };
     const std::array<float, 4> clearColor{backgroundClear[0], backgroundClear[1], backgroundClear[2], backgroundClear[3]};
     struct RhiPassScope {
         Impl& state;
@@ -2278,14 +2317,44 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 rasterPass.reads.push_back({state.shadowImage, 3});
             if (contains(pass.reads, PipelineResource::IndirectLighting) && state.nativeIndirectCopy)
                 rasterPass.reads.push_back({state.nativeIndirectCopy, 9});
-            if (screenSpaceGi && state.ssgiHistoryImage)
-                rasterPass.reads.push_back({state.ssgiHistoryImage, 13});
             if (probeGridGi)
                 rasterPass.reads.push_back({state.probeAtlasA, 14});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(2, false);
             commands.endRenderPass();
             releaseRasterInputs();
+            break;
+        }
+        case RenderPassKind::ScreenSpaceGi: {
+            state.beginDiagnosticPass(pass.name);
+            copyColorTexture(state.ssgiDirectCurrentImage, rasterDestinationImage);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{state.ssgiRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
+                {state.ssgiDirectHistoryImage, 16}};
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(12, false);
+            commands.endRenderPass();
+            break;
+        }
+        case RenderPassKind::ScreenSpaceGiComposite: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {
+                {rasterDestinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor},
+                {state.ssgiIndirectHistoryWriteImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
+                {state.ssgiDirectCurrentImage, 17}, {state.ssgiRawImage, 18},
+                {state.ssgiIndirectHistoryImage, 19}};
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(13, false);
+            commands.endRenderPass();
+            copyColorTexture(state.ssgiIndirectHistoryImage, state.ssgiIndirectHistoryWriteImage);
+            copyColorTexture(state.ssgiDirectHistoryImage, state.ssgiDirectCurrentImage);
+            state.ssgiHistoryValid = true;
+            ++state.ssgiFrameCounter;
             break;
         }
         case RenderPassKind::ProbeUpdate: {
@@ -2473,22 +2542,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         const bool complete = !failed(state.native12->device()->GetDeviceRemovedReason(), "D3D12 render/device status", error);
         geometryFrameScope.completed = complete;
         rhiPassScope.complete = complete;
-        if (screenSpaceGi && state.ssgiHistoryImage) {
-            state.native12->copyTextureRegionTo(state.ssgiHistoryImage, 0, 0, destinationImage,
-                0, 0, state.sceneWidth, state.sceneHeight);
-            state.ssgiHistoryValid = true;
-        }
+        if (screenSpaceGi) state.ssgiPreviousViewProjection = data.viewProjection;
         return complete;
     }
     if (settings.editorViewport) {
         backbuffer = state.backbuffer.Get();
         state.context->ClearRenderTargetView(backbuffer, editorClear);
     }
-    if (screenSpaceGi && state.ssgiHistoryImage && state.context && destinationImage) {
-        state.context->CopyResource(d3d11::nativeTexture(state.ssgiHistoryImage),
-            d3d11::nativeTexture(destinationImage));
-        state.ssgiHistoryValid = true;
-    }
+    if (screenSpaceGi) state.ssgiPreviousViewProjection = data.viewProjection;
     state.context->OMSetRenderTargets(1, &backbuffer, nullptr);
     const HRESULT removed = state.device->GetDeviceRemovedReason();
     const bool complete = !failed(removed, "Render/device status", error);

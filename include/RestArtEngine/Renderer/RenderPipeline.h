@@ -62,6 +62,9 @@ enum class PipelineResource : std::uint64_t {
     PreviousAntiAliasingHistory = 1ull << 14,
     ScreenSpaceHistory = 1ull << 15,
     ProbeAtlas = 1ull << 16,
+    ScreenSpaceDirectHistory = 1ull << 17,
+    ScreenSpaceDirectCurrent = 1ull << 18,
+    ScreenSpaceRawIndirect = 1ull << 19,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -90,6 +93,8 @@ enum class RenderPassKind : std::uint8_t {
     HardwareTransport,
     GBuffer,
     DeferredLighting,
+    ScreenSpaceGi,
+    ScreenSpaceGiComposite,
     ProbeUpdate,
     ForwardBackground,
     ForwardGeometry,
@@ -140,6 +145,7 @@ struct PipelineBuildInputs {
 // input instead of demanding a producer pass.
 inline constexpr PipelineResource pipelineFrameInputs = PipelineResource::RayTriangleScene |
     PipelineResource::PreviousAntiAliasingHistory | PipelineResource::ScreenSpaceHistory |
+    PipelineResource::ScreenSpaceDirectHistory | PipelineResource::ScreenSpaceDirectCurrent |
     PipelineResource::ProbeAtlas;
 
 [[nodiscard]] RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs);

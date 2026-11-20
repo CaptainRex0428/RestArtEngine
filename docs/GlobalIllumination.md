@@ -98,13 +98,18 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 ### Screen space (SSGI)
 
-SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 native D3D12 的 **Deferred** 路径运行；Forward 请求会报告不可用。它使用当前帧的 position／normal G-buffer 做世界空间屏幕追踪，命中点采样**上一帧**已着色的场景颜色，因此首帧或 resize 后没有贡献，快速相机运动保留一帧历史滞后。`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；`Indirect diffuse intensity` 作为强度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 native D3D12 的 **Deferred** 路径运行；Forward 请求会报告不可用。它拆成两个 pass：
 
-SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并使用独立的上一帧颜色资源；它不做时域重投影，越过遮挡边界仍可能出现拖影。
+1. `SSGI trace`：用当前帧 position／normal G-buffer 做世界空间屏幕追踪，命中点采样**上一帧 direct-lit colour 副本**（不包含上一帧 SSGI），因此不会采样自身形成能量反馈；第一帧无直接历史时输出 0。
+2. `SSGI composite`：对 raw indirect 做 3×3 几何加权空域滤波，再用当前世界位置 + 上一帧 ViewProjection 重投影上一帧 indirect history、clamp 到当前邻域后做时域混合；最后按接收面 albedo 调制并与当前 direct colour 相加。
+
+`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；`Indirect diffuse intensity` 作为强度。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+
+SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并在 display-space 颜色上合成；历史为独立 indirect buffer，不读取最终 scene colour，因此不会再出现首版的自反馈 firefly。快速相机运动/屏幕外信息仍限制屏幕空间 GI 的准确性。
 
 ### Probe grid (DDGI)
 
-DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染器以 `cameraTarget` 为中心建立 `probeGridX × probeGridY × probeGridZ` 的世界空间 probe 网格，存储在一张 RGBA16F 的 2D atlas（width = X×Z，height = Y）中。每帧的 `DDGI probe update` 全屏 pass 将每个 probe 投影到当前 G-buffer，命中时从当前帧着色颜色按法线余弦得到辐照度，再用 `probe hysteresis` 与上一帧 atlas 混合；Deferred 光照用三线性权重从上一帧 atlas 采样 8 个相邻 probe 作为漫反射间接光。
+DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染器以 `cameraTarget` 为中心建立 `probeGridX × probeGridY × probeGridZ` 的世界空间 probe 网格，网格原点对齐到 `probeSpacing` 世界格点以避免相机目标小幅移动时 probe 漂移；probe 存在 RGBA16F 的 2D atlas（width = X×Z，height = Y）中。每帧的 `DDGI probe update` 全屏 pass 将每个 probe 投影到当前 G-buffer，读取 3×3 屏幕 footprint 的法线余弦加权辐照度，再用 `probe hysteresis` 与上一帧 atlas 混合；atlas alpha 记录 probe 有效置信度，Deferred 光照按三线性权重采样 8 个相邻 probe 并用置信度加权作为漫反射间接光。
 
 限制：probe 更新是屏幕空间可见性近似，不是逐 probe 光线追踪；被遮挡或在屏幕外的 probe 保留旧值；网格固定相机目标附近，移动相机时 probe 世界位置随帧重建，可能出现滞后；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 

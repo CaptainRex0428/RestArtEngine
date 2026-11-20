@@ -74,9 +74,15 @@ cbuffer GlobalIlluminationConstants : register(b6)
     float4 giViewport; // effective realtime GI, local width, local height, reserved
     // enabled, world-space march radius, thickness, artistic intensity
     float4 giScreenSpace;
+    row_major float4x4 giPreviousViewProjection;
+    // history valid, frame index, current-frame weight, spatial taps
+    float4 giHistory;
 };
 Texture2D<float4> indirectLightingBuffer : register(t9);
-Texture2D<float4> screenSpaceHistory : register(t13);
+Texture2D<float4> ssgiDirectHistory : register(t16);
+Texture2D<float4> ssgiDirectCurrent : register(t17);
+Texture2D<float4> ssgiRawIndirect : register(t18);
+Texture2D<float4> ssgiHistoryIndirect : register(t19);
 Texture2D<float4> probeAtlasRead : register(t14);
 Texture2D<float4> probeColorSource : register(t15);
 cbuffer ProbeConstants : register(b9)
@@ -796,15 +802,16 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 }
 
 #if !defined(RAE_HARDWARE_RAYTRACING)
-// Screen-space diffuse GI. The depth/normal buffer is current; the radiance
-// source is last frame's lit colour, so fast camera cuts keep one frame of lag.
-float3 ScreenSpaceIndirect(uint2 pixel, float3 position, float3 normal)
+// Screen-space diffuse GI trace. The depth/normal buffer and previous-frame
+// direct colour are current; the indirect result is accumulated separately so
+// the trace never samples its own previous indirect contribution.
+float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
 {
-    if (giScreenSpace.x < 0.5 || giViewport.w < 0.5) return 0.0;
+    if (giScreenSpace.x < 0.5 || giHistory.x < 0.5 || giViewport.w < 0.5) return 0.0;
     uint steps = max((uint)giViewport.w, 1u);
     float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
     float3 bitangent = cross(normal, tangent);
-    float seed = frac(sin(dot(float2(pixel), float2(12.9898, 78.233))) * 43758.5453);
+    float seed = frac(sin(dot(float2(pixel) + giHistory.y * 37.0, float2(12.9898, 78.233))) * 43758.5453);
     float3 sum = 0.0;
     float weight = 0.0;
     [loop] for (uint i = 0; i < steps; ++i)
@@ -824,11 +831,96 @@ float3 ScreenSpaceIndirect(uint2 pixel, float3 position, float3 normal)
         if (dot(delta, delta) > giScreenSpace.z * giScreenSpace.z) continue;
         float4 sceneNormal = normalBuffer.SampleLevel(gbufferSampler, uv, 0);
         if (dot(normalize(sceneNormal.xyz), normal) < 0.25) continue;
-        sum += screenSpaceHistory.SampleLevel(gbufferSampler, uv, 0).rgb;
+        float3 radiance = ssgiDirectHistory.SampleLevel(gbufferSampler, uv, 0).rgb;
+        // Reject emitter-like white pixels; with no G-buffer object/emission id
+        // this is the cheapest guard against SSGI sampling a light fixture as
+        // ordinary diffuse radiance.
+        float luminance = dot(radiance, float3(0.2126, 0.7152, 0.0722));
+        if (luminance > 0.85) continue;
+        sum += min(radiance, 0.5);
         weight += 1.0;
     }
-    return weight > 0.0 ? sum / weight : 0.0;
+    return min(weight > 0.0 ? sum / weight : 0.0, 16.0);
 }
+
+float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
+{
+    int3 pixel = int3(int2(input.position.xy), 0);
+    float4 position = positionBuffer.Load(pixel);
+    if (position.w < 0.5) return 0.0;
+    float3 normal = normalize(normalBuffer.Load(pixel).xyz);
+    return float4(ScreenSpaceTrace(uint2(pixel.xy), position.xyz, normal), 1.0);
+}
+
+struct SSGICompositeOutput
+{
+    float4 color : SV_TARGET0;
+    float4 history : SV_TARGET1;
+};
+
+SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
+{
+    SSGICompositeOutput output;
+    int3 pixel = int3(int2(input.position.xy), 0);
+    float4 position = positionBuffer.Load(pixel);
+    if (position.w < 0.5)
+    {
+        output.color = Background(input.uv);
+        output.history = 0.0;
+        return output;
+    }
+    float4 normal = normalBuffer.Load(pixel);
+    float3 normalValue = normalize(normal.xyz);
+    float3 raw = ssgiRawIndirect.Load(pixel).rgb;
+    float3 spatialSum = raw;
+    float spatialWeight = 1.0;
+    float3 low = raw;
+    float3 high = raw;
+    int2 coordinate = int2(pixel.xy);
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        if (x == 0 && y == 0) continue;
+        int2 neighbour = coordinate + int2(x, y);
+        if (any(neighbour < 0) || any(neighbour >= int2(giViewport.yz))) continue;
+        int3 neighbourPixel = int3(neighbour, 0);
+        float4 otherPosition = positionBuffer.Load(neighbourPixel);
+        if (otherPosition.w < 0.5) continue;
+        float4 otherNormal = normalBuffer.Load(neighbourPixel);
+        float cosine = dot(normalValue, normalize(otherNormal.xyz));
+        if (cosine < 0.9) continue;
+        float3 delta = otherPosition.xyz - position.xyz;
+        float plane = abs(dot(delta, normalValue));
+        if (plane > 0.75) continue;
+        float3 sample = ssgiRawIndirect.Load(neighbourPixel).rgb;
+        float weight = 1.0 / (1.0 + length(delta) + abs(x) + abs(y));
+        spatialSum += sample * weight;
+        spatialWeight += weight;
+        low = min(low, sample);
+        high = max(high, sample);
+    }
+    float3 indirect = spatialSum / max(spatialWeight, 1e-5);
+    if (giHistory.x > 0.5)
+    {
+        float4 clip = mul(float4(position.xyz, 1.0), giPreviousViewProjection);
+        if (clip.w > 0.0001)
+        {
+            float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+            if (all(uv > 0.0) && all(uv < 1.0))
+            {
+                float3 history = ssgiHistoryIndirect.SampleLevel(gbufferSampler, uv, 0).rgb;
+                history = clamp(history, low, high);
+                indirect = lerp(history, indirect, saturate(giHistory.z));
+            }
+        }
+    }
+    output.history = float4(indirect, 1.0);
+    float3 direct = ssgiDirectCurrent.Load(pixel).rgb;
+    indirect *= albedoBuffer.Load(pixel).rgb;
+    output.color = float4(saturate(direct + indirect * giScreenSpace.w), 1.0);
+    return output;
+}
+
 float3 ProbeIrradiance(float3 position)
 {
     if (probeParameters.x < 0.5 || probeParameters.y < 0.5) return 0.0;
@@ -846,8 +938,9 @@ float3 ProbeIrradiance(float3 position)
         float weight = (x ? fraction.x : 1.0 - fraction.x) *
             (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
         int2 atlas = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
-        sum += probeAtlasRead.Load(int3(atlas, 0)).rgb * weight;
-        weightSum += weight;
+        float4 sample = probeAtlasRead.Load(int3(atlas, 0));
+        sum += sample.rgb * weight * sample.a;
+        weightSum += weight * sample.a;
     }
     return sum / max(weightSum, 1e-5) * probeParameters.z;
 }
@@ -870,10 +963,27 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
     if (scenePosition.w < 0.5 || distance(scenePosition.xyz, world) > max(probeOrigin.w * 2.0, 0.5))
         return previous;
-    float4 sceneNormal = normalBuffer.SampleLevel(gbufferSampler, uv, 0);
-    float3 toProbe = normalize(world - scenePosition.xyz);
-    float cosine = saturate(dot(normalize(sceneNormal.xyz), toProbe));
-    float3 radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb * cosine;
+    // Average a small screen-space footprint so a single bright or stale
+    // pixel cannot define an entire probe.
+    float2 texel = 1.0 / max(giViewport.zw, float2(1.0, 1.0));
+    float3 radiance = 0.0;
+    float totalWeight = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        float2 sampleUv = uv + float2(x, y) * texel;
+        if (any(sampleUv < 0.0) || any(sampleUv > 1.0)) continue;
+        float4 localPosition = positionBuffer.SampleLevel(gbufferSampler, sampleUv, 0);
+        if (localPosition.w < 0.5) continue;
+        float4 localNormal = normalBuffer.SampleLevel(gbufferSampler, sampleUv, 0);
+        float3 toProbe = normalize(world - localPosition.xyz);
+        float localCosine = saturate(dot(normalize(localNormal.xyz), toProbe));
+        float localWeight = (1.0 / (1.0 + length(localPosition.xyz - scenePosition.xyz))) * (1.0 - 0.12 * (abs(x) + abs(y)));
+        radiance += probeColorSource.SampleLevel(gbufferSampler, sampleUv, 0).rgb * localCosine * localWeight;
+        totalWeight += localWeight;
+    }
+    if (totalWeight <= 0.0) return previous;
+    radiance /= totalWeight;
     float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
     return float4(lerp(previous.rgb, radiance, blend), 1.0);
 }
@@ -893,8 +1003,6 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
-    if (giScreenSpace.x > 0.5)
-        color.rgb = saturate(color.rgb + ScreenSpaceIndirect(uint2(pixel.xy), position.xyz, normalize(normal.xyz)) * giScreenSpace.w);
     if (probeParameters.x > 0.5)
         color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz));
 #endif

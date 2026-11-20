@@ -11,8 +11,16 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         }
         candidate.colorImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA8Unorm, true, "Scene color"});
-        candidate.historyImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
-            rhi::Format::RGBA8Unorm, true, "SSGI previous color"});
+        candidate.ssgiDirectHistory = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA8Unorm, true, "SSGI direct history"});
+        candidate.ssgiDirectCurrent = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA8Unorm, true, "SSGI current direct color"});
+        candidate.ssgiRaw = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA16Float, true, "SSGI raw indirect"});
+        candidate.ssgiHistoryRead = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA16Float, true, "SSGI indirect history read"});
+        candidate.ssgiHistoryWrite = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA16Float, true, "SSGI indirect history write"});
         candidate.probeAtlasA = rhiDevice->createTexture({1024, 32, 1,
             rhi::Format::RGBA16Float, true, "DDGI probe atlas A"});
         candidate.probeAtlasB = rhiDevice->createTexture({1024, 32, 1,
@@ -34,7 +42,11 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         retireSceneTargets();
         sceneColorImage = std::move(candidate.colorImage);
         sceneDepthImage = std::move(candidate.depthImage);
-        ssgiHistoryImage = std::move(candidate.historyImage);
+        ssgiDirectHistoryImage = std::move(candidate.ssgiDirectHistory);
+        ssgiDirectCurrentImage = std::move(candidate.ssgiDirectCurrent);
+        ssgiRawImage = std::move(candidate.ssgiRaw);
+        ssgiIndirectHistoryImage = std::move(candidate.ssgiHistoryRead);
+        ssgiIndirectHistoryWriteImage = std::move(candidate.ssgiHistoryWrite);
         probeAtlasA = std::move(candidate.probeAtlasA);
         probeAtlasB = std::move(candidate.probeAtlasB);
         gbufferImages = std::move(candidate.images);

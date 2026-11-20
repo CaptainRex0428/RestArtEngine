@@ -67,7 +67,10 @@
 | `SelectionMask` | 编辑器描边遮罩（可见 / 遮挡双通道） | 描边遮罩 Pass |
 | `DepthOfFieldSource` | 景深 Pass 的内部源色副本 | 景深 Pass |
 | `FrameCapture` | 帧检查器快照 | 捕获 Pass |
-| `ScreenSpaceHistory` | 上一帧已着色颜色，SSGI 采样源 | **帧开始前**由上一帧复制，属于外部输入 |
+| `ScreenSpaceHistory` | 上一帧降噪后的 SSGI indirect 历史 | SSGI composite |
+| `ScreenSpaceDirectHistory` | 上一帧 direct-lit colour，供 SSGI trace 采样 | **帧开始前**由上一帧复制，属于外部输入 |
+| `ScreenSpaceDirectCurrent` | 当前帧 direct-lit colour 副本 | **SSGI trace 前**复制，属于外部输入 |
+| `ScreenSpaceRawIndirect` | 当前帧 SSGI trace 的 raw indirect | SSGI trace |
 | `ProbeAtlas` | DDGI 动态 probe 辐照度 atlas（RGBA16F 2D） | DDGI probe update Pass |
 
 几个刻意的取舍：
@@ -90,13 +93,15 @@
 | 1 | `Shadow map` | 光栅阴影方案且方向光需要阴影 | — | `ShadowMap` |
 | 2 | `Hardware ray tracing transport` | DXR 本帧执行 | — | `HardwareImage`（+ 实时模式 `IndirectLighting`） |
 | 3 | `GBuffer` | 总是 | — | 三张 G-buffer + `SceneDepth` |
-| 4 | `Deferred lighting / debug` | 总是 | 三张 G-buffer + 可选 `ShadowMap` / `RayTriangleScene` / `IndirectLighting` / `ScreenSpaceHistory` / `ProbeAtlas` | `SceneColor` |
-| 5 | `DDGI probe update` | DDGI 请求且 Deferred 执行 | `SceneColor`、`SceneDepth`、`GBufferNormal` | `ProbeAtlas` |
-| 6 | `Hardware image resolve` | 声明了硬件传输 | `HardwareImage` | `SceneColor` |
-| 7 | `Screen-space depth of field` | 镜头启用 DOF 且不在数据视图 | `SceneColor`、`SceneDepth` | `SceneColor`、`DepthOfFieldSource` |
-| 8 | `Selection masks` | 编辑器有选中 | `SceneDepth` | `SelectionMask` |
-| 9 | `Selection composite` | 编辑器有选中 | `SceneColor`、`SceneDepth`、`SelectionMask` | `SceneColor` |
-| 10 | `Frame capture` | 请求了帧捕获 | `SceneColor`、`SceneDepth`、三张 G-buffer | `FrameCapture` |
+| 4 | `Deferred lighting / debug` | 总是 | 三张 G-buffer + 可选 `ShadowMap` / `RayTriangleScene` / `IndirectLighting` / `ProbeAtlas` | `SceneColor` |
+| 5 | `SSGI trace` | SSGI 请求且 Deferred 执行 | `SceneDepth`、`GBufferNormal/Position`、`ScreenSpaceDirectHistory` | `ScreenSpaceRawIndirect` |
+| 6 | `SSGI composite` | 同上 | `ScreenSpaceDirectCurrent`、`ScreenSpaceRawIndirect`、`ScreenSpaceHistory`、G-buffer | `SceneColor`、`ScreenSpaceHistory` |
+| 7 | `DDGI probe update` | DDGI 请求且 Deferred 执行 | `SceneColor`、`SceneDepth`、`GBufferNormal` | `ProbeAtlas` |
+| 8 | `Hardware image resolve` | 声明了硬件传输 | `HardwareImage` | `SceneColor` |
+| 9 | `Screen-space depth of field` | 镜头启用 DOF 且不在数据视图 | `SceneColor`、`SceneDepth` | `SceneColor`、`DepthOfFieldSource` |
+| 10 | `Selection masks` | 编辑器有选中 | `SceneDepth` | `SelectionMask` |
+| 11 | `Selection composite` | 编辑器有选中 | `SceneColor`、`SceneDepth`、`SelectionMask` | `SceneColor` |
+| 12 | `Frame capture` | 请求了帧捕获 | `SceneColor`、`SceneDepth`、三张 G-buffer | `FrameCapture` |
 
 ### 4.2 Forward
 
