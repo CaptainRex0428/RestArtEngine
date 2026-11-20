@@ -1078,7 +1078,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
-    if (debugMode != 12 && probeParameters.x > 0.5)
+    if (probeParameters.x > 0.5)
         color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz) * albedo.rgb * 2.0);
 #endif
     return color;
