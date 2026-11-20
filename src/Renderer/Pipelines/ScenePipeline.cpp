@@ -127,12 +127,13 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         if (inputs.screenSpaceGi) {
             add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition | PipelineResource::ScreenSpaceDirectHistory,
+                    PipelineResource::GBufferPosition | PipelineResource::ScreenSpaceDirectCurrent,
                 PipelineResource::ScreenSpaceRawIndirect);
             add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
                 PipelineResource::ScreenSpaceDirectCurrent | PipelineResource::ScreenSpaceRawIndirect |
                     PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
-                    PipelineResource::GBufferNormal | PipelineResource::GBufferPosition,
+                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                    PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
         if (inputs.probeGridGi && !inputs.hardwareTransport)

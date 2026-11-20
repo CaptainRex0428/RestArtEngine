@@ -2060,11 +2060,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         (settings.debugView == 0 || debugGiIndirect || debugGiProbes) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
-        settings.path == RenderPath::Deferred && !hardwareTransport &&
-        // On a DXR-capable backend the screen-space probe update is only a
-        // compatibility path. Do not silently run it when the user can enable
-        // ray-traced probes; strict D3D11 and non-DXR adapters keep the fallback.
-        !dxrProbeCapable;
+        settings.path == RenderPath::Deferred && !hardwareTransport;
     const bool probeGridGi = rasterProbeGi || hardwareProbeGi;
     const bool giDebugProbes = debugGiProbes && probeGridGi;
     state.probeDebugOverlay = giDebugProbes;
@@ -2220,7 +2216,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
         probeGridGi && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
-        probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : 0.0f);
+        probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : 0.0f));
     state.probeDebugVertexCount = 0;
     if (giDebugProbes && state.probeDebugPipeline) {
         std::vector<ProbeDebugVertex> vertices;
@@ -2519,7 +2515,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.name = pass.name;
             rasterPass.colors = {{state.ssgiRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
-                {state.ssgiDirectHistoryImage, 16}};
+                {state.ssgiDirectCurrentImage, 17}};
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(12, false);
             commands.endRenderPass();
@@ -2532,7 +2528,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.colors = {
                 {rasterDestinationImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, clearColor},
                 {state.ssgiIndirectHistoryWriteImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
-            rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
+            rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
+                {state.gbufferImages[2], 2},
                 {state.ssgiDirectCurrentImage, 17}, {state.ssgiRawImage, 18},
                 {state.ssgiIndirectHistoryImage, 19}};
             commands.beginRenderPass(rasterPass);
@@ -2935,7 +2932,7 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         const bool rayTracedProbe = impl_->hardwareActive &&
             impl_->hardwareStatus.find("Ray-traced DDGI") != std::string::npos;
         status.reason = impl_->lastProbeGridGi
-            ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Realtime DDGI (raster fallback)") +
+            ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Software ray-traced DDGI") +
                 " updates a scene-fitted diffuse probe atlas. Probe spacing " +
                 std::to_string(impl_->probeEffectiveSpacing) + " m" +
                 (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".") +

@@ -4,7 +4,7 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 | 维度 | 当前选择 | 含义 |
 | --- | --- | --- |
-| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪；DDGI 在 DXR 后端逐 probe 光线追踪，strict D3D11 退回屏幕空间更新。 |
+| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 是否计算间接光照，以及采用的光传输算法。Path tracing 走 DXR 路径样本；SSGI 走光栅屏幕空间追踪；DDGI 在 DXR 后端逐 probe 光线追踪，无 DXR 时使用软件光线追踪 fallback。 |
 | 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI／DDGI 固定为实时。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
 | SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
@@ -100,18 +100,18 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 native D3D12 的 **Deferred** 路径运行；Forward 请求会报告不可用。它拆成两个 pass：
 
-1. `SSGI trace`：用当前帧 position／normal G-buffer 做世界空间屏幕追踪，命中点采样**上一帧 direct-lit colour 副本**（不包含上一帧 SSGI），因此不会采样自身形成能量反馈；第一帧无直接历史时输出 0。
-2. `SSGI composite`：对 raw indirect 做 3×3 几何加权空域滤波，再用当前世界位置 + 上一帧 ViewProjection 重投影上一帧 indirect history、clamp 到当前邻域后做时域混合；最后按接收面 albedo 调制并与当前 direct colour 相加。
+1. `SSGI trace`：用当前帧 position G-buffer 做世界空间屏幕追踪，命中点采样**当前帧 direct-lit colour 副本**（在 SSGI composite 写入前复制，不含 SSGI），因此不会采样自身形成能量反馈。
+2. `SSGI composite`：对 raw indirect 做 3×3 几何加权空域滤波，再用当前世界位置 + 上一帧 ViewProjection 重投影上一帧 indirect history、clamp 到当前邻域后做时域混合；最后按接收面 albedo 调制并与当前 direct colour 相加。composite 显式绑定 albedo；debug `GI indirect` 视图保留 direct 输出给 trace 使用，再只显示间接结果。
 
-`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；`Indirect diffuse intensity` 作为强度。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；厚度有 `0.5 * radius` 的最小值，避免小 thickness 在远距离/大场景把所有样本拒绝导致全黑。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
 
 SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并在 display-space 颜色上合成；历史为独立 indirect buffer，不读取最终 scene colour，因此不会再出现首版的自反馈 firefly。快速相机运动/屏幕外信息仍限制屏幕空间 GI 的准确性。
 
 ### Probe grid (DDGI)
 
-DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。只有 strict D3D11 或 DXR 不可用的适配器才保留屏幕空间 3×3 footprint fallback；DXR-capable 后端如果关闭 Hardware ray tracing，DDGI 会报告不可用，而不是静默走慢速 fallback。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
+DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。关闭 Hardware ray tracing 时，DDGI 使用**软件光线追踪 fallback**：`PSProbeUpdate` 对每个 probe 发 8 条球面方向，在屏幕空间按 world-space position buffer 做最多 8 步 ray march，命中点采样当前 direct-lit colour 并积分；同样使用 hysteresis。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
 
-限制：DXR 后端为逐 probe 光线追踪；strict D3D11 fallback 仍是屏幕空间投影更新，被遮挡/屏幕外 probe 保留旧值。DXR-capable 后端关闭 Hardware ray tracing 时 DDGI 不可用（避免静默走慢速 fallback）。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas，属于近似但仍比单像素投影更完整的 probe 积分。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
 ### Debug views
 

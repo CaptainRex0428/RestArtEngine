@@ -106,13 +106,15 @@ void screenSpaceGiInputs() {
     const auto composite = indexOf(pipeline, RenderPassKind::ScreenSpaceGiComposite);
     require(trace < pipeline.passes.size() && composite < pipeline.passes.size(),
         "SSGI trace/composite passes are missing.");
-    require(contains(passAt(pipeline, trace).reads, PipelineResource::ScreenSpaceDirectHistory),
-        "SSGI trace must declare previous direct-colour history.");
+    require(contains(passAt(pipeline, trace).reads, PipelineResource::ScreenSpaceDirectCurrent),
+        "SSGI trace must declare the current direct-lit colour it integrates.");
     require(contains(passAt(pipeline, trace).writes, PipelineResource::ScreenSpaceRawIndirect),
         "SSGI trace must publish raw indirect.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceRawIndirect) &&
         contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceHistory),
         "SSGI composite must consume raw indirect and denoised history.");
+    require(contains(passAt(pipeline, composite).reads, PipelineResource::GBufferAlbedo),
+        "SSGI composite must read receiver albedo.");
     require(contains(passAt(pipeline, composite).writes, PipelineResource::ScreenSpaceHistory),
         "SSGI composite must publish the next indirect history.");
     require(validatePipeline(pipeline).valid, "SSGI pipeline is inconsistent.");

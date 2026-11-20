@@ -147,7 +147,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             applyEdit(ProjectRenderingEdit::HardwareRayTracing);
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("Path tracing and ray-traced DDGI probes require hardware ray tracing. SSGI is a screen-space raster method and does not. Disabling hardware tracing disables path-traced effects; on DXR-capable backends DDGI reports unavailable instead of running its slow raster fallback.");
+        ImGui::TextWrapped("Path tracing and full DDGI probe tracing use hardware ray tracing. SSGI is screen-space raster and does not. With hardware tracing off, DDGI runs its software ray-traced fallback. Disabling hardware tracing disables path-traced effects.");
         const bool giEnabled = gi.method != renderer::GlobalIlluminationMethod::Disabled;
         const bool realtimeGi = giEnabled && gi.mode == renderer::GlobalIlluminationMode::Realtime;
         const bool reflectionsEditable = hardware && !giEnabled;
@@ -195,11 +195,11 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
         }
         if (gi.method == renderer::GlobalIlluminationMethod::ProbeGrid) {
-            ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; strict D3D11 falls back to a screen-space update. Probe rays controls the per-probe ray budget.");
+            ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; without DXR it uses a software ray-traced screen-space probe fallback. Probe rays controls the DXR per-probe ray budget.");
             if (!settings.hardwareRayTracing &&
                 projectBackendAllowsHardware(projectRenderingDraft_.backendPreference) &&
                 renderer.hardwareRayTracingSupported())
-                ImGui::TextWrapped("This backend supports ray-traced DDGI but Hardware ray tracing is off. The raster screen-space fallback is disabled on DXR-capable backends; enable Hardware ray tracing above to run DDGI.");
+                ImGui::TextWrapped("Hardware ray tracing is off: DDGI runs its software ray-traced fallback. Enable Hardware ray tracing for full per-probe DXR tracing.");
             changed |= ImGui::Checkbox("Auto-fit probe grid to scene", &gi.probeAutoFit);
             int rays = static_cast<int>(gi.probeRayCount);
             if (ImGui::SliderInt("Probe rays", &rays, 1, static_cast<int>(renderer::kGiMaxProbeRays),

@@ -829,10 +829,11 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
         float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
         if (scenePosition.w < 0.5) continue;
         float3 delta = scenePosition.xyz - samplePosition;
-        if (dot(delta, delta) > giScreenSpace.z * giScreenSpace.z) continue;
-        float4 sceneNormal = normalBuffer.SampleLevel(gbufferSampler, uv, 0);
-        if (dot(normalize(sceneNormal.xyz), normal) < 0.25) continue;
-        float3 radiance = ssgiDirectHistory.SampleLevel(gbufferSampler, uv, 0).rgb;
+        // Keep a minimum world-space thickness so a small UI value cannot reject
+        // every screen-space sample on large scenes.
+        float thickness = max(giScreenSpace.z, 0.5 * max(giScreenSpace.y, 0.5));
+        if (dot(delta, delta) > thickness * thickness) continue;
+        float3 radiance = ssgiDirectCurrent.SampleLevel(gbufferSampler, uv, 0).rgb;
         // Reject emitter-like white pixels; with no G-buffer object/emission id
         // this is the cheapest guard against SSGI sampling a light fixture as
         // ordinary diffuse radiance.
@@ -941,8 +942,8 @@ float3 ProbeIrradiance(float3 position)
             (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
         int2 atlas = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
         float4 sample = probeAtlasRead.Load(int3(atlas, 0));
-        float confidence = probeParameters.w > 1.5 ? 1.0 : sample.a;
-        if (probeParameters.w > 1.5)
+        float confidence = probeParameters.w > 1.5 && probeParameters.w < 2.5 ? 1.0 : sample.a;
+        if (probeParameters.w > 1.5 && probeParameters.w < 2.5)
         {
             // Ray-traced probes publish mean hit distance and mean squared hit
             // distance. Chebyshev visibility rejects probes whose receiver is
@@ -964,6 +965,61 @@ float3 ProbeIrradiance(float3 position)
     return sum / max(weightSum, 1e-5) * probeParameters.z;
 }
 
+// Software ray-traced probe fallback: trace a small set of world-space
+// directions against the current depth/position buffer. This is not DXR, but it
+// replaces the old single projected-pixel copy with an actual multi-ray
+// integration and works on native D3D12 raster as well as strict D3D11.
+float4 SoftwareProbeTrace(int2 pixel, int3 dimensions, int ix, int iy, int iz, float4 previous)
+{
+    float spacing = max(probeOrigin.w, 0.01);
+    float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * spacing;
+    float3 radiance = 0.0;
+    float hitWeight = 0.0;
+    const uint directionCount = 8u;
+    float stepSize = max(spacing * 0.6, 0.05);
+    float tolerance = max(spacing * 1.5, 0.25);
+    [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
+    {
+        float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
+        float radial = sqrt(max(1.0 - z * z, 0.0));
+        float phi = float(directionIndex) * 2.39996323;
+        float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
+        float3 sampleWorld = world + direction * stepSize;
+        [loop] for (uint step = 0; step < 8u; ++step)
+        {
+            float4 clip = mul(float4(sampleWorld, 1.0), viewProjection);
+            if (clip.w > 0.0001)
+            {
+                float2 sampleUv = float2(clip.x / clip.w * 0.5 + 0.5,
+                    -clip.y / clip.w * 0.5 + 0.5);
+                if (all(sampleUv >= 0.0) && all(sampleUv <= 1.0))
+                {
+                    float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, sampleUv, 0);
+                    if (scenePosition.w >= 0.5 &&
+                        distance(scenePosition.xyz, sampleWorld) <= tolerance)
+                    {
+                        radiance += probeColorSource.SampleLevel(gbufferSampler, sampleUv, 0).rgb;
+                        hitWeight += 1.0;
+                        break;
+                    }
+                }
+            }
+            sampleWorld += direction * stepSize;
+        }
+    }
+    if (hitWeight > 0.0)
+    {
+        radiance /= hitWeight;
+    }
+    else
+    {
+        // No screen-space hit: keep the previous probe value for this frame.
+        return previous;
+    }
+    float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
+    return float4(lerp(previous.rgb, radiance, blend), 1.0);
+}
+
 float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
 {
     int2 pixel = int2(input.position.xy);
@@ -975,6 +1031,8 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
     float4 previous = probeParameters.y > 0.5 ? probeAtlasRead.Load(int3(pixel, 0)) : float4(0.0, 0.0, 0.0, 1.0);
     if (probeParameters.x < 0.5) return previous;
+    if (probeParameters.w > 2.5)
+        return SoftwareProbeTrace(pixel, dimensions, ix, iy, iz, previous);
     float4 clip = mul(float4(world, 1.0), viewProjection);
     if (clip.w <= 0.0001) return previous;
     float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
@@ -1066,7 +1124,10 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
             return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb * 4.0), 1.0);
         if (giViewport.x > 0.5)
             return float4(DisplayColor(indirectLightingBuffer.Load(pixel).rgb), 1.0);
-        return 0.0;
+        // SSGI's trace consumes the direct-lit colour. Keep the normal direct
+        // output here; the composite pass replaces the final colour with the
+        // indirect-only debug result.
+        if (giViewport.w < 0.5) return 0.0;
     }
 #endif
     float4 albedo = albedoBuffer.Load(pixel);
