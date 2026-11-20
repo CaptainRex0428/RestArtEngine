@@ -104,6 +104,7 @@ enum class RenderPassKind : std::uint8_t {
     AntiAliasingPresent,
     SelectionMask,
     SelectionComposite,
+    GiDebugOverlay,
     FrameCapture,
 };
 
@@ -133,6 +134,7 @@ struct PipelineBuildInputs {
     bool realtimeIndirect = false;
     bool screenSpaceGi = false;
     bool probeGridGi = false;
+    bool giDebugProbes = false;
     bool depthOfField = false;
     bool antiAliasing = false;
     bool temporalAntiAliasing = false;

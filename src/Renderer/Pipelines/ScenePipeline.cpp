@@ -79,6 +79,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::AntiAliasingPresent: return "Anti-aliasing present";
     case RenderPassKind::SelectionMask: return "Selection mask";
     case RenderPassKind::SelectionComposite: return "Selection composite";
+    case RenderPassKind::GiDebugOverlay: return "GI probe debug overlay";
     case RenderPassKind::FrameCapture: return "Frame capture";
     }
     return "Unknown";
@@ -174,6 +175,12 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         add(RenderPassKind::SelectionComposite, "Selection composite",
             PipelineResource::SceneColor | PipelineResource::SceneDepth |
                 PipelineResource::SelectionMask,
+            PipelineResource::SceneColor);
+    }
+
+    if (inputs.giDebugProbes) {
+        add(RenderPassKind::GiDebugOverlay, "GI probe debug overlay",
+            PipelineResource::SceneDepth | PipelineResource::ProbeAtlas,
             PipelineResource::SceneColor);
     }
 

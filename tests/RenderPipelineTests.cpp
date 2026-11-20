@@ -129,6 +129,14 @@ void probeGridInputs() {
     require(contains(passAt(pipeline, update).writes, PipelineResource::ProbeAtlas),
         "DDGI update must publish the probe atlas.");
     require(validatePipeline(pipeline).valid, "DDGI pipeline is inconsistent.");
+    build.giDebugProbes = true;
+    const auto debugPipeline = buildScenePipeline(build);
+    const auto overlay = indexOf(debugPipeline, RenderPassKind::GiDebugOverlay);
+    require(overlay < debugPipeline.passes.size(), "GI probe debug overlay pass missing.");
+    require(contains(passAt(debugPipeline, overlay).reads, PipelineResource::ProbeAtlas) &&
+        contains(passAt(debugPipeline, overlay).writes, PipelineResource::SceneColor),
+        "GI probe debug overlay must sample the atlas and draw into the scene colour.");
+    require(validatePipeline(debugPipeline).valid, "GI probe debug pipeline is inconsistent.");
 }
 
 void hardwareTransport() {

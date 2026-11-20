@@ -3675,7 +3675,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             settings.path = path ? renderer::RenderPath::Deferred : renderer::RenderPath::Forward;
         ImGui::SameLine(); ImGui::SetNextItemWidth(135);
         ImGui::Combo("##view", &settings.debugView,
-            "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0");
+            "Lit\0Unlit\0Albedo\0World normals\0World position\0Roughness\0Metallic\0Specular F0\0Linear depth\0Direct diffuse\0Direct specular\0GI indirect\0GI probes\0");
         ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
         ImGui::SameLine();
         {
@@ -3688,7 +3688,8 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             const bool giEffective = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
             std::string giLabel = "GI: Off";
             if (giRequested) {
-                if (!hardwareActive) giLabel = "GI: Inactive";
+                if (settings.debugView == 11 || settings.debugView == 12) giLabel = "GI: Debug";
+                else if (!hardwareActive && settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing) giLabel = "GI: Inactive";
                 else if (settings.debugView != 0) giLabel = "GI: Paused";
                 else if (!giEffective) giLabel = "GI: Inactive";
                 else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
@@ -3776,7 +3777,9 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             "Specular F0: derived normal-incidence reflectance, RGB with display gamma; not specular light intensity.",
             "Linear depth: positive view-space Z; black 0 m, white 100 m (clamped).",
             "Direct diffuse: direct-light diffuse contribution with current exposure and tone mapping; excludes ambient and reflections.",
-            "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections."
+            "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections.",
+            "GI indirect: the active realtime GI algorithm's indirect contribution (SSGI/DDGI or path-traced indirect).",
+            "GI probes: scene colour plus DDGI probe spheres; sphere colour is the probe irradiance, cyan means an invalid/empty probe."
         };
         const int mode = std::clamp(settings.debugView, 0, static_cast<int>(std::size(legends)) - 1);
         ImGui::TextWrapped("%s", legends[mode]);

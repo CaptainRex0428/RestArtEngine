@@ -755,6 +755,7 @@ int wmain(int argc, wchar_t** argv) {
     std::optional<double> gcInterval, gcIdle, gcCaptureAge;
     std::filesystem::path gcSettingsPath = "RestArtEngine.gc.json";
     int frameLimit = 0;
+    int debugViewOverride = -1;
     std::filesystem::path captureDir;
     std::filesystem::path projectPath;
     std::filesystem::path enginePath;
@@ -825,6 +826,11 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--frames" && i + 1 < argc) {
                 frameLimit = std::stoi(argv[++i]);
                 if (frameLimit <= 0) throw std::runtime_error("--frames must be positive");
+            }
+            else if (arg == "--debug-view" && i + 1 < argc) {
+                debugViewOverride = std::stoi(argv[++i]);
+                if (debugViewOverride < 0 || debugViewOverride > 12)
+                    throw std::runtime_error("--debug-view must be 0..12");
             }
             else if (arg == "--capture-dir" && i + 1 < argc) { captureDir = argv[++i]; explicitCaptureDir = true; }
             else if (arg == "auto" || arg == "dx11") backendOverride = parseMainRenderBackend(arg);
@@ -940,6 +946,7 @@ int wmain(int argc, wchar_t** argv) {
         settings.hardwareRayTracingShadows = project.rendering.hardwareRayTracingShadows;
         settings.globalIllumination = project.rendering.globalIllumination;
         settings.antiAliasing = project.rendering.antiAliasing;
+        if (debugViewOverride >= 0) settings.debugView = debugViewOverride;
         if (selfTest) settings.antiAliasing.method = AntiAliasingMethod::Disabled;
         if (pathTracingOverride) settings.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
         const MainBackendRequest backendRequest{

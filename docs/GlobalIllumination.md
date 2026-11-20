@@ -113,6 +113,15 @@ DDGI 也是独立于 DXR 的光栅算法，要求 **Deferred** 路径。渲染�
 
 限制：probe 更新是屏幕空间可见性近似，不是逐 probe 光线追踪；被遮挡或在屏幕外的 probe 保留旧值；网格固定相机目标附近，移动相机时 probe 世界位置随帧重建，可能出现滞后；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
+### Debug views
+
+编辑器视口 debug combo 新增两项：
+
+- **GI indirect**（`debugView == 11`）：只显示当前 GI 算法的间接贡献。SSGI 会照常执行 trace/composite，但 composite 只输出 indirect；DDGI 输出 probe 辐照度 × 接收面 albedo；Path tracing 实时模式显示硬件间接图并应用当前曝光；GI 关闭时输出黑色。
+- **GI probes**（`debugView == 12`）：正常场景叠加每个 DDGI probe 的着色小球。球颜色来自 probe atlas 辐照度，青色表示该 probe 尚未有效更新。该视图仍执行 `DDGI probe update` 保持 atlas 活跃。
+
+编辑器外可用 `--debug-view 11`／`--debug-view 12` 配合 `--frames` 和 `--capture-temp` 复现；参数在项目加载后应用。
+
 ### ReSTIR sampling
 
 `sampling = restir` 是 Path tracing 实时模式的**采样层**，不改变 GI 算法本身：

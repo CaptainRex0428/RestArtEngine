@@ -120,6 +120,12 @@ struct alignas(16) ProbeConstants {
     XMFLOAT4 parameters; // enabled, valid, intensity, reserved
 };
 static_assert(sizeof(ProbeConstants) == 48);
+struct ProbeDebugVertex {
+    float position[3];
+    float atlas[2];
+    float corner[2];
+};
+static_assert(sizeof(ProbeDebugVertex) == 28);
 struct alignas(16) DepthOfFieldConstants { XMFLOAT4 viewport, parameters; };
 static_assert(sizeof(DepthOfFieldConstants) == 32);
 struct alignas(16) AntiAliasingConstants {
@@ -508,6 +514,10 @@ struct SceneRenderer::Impl {
     bool probeAtlasValid = false;
     std::array<rhi::TextureHandle, 3> gbufferImages;
     rhi::ShaderHandle geometryModule, fullscreenModule;
+    rhi::ShaderHandle probeDebugVS, probeDebugPS;
+    rhi::GraphicsPipelineHandle probeDebugPipeline;
+    rhi::BufferHandle probeDebugVertices;
+    std::uint32_t probeDebugVertexCount = 0;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
     std::array<rhi::ShaderHandle, 14> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
@@ -530,6 +540,7 @@ struct SceneRenderer::Impl {
     std::uint64_t giHistoryEpoch = 0;
     bool ssgiHistoryValid = false;
     bool lastProbeGridGi = false;
+    bool probeDebugOverlay = false;
     float probeEffectiveSpacing = 0.0f;
     bool probeAutoFitUsed = false;
     std::uint64_t ssgiViewId = 0;
@@ -727,6 +738,29 @@ struct SceneRenderer::Impl {
         ComPtr<ID3D11PixelShader> ssgiTracePS, ssgiCompositePS;
         if (!pixelShader("PSScreenSpaceGi", ssgiTracePS) ||
             !pixelShader("PSScreenSpaceGiComposite", ssgiCompositePS)) return false;
+        shader.Reset();
+        if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
+                "VSProbeDebug", "vs_5_0", shader, error)) return false;
+        probeDebugVS = rhiDevice->createShader(rhi::ShaderStage::Vertex,
+            gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "GI probe debug VS");
+        shader.Reset();
+        if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
+                "PSProbeDebug", "ps_5_0", shader, error)) return false;
+        probeDebugPS = rhiDevice->createShader(rhi::ShaderStage::Pixel,
+            gpuBytes(shader->GetBufferPointer(), shader->GetBufferSize()), "GI probe debug PS");
+        rhi::GraphicsPipelineDesc probeDebugDesc;
+        probeDebugDesc.vertexShader = probeDebugVS;
+        probeDebugDesc.pixelShader = probeDebugPS;
+        probeDebugDesc.attributes = {
+            {"POSITION", 0, 0, 0, 3}, {"TEXCOORD", 0, 0, 12, 2}, {"TEXCOORD", 1, 0, 20, 2}};
+        probeDebugDesc.depthEnable = true;
+        probeDebugDesc.depthWrite = false;
+        probeDebugDesc.depthCompare = rhi::CompareOperation::LessEqual;
+        probeDebugDesc.cullMode = rhi::CullMode::None;
+        probeDebugDesc.colorFormats = {rhi::Format::RGBA8Unorm};
+        probeDebugDesc.depthFormat = rhi::Format::Depth32Float;
+        probeDebugDesc.name = "GI probe debug spheres";
+        probeDebugPipeline = rhiDevice->createGraphicsPipeline(probeDebugDesc);
         if (device) {
             progress.report(0.70f, "Preparing selection outline");
             if (!outline) outline = std::make_unique<SelectionOutlinePass>();
@@ -1997,8 +2031,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible && hardwareBackendAllowed &&
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
-    const bool realtimeIndirect = hardwareTransport && realtimeGiRequested && settings.debugView == 0;
-    const bool screenSpaceGi = diagnosticMainScene && settings.debugView == 0 &&
+    const bool debugGiIndirect = settings.debugView == 11;
+    const bool debugGiProbes = settings.debugView == 12;
+    const bool realtimeIndirect = hardwareTransport && realtimeGiRequested &&
+        (settings.debugView == 0 || debugGiIndirect);
+    const bool screenSpaceGi = diagnosticMainScene &&
+        (settings.debugView == 0 || debugGiIndirect) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace &&
         settings.path == RenderPath::Deferred && !hardwareTransport;
@@ -2008,10 +2046,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     state.lastGiMethod = settings.globalIllumination.method;
     state.lastScreenSpaceGi = screenSpaceGi;
-    const bool probeGridGi = diagnosticMainScene && settings.debugView == 0 &&
+    const bool probeGridGi = diagnosticMainScene &&
+        (settings.debugView == 0 || debugGiIndirect || debugGiProbes) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid &&
         settings.path == RenderPath::Deferred && !hardwareTransport;
+    const bool giDebugProbes = debugGiProbes && probeGridGi;
+    state.probeDebugOverlay = giDebugProbes;
     state.lastProbeGridGi = probeGridGi;
     if (diagnosticMainScene && settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid) {
         state.giStatus.requested = GlobalIlluminationMethod::ProbeGrid;
@@ -2052,6 +2093,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
     pipelineInputs.probeGridGi = probeGridGi;
+    pipelineInputs.giDebugProbes = giDebugProbes;
     pipelineInputs.depthOfField = depthOfField;
     pipelineInputs.antiAliasing = antiAliasing;
     pipelineInputs.temporalAntiAliasing = temporalAntiAliasing;
@@ -2086,7 +2128,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         settings.globalIllumination.indirectDiffuseIntensity);
     giData.previousViewProjection = state.ssgiPreviousViewProjection;
     giData.history = XMFLOAT4(ssgiHistoryReady ? 1.0f : 0.0f,
-        static_cast<float>(state.ssgiFrameCounter), 0.1f, 1.0f);
+        static_cast<float>(state.ssgiFrameCounter), 0.1f, debugGiIndirect ? 2.0f : 1.0f);
     state.uploadConstants(state.giBuffer, giData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 6, std::span(&state.giBuffer, 1));
     ProbeConstants probeData{};
@@ -2160,6 +2202,39 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     }
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
         probeGridGi && state.probeAtlasValid ? 1.0f : 0.0f, probeSettings.indirectDiffuseIntensity, 0.0f);
+    state.probeDebugVertexCount = 0;
+    if (giDebugProbes && state.probeDebugPipeline) {
+        std::vector<ProbeDebugVertex> vertices;
+        const std::uint32_t probeCount = probeSettings.probeGridX * probeSettings.probeGridY * probeSettings.probeGridZ;
+        vertices.reserve(static_cast<std::size_t>(probeCount) * 6u);
+        static constexpr float corners[6][2] = {{-1, -1}, {1, -1}, {-1, 1}, {1, -1}, {1, 1}, {-1, 1}};
+        for (std::uint32_t iy = 0; iy < probeSettings.probeGridY; ++iy) {
+            for (std::uint32_t iz = 0; iz < probeSettings.probeGridZ; ++iz) {
+                for (std::uint32_t ix = 0; ix < probeSettings.probeGridX; ++ix) {
+                    const float world[3] = {
+                        probeData.origin.x + (ix + 0.5f) * probeSpacing,
+                        probeData.origin.y + (iy + 0.5f) * probeSpacing,
+                        probeData.origin.z + (iz + 0.5f) * probeSpacing};
+                    const float atlas[2] = {
+                        static_cast<float>(ix + iz * probeSettings.probeGridX) + 0.5f,
+                        static_cast<float>(iy) + 0.5f};
+                    for (const auto& corner : corners) {
+                        ProbeDebugVertex vertex{};
+                        std::copy_n(world, 3, vertex.position);
+                        std::copy_n(atlas, 2, vertex.atlas);
+                        vertex.corner[0] = corner[0];
+                        vertex.corner[1] = corner[1];
+                        vertices.push_back(vertex);
+                    }
+                }
+            }
+        }
+        state.probeDebugVertices = state.rhiDevice->createBuffer(
+            {static_cast<std::uint32_t>(vertices.size() * sizeof(ProbeDebugVertex)),
+                rhi::BufferUsage::Vertex, false, "GI probe debug vertices"},
+            std::as_bytes(std::span(vertices)));
+        state.probeDebugVertexCount = static_cast<std::uint32_t>(vertices.size());
+    }
     state.uploadConstants(state.probeBuffer, probeData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 9, std::span(&state.probeBuffer, 1));
     if (state.context) {
@@ -2526,6 +2601,25 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 state.fullscreenVS.Get(), state.outlineCompositePS.Get(),
                 settings.outlineColor, settings.outlineThickness, settings.outlineFrontObjects);
             state.recordDraw(0, 0, 0, 0, 3);
+            break;
+        }
+        case RenderPassKind::GiDebugOverlay: {
+            if (!state.probeDebugPipeline || state.probeDebugVertexCount == 0) break;
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc debugPass;
+            debugPass.name = pass.name;
+            debugPass.colors = {{destinationImage, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+            debugPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Load};
+            debugPass.reads = {{state.probeAtlasA, 14}};
+            commands.beginRenderPass(debugPass);
+            commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 0, std::span(&state.sceneBuffer, 1));
+            commands.bindGraphicsPipeline(state.probeDebugPipeline);
+            const rhi::VertexBufferBinding stream{state.probeDebugVertices,
+                static_cast<std::uint32_t>(sizeof(ProbeDebugVertex)), 0};
+            commands.bindVertexBuffers(0, std::span(&stream, 1));
+            commands.draw(state.probeDebugVertexCount);
+            commands.endRenderPass();
+            state.recordDraw(0, 0, 0, state.probeDebugVertexCount, 0);
             break;
         }
         case RenderPassKind::FrameCapture: {

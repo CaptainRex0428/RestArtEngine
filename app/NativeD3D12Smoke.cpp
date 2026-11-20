@@ -612,9 +612,6 @@ bool runNativeD3D12Smoke(rae::renderer::SceneRenderer& renderer,
             report["dxr"] = {{"active", false}, {"reason", renderer.hardwareRayTracingStatus()}};
         }
 
-        // Raster SSGI is exercised by the D3D11 and native editor probes; this
-        // suite keeps its DXR/raster smoke focused on the hardware path.
-
         const auto statistics = renderer.rhiStatistics();
         require(statistics.renderPasses > 0 && statistics.indexedDrawCalls > 0 && statistics.bufferUploads > 0,
             "The native RHI did not report real rendering/upload work.");

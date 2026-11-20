@@ -917,7 +917,8 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
     output.history = float4(indirect, 1.0);
     float3 direct = ssgiDirectCurrent.Load(pixel).rgb;
     indirect *= albedoBuffer.Load(pixel).rgb;
-    output.color = float4(saturate(direct + indirect * giScreenSpace.w), 1.0);
+    output.color = giHistory.w > 1.5 ? float4(indirect, 1.0)
+        : float4(saturate(direct + indirect * giScreenSpace.w), 1.0);
     return output;
 }
 
@@ -987,13 +988,68 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
     return float4(lerp(previous.rgb, radiance, blend), 1.0);
 }
+
+struct ProbeDebugVertex
+{
+    float3 position : POSITION;
+    float2 atlas : TEXCOORD0;
+    float2 corner : TEXCOORD1;
+};
+
+struct ProbeDebugOutput
+{
+    float4 position : SV_POSITION;
+    float4 color : COLOR;
+    float2 corner : TEXCOORD0;
+};
+
+ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
+{
+    ProbeDebugOutput output;
+    float4 clip = mul(float4(input.position, 1.0), viewProjection);
+    if (clip.w <= 0.0001)
+    {
+        output.position = float4(2.0, 2.0, 2.0, 1.0);
+        output.color = 0.0;
+        output.corner = 0.0;
+        return output;
+    }
+    clip.xy += input.corner * 0.020 * clip.w;
+    clip.z -= 0.0001 * clip.w;
+    output.position = clip;
+    output.corner = input.corner;
+    float4 probe = probeAtlasRead.Load(int3(int2(input.atlas), 0));
+    output.color = probe.a > 0.05 ? float4(saturate(probe.rgb), 1.0) : float4(0.0, 0.9, 1.0, 1.0);
+    return output;
+}
+
+float4 PSProbeDebug(ProbeDebugOutput input) : SV_TARGET
+{
+    float radiusSquared = dot(input.corner, input.corner);
+    if (radiusSquared > 1.0) discard;
+    float z = sqrt(saturate(1.0 - radiusSquared));
+    float3 sphere = input.color.rgb * (0.35 + 0.65 * z);
+    if (radiusSquared > 0.82) sphere *= 0.45;
+    return float4(saturate(sphere), 1.0);
+}
 #endif
 
 float4 PSDeferred(FullscreenOutput input) : SV_TARGET
 {
     int3 pixel = int3(int2(input.position.xy), 0);
+    int debugMode = (int)(viewportDebug.z + 0.5);
     float4 position = positionBuffer.Load(pixel);
-    if (position.w < 0.5) return Background(input.uv);
+    if (position.w < 0.5) return debugMode == 11 ? float4(0.0, 0.0, 0.0, 1.0) : Background(input.uv);
+#if !defined(RAE_HARDWARE_RAYTRACING)
+    if (debugMode == 11)
+    {
+        if (probeParameters.x > 0.5)
+            return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb), 1.0);
+        if (giViewport.x > 0.5)
+            return float4(DisplayColor(indirectLightingBuffer.Load(pixel).rgb), 1.0);
+        return 0.0;
+    }
+#endif
     float4 albedo = albedoBuffer.Load(pixel);
     float4 normal = normalBuffer.Load(pixel);
     Surface material = (Surface)0;
@@ -1003,7 +1059,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
-    if (probeParameters.x > 0.5)
+    if (debugMode != 12 && probeParameters.x > 0.5)
         color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz));
 #endif
     return color;
