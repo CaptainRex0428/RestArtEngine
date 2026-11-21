@@ -986,6 +986,15 @@ float3 ProbeIrradiance(float3 position)
     return result * probeParameters.z;
 }
 
+float3 BoundProbeIndirect(float3 directColor, float3 indirect)
+{
+    const float3 luminanceWeights = float3(0.2126, 0.7152, 0.0722);
+    float directLuminance = dot(directColor, luminanceWeights);
+    float indirectLuminance = dot(indirect, luminanceWeights);
+    float limit = max(directLuminance * 1.5, 0.08);
+    return indirect * min(1.0, limit / max(indirectLuminance, 1e-4));
+}
+
 // Software ray-traced probe fallback: trace a small set of world-space
 // directions against the current depth/position buffer. This is not DXR, but it
 // replaces the old single projected-pixel copy with an actual multi-ray
@@ -1124,11 +1133,7 @@ float4 PSProbeComposite(FullscreenOutput input) : SV_TARGET
     // scene the repeated albedo can over-drive the indirect term. Bound the
     // low-frequency contribution relative to the direct surface luminance so
     // pure red/green rooms do not turn into flat emissive boxes.
-    const float3 luminanceWeights = float3(0.2126, 0.7152, 0.0722);
-    float directLuminance = dot(direct.rgb, luminanceWeights);
-    float indirectLuminance = dot(indirect, luminanceWeights);
-    float indirectLimit = max(directLuminance * 1.5, 0.08);
-    indirect *= min(1.0, indirectLimit / max(indirectLuminance, 1e-4));
+    indirect = BoundProbeIndirect(direct.rgb, indirect);
     if (debugMode == 11) return float4(saturate(indirect * 2.0), 1.0);
     return float4(saturate(direct.rgb + indirect), 1.0);
 }
@@ -1249,7 +1254,8 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
     if (probeParameters.w < 2.5)
-        color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz) * albedo.rgb * 2.0);
+        color.rgb = saturate(color.rgb + BoundProbeIndirect(color.rgb,
+            ProbeIrradiance(position.xyz) * albedo.rgb * 2.0));
 #endif
     return color;
 }
