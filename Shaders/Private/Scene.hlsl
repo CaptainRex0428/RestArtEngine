@@ -962,7 +962,28 @@ float3 ProbeIrradiance(float3 position)
         sum += sample.rgb * weight * confidence;
         weightSum += weight * confidence;
     }
-    return sum / max(weightSum, 1e-5) * probeParameters.z;
+    float3 result = sum / max(weightSum, 1e-5);
+    if (probeParameters.w > 2.5)
+    {
+        // Software probes have fewer rays and no visibility moments. A small
+        // 3x3x3 smooth removes per-probe islands while retaining the low
+        // frequency colour bleed the fallback can reliably provide.
+        int3 center = clamp(base, int3(0, 0, 0), dimensions - 1);
+        float3 smooth = 0.0;
+        float smoothWeight = 0.0;
+        [unroll] for (int dz = -1; dz <= 1; ++dz)
+        [unroll] for (int dy = -1; dy <= 1; ++dy)
+        [unroll] for (int dx = -1; dx <= 1; ++dx)
+        {
+            int3 coordinate = clamp(center + int3(dx, dy, dz), int3(0, 0, 0), dimensions - 1);
+            int2 atlas = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
+            float weight = exp(-0.7 * float(dx * dx + dy * dy + dz * dz));
+            smooth += probeAtlasRead.Load(int3(atlas, 0)).rgb * weight;
+            smoothWeight += weight;
+        }
+        result = lerp(result, smooth / max(smoothWeight, 1e-5), 0.6);
+    }
+    return result * probeParameters.z;
 }
 
 // Software ray-traced probe fallback: trace a small set of world-space
@@ -975,15 +996,16 @@ float4 SoftwareProbeTrace(int2 pixel, int3 dimensions, int ix, int iy, int iz, f
     float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * spacing;
     float3 radiance = 0.0;
     float hitWeight = 0.0;
-    const uint directionCount = 8u;
+    const uint directionCount = 64u;
     const uint stepCount = 24u;
+    float probeSeed = frac(sin(dot(float3(ix, iy, iz), float3(12.9898, 78.233, 37.719))) * 43758.5453);
     float stepSize = max(spacing * 0.75, 0.2);
     float tolerance = max(spacing * 1.5, stepSize * 1.25);
     [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
     {
         float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
         float radial = sqrt(max(1.0 - z * z, 0.0));
-        float phi = float(directionIndex) * 2.39996323;
+        float phi = (float(directionIndex) + probeSeed) * 2.39996323;
         float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
         float3 sampleWorld = world + direction * stepSize;
         [loop] for (uint step = 0; step < stepCount; ++step)
@@ -1016,6 +1038,29 @@ float4 SoftwareProbeTrace(int2 pixel, int3 dimensions, int ix, int iy, int iz, f
     {
         // No screen-space hit: keep the previous probe value for this frame.
         return previous;
+    }
+    if (probeParameters.w > 2.5 && probeParameters.y > 0.5)
+    {
+        // The software fallback has only a few screen-space rays per probe.
+        // A small neighborhood filter hides per-probe sampling islands that
+        // otherwise show up as blotches on large diffuse surfaces.
+        float3 neighbour = 0.0;
+        float neighbourWeight = 0.0;
+        [unroll] for (int dz = -1; dz <= 1; ++dz)
+        [unroll] for (int dy = -1; dy <= 1; ++dy)
+        [unroll] for (int dx = -1; dx <= 1; ++dx)
+        {
+            int3 coord = int3(ix + dx, iy + dy, iz + dz);
+            if (any(coord < int3(0, 0, 0)) || any(coord >= dimensions)) continue;
+            float4 sample = probeAtlasRead.Load(int3(
+                coord.x + coord.z * dimensions.x, coord.y, 0));
+            if (sample.a < 0.5) continue;
+            float weight = 1.0 / (1.0 + abs(dx) + abs(dy) + abs(dz));
+            neighbour += sample.rgb * weight;
+            neighbourWeight += weight;
+        }
+        if (neighbourWeight > 0.0)
+            radiance = lerp(radiance, neighbour / neighbourWeight, 0.5);
     }
     float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
     return float4(lerp(previous.rgb, radiance, blend), 1.0);
