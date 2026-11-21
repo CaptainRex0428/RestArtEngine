@@ -1119,7 +1119,16 @@ float4 PSProbeComposite(FullscreenOutput input) : SV_TARGET
     float4 direct = ssgiDirectCurrent.Load(pixel);
     if (position.w < 0.5) return debugMode == 11 ? float4(0.0, 0.0, 0.0, 1.0) : direct;
     float4 albedo = albedoBuffer.Load(pixel);
-    float3 indirect = ProbeIrradiance(position.xyz) * albedo.rgb * 2.0;
+    float3 indirect = ProbeIrradiance(position.xyz) * albedo.rgb;
+    // Software probes store display-radiance averages; in a saturated colour
+    // scene the repeated albedo can over-drive the indirect term. Bound the
+    // low-frequency contribution relative to the direct surface luminance so
+    // pure red/green rooms do not turn into flat emissive boxes.
+    const float3 luminanceWeights = float3(0.2126, 0.7152, 0.0722);
+    float directLuminance = dot(direct.rgb, luminanceWeights);
+    float indirectLuminance = dot(indirect, luminanceWeights);
+    float indirectLimit = max(directLuminance * 1.5, 0.08);
+    indirect *= min(1.0, indirectLimit / max(indirectLuminance, 1e-4));
     if (debugMode == 11) return float4(saturate(indirect * 2.0), 1.0);
     return float4(saturate(direct.rgb + indirect), 1.0);
 }
