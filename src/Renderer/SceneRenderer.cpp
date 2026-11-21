@@ -2713,7 +2713,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             state.beginDiagnosticPass(pass.name);
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
-            rasterPass.colors = {{destinationImage, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+            rasterPass.colors = {{rasterDestinationImage, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[2], 2},
                 {state.probeAtlasA, 14}, {state.ssgiDirectCurrentImage, 17}};
             commands.beginRenderPass(rasterPass);
