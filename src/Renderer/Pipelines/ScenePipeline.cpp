@@ -42,7 +42,8 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
         kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiComposite ||
-        kind == RenderPassKind::ProbeUpdate || kind == RenderPassKind::ProbeComposite;
+        kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
+        kind == RenderPassKind::ProbeComposite;
 }
 
 } // namespace
@@ -70,6 +71,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::DeferredLighting: return "Deferred lighting";
     case RenderPassKind::ScreenSpaceGi: return "SSGI trace";
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
+    case RenderPassKind::ProbeLinearSource: return "DDGI linear source";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
     case RenderPassKind::ProbeComposite: return "DDGI composite";
     case RenderPassKind::ForwardBackground: return "Forward background";
@@ -137,14 +139,21 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                     PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
-        if (inputs.probeGridGi && !inputs.hardwareTransport) {
-            add(RenderPassKind::ProbeUpdate, "DDGI probe update",
-                PipelineResource::SceneDepth |
-                    PipelineResource::GBufferNormal | PipelineResource::ScreenSpaceDirectCurrent,
-                PipelineResource::ProbeAtlas);
+        if (inputs.probeGridGi) {
+            add(RenderPassKind::ProbeLinearSource, "DDGI linear source",
+                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                    PipelineResource::GBufferPosition,
+                PipelineResource::ProbeLinearRadiance);
+            if (!inputs.hardwareTransport)
+                add(RenderPassKind::ProbeUpdate, "DDGI probe update",
+                    PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
+                        PipelineResource::ProbeLinearRadiance,
+                    PipelineResource::ProbeAtlas);
             add(RenderPassKind::ProbeComposite, "DDGI composite",
-                PipelineResource::ProbeAtlas | PipelineResource::ScreenSpaceDirectCurrent |
-                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferPosition,
+                PipelineResource::ProbeAtlas | PipelineResource::ProbeLinearRadiance |
+                    PipelineResource::ScreenSpaceDirectCurrent |
+                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                    PipelineResource::GBufferPosition,
                 rasterColor);
         }
     } else {

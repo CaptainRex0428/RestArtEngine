@@ -65,6 +65,7 @@ enum class PipelineResource : std::uint64_t {
     ScreenSpaceDirectHistory = 1ull << 17,
     ScreenSpaceDirectCurrent = 1ull << 18,
     ScreenSpaceRawIndirect = 1ull << 19,
+    ProbeLinearRadiance = 1ull << 20,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -95,6 +96,7 @@ enum class RenderPassKind : std::uint8_t {
     DeferredLighting,
     ScreenSpaceGi,
     ScreenSpaceGiComposite,
+    ProbeLinearSource,
     ProbeUpdate,
     ProbeComposite,
     ForwardBackground,

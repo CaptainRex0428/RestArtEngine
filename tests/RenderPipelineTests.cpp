@@ -130,12 +130,17 @@ void probeGridInputs() {
     require(update < pipeline.passes.size(), "DDGI probe update pass missing.");
     require(contains(passAt(pipeline, update).writes, PipelineResource::ProbeAtlas),
         "DDGI update must publish the probe atlas.");
+    const auto linear = indexOf(pipeline, RenderPassKind::ProbeLinearSource);
+    require(linear < pipeline.passes.size(), "DDGI linear source pass missing.");
+    require(contains(passAt(pipeline, linear).writes, PipelineResource::ProbeLinearRadiance),
+        "DDGI linear source must publish linear direct radiance.");
     const auto composite = indexOf(pipeline, RenderPassKind::ProbeComposite);
     require(composite < pipeline.passes.size(), "DDGI composite pass missing.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::ProbeAtlas) &&
+        contains(passAt(pipeline, composite).reads, PipelineResource::ProbeLinearRadiance) &&
         contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceDirectCurrent) &&
         contains(passAt(pipeline, composite).writes, PipelineResource::SceneColor),
-        "DDGI composite must add the atlas to the direct-lit scene colour.");
+        "DDGI composite must add the atlas to the linear direct radiance.");
     require(composite > update, "DDGI composite must run after the probe update.");
     require(validatePipeline(pipeline).valid, "DDGI pipeline is inconsistent.");
     build.giDebugProbes = true;
@@ -170,8 +175,9 @@ void hardwareTransport() {
         "Hardware DDGI transport must publish the probe atlas.");
     require(!hasKind(ddgiPipeline, RenderPassKind::ProbeUpdate),
         "Hardware DDGI must not run the raster probe update pass.");
-    require(!hasKind(ddgiPipeline, RenderPassKind::ProbeComposite),
-        "Hardware DDGI must not run the software DDGI composite pass.");
+    require(hasKind(ddgiPipeline, RenderPassKind::ProbeLinearSource) &&
+        hasKind(ddgiPipeline, RenderPassKind::ProbeComposite),
+        "Hardware DDGI must still composite linear direct radiance with SH probe irradiance.");
     require(!hasKind(ddgiPipeline, RenderPassKind::HardwareResolve),
         "Hardware DDGI must leave raster scene colour untouched.");
     const auto ddgiDeferred = indexOf(ddgiPipeline, RenderPassKind::DeferredLighting);

@@ -22,7 +22,7 @@ rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
     if (hasDepth) description.depthFormat = rhi::Format::Depth32Float;
     if (shaderIndex == 1)
         description.colorFormats.assign(3, rhi::Format::RGBA16Float);
-    else if (shaderIndex == 9 || shaderIndex == 11 || shaderIndex == 12) description.colorFormats = {rhi::Format::RGBA16Float};
+    else if (shaderIndex == 9 || shaderIndex == 11 || shaderIndex == 12 || shaderIndex == 15) description.colorFormats = {rhi::Format::RGBA16Float};
     else if (shaderIndex == 13) description.colorFormats = {rhi::Format::RGBA8Unorm, rhi::Format::RGBA16Float};
     else if (shaderIndex != 7) description.colorFormats = {rhi::Format::RGBA8Unorm};
     description.name = fullscreen ? "Scene fullscreen pipeline" : "Scene mesh pipeline";
@@ -53,7 +53,7 @@ void bindRhiMesh(const GpuMesh& mesh) {
 
 void drawRhiFullscreen(unsigned shader, bool hasDepth) {
     diagnosticVS = "Private/Scene.hlsl::VSFullscreen";
-    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite", "PSProbeComposite"};
+    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite", "PSProbeComposite", "PSProbeLinear"};
     diagnosticPS = shader < std::size(entries) ? entries[shader] : "Unknown";
     sceneCommands().bindGraphicsPipeline(graphicsPipeline(shader, 0, 16, true, hasDepth));
     sceneCommands().draw(3);

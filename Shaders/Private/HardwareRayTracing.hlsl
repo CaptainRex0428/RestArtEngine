@@ -171,16 +171,19 @@ void ResolveRealtimeGi(uint2 pixel)
 }
 
 //------------------------------------------------------------------------------
-// Ray-traced DDGI probe update. One atlas pixel is one probe; every probe
-// traces a small fixed set of sphere directions and stores the mean incident
-// radiance. The raster deferred pass samples this atlas unchanged.
+// Ray-traced DDGI probe update. Each thread owns one probe and writes four
+// RGBA16F texels containing its first-order SH projection of incident
+// radiance. The raster receiver evaluates the clamped-cosine convolution for
+// the actual surface normal.
 //------------------------------------------------------------------------------
 void ResolveProbeAtlas(uint2 pixel)
 {
     int3 dimensions = int3(probeGrid.xyz);
+    int atlasBase = int(pixel.x) * 4;
     if (dimensions.x <= 0 || dimensions.y <= 0 || dimensions.z <= 0)
     {
-        probeAtlasOutput[pixel] = 0.0;
+        [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
+            probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
         return;
     }
     int ix = int(pixel.x) % dimensions.x;
@@ -188,15 +191,19 @@ void ResolveProbeAtlas(uint2 pixel)
     int iy = int(pixel.y);
     if (iz >= dimensions.z || iy >= dimensions.y || ix >= dimensions.x)
     {
-        probeAtlasOutput[pixel] = 0.0;
+        [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
+            probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
         return;
     }
     float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
-    float3 sum = 0.0;
+    float3 sh0 = 0.0, sh1 = 0.0, sh2 = 0.0, sh3 = 0.0;
     float distanceSum = 0.0;
     float distanceSquaredSum = 0.0;
     uint hitCount = 0;
     uint directionCount = clamp((uint)probeParameters.x, 1u, 32u);
+    const float shProjection = 4.0 * 3.14159265359 / float(directionCount);
+    const float shY00 = 0.2820947918;
+    const float shY1 = 0.4886025119;
     [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
     {
         float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
@@ -206,30 +213,37 @@ void ResolveProbeAtlas(uint2 pixel)
         float distance;
         float3 hitNormal;
         int object;
+        float3 radiance = Environment(direction, 0.0);
         if (TraceScene(world, direction, distance, hitNormal, object, false))
         {
             float3 position = world + direction * distance;
             Surface material = TriangleMaterialAt(position, hitNormal, (uint)(-object - 2));
             float3 view = -direction;
             uint randomState = (pixel.x * 1973u + pixel.y * 9277u + directionIndex * 26699u + 1u);
-            sum += PathDirectLight(position, hitNormal, hitNormal, view, material);
-            sum += PathAreaDirect(position, hitNormal, hitNormal, view, material, randomState);
+            radiance = PathDirectLight(position, hitNormal, hitNormal, view, material);
+            radiance += PathAreaDirect(position, hitNormal, hitNormal, view, material, randomState);
             distanceSum += distance;
             distanceSquaredSum += distance * distance;
             ++hitCount;
         }
-        else
-        {
-            sum += Environment(direction, 0.0);
-        }
+        sh0 += radiance * (shProjection * shY00);
+        sh1 += radiance * (shProjection * shY1 * direction.y);
+        sh2 += radiance * (shProjection * shY1 * direction.z);
+        sh3 += radiance * (shProjection * shY1 * direction.x);
     }
-    float4 current = float4(clamp(sum / float(directionCount), 0.0, 65504.0), 1.0);
-    if (probeParameters.y > 0.5)
+    float3 coefficients[4] = {sh0, sh1, sh2, sh3};
+    [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
     {
-        float4 previous = probeAtlasPrevious.Load(int3(int2(pixel), 0));
-        current = lerp(previous, current, saturate(1.0 - probeGrid.w));
+        float4 current = float4(clamp(coefficients[coefficient], 0.0, 65504.0),
+            coefficient == 0 ? 1.0 : 0.0);
+        if (probeParameters.y > 0.5)
+        {
+            float4 previous = probeAtlasPrevious.Load(
+                int3(atlasBase + coefficient, pixel.y, 0));
+            current = lerp(previous, current, saturate(1.0 - probeGrid.w));
+        }
+        probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = current;
     }
-    probeAtlasOutput[pixel] = current;
     if (hitCount > 0)
     {
         float inverseHits = 1.0 / float(hitCount);

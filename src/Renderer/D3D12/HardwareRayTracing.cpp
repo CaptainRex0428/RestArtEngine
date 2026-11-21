@@ -647,7 +647,7 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12Resource> outputTexture, accumulationTexture, normalGuide, indirectTexture, albedoGuide;
-    // Ray-traced DDGI irradiance atlas (RGBA16F, 1024x32) and depth moments.
+    // Ray-traced DDGI SH-L1 atlas (RGBA16F, 4096x32, four texels per probe) and depth moments.
     ComPtr<ID3D12Resource> probeAtlasTexture, probeDepthTexture, probeAtlasHistory;
     ComPtr<ID3D11Texture2D> sharedProbeAtlas, sharedProbeDepth;
     ComPtr<ID3D11ShaderResourceView> probeAtlasView;
@@ -1520,12 +1520,12 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         resolve.giOptions[2] = 1;
         std::memcpy(constants.data() + 512, &resolve, sizeof(resolve));
         if (!state.upload(constants.data(), constants.size(), state.constants, error)) return fail();
-        constexpr UINT probeWidth = 1024, probeHeight = 32;
+        constexpr UINT probeAtlasWidth = 4096, probeCountWidth = 1024, probeHeight = 32;
         if (frame.probeUpdate && (!state.probeAtlasTexture || !state.probeDepthTexture || !state.probeAtlasReady)) {
             if (!state.wait(dx11Done, error)) return fail();
             D3D12_RESOURCE_DESC probeDescription{};
             probeDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-            probeDescription.Width = probeWidth;
+            probeDescription.Width = probeAtlasWidth;
             probeDescription.Height = probeHeight;
             probeDescription.DepthOrArraySize = probeDescription.MipLevels = 1;
             probeDescription.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1711,7 +1711,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             auto historyTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
             historyTable.ptr += static_cast<SIZE_T>(16) * increment;
             state.list->SetComputeRootDescriptorTable(14, historyTable);
-            state.list->Dispatch((probeWidth + 7) / 8, (probeHeight + 7) / 8, 1);
+            state.list->Dispatch((probeCountWidth + 7) / 8, (probeHeight + 7) / 8, 1);
             uavBarrier(state.list.Get(), nullptr);
             const auto probeDestination = state.native ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
                 : D3D12_RESOURCE_STATE_COMMON;
@@ -1800,7 +1800,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             state.giStatus.accumulatedSamples = 1;
             state.giStatus.reason = "Hardware ray-traced DDGI: " +
                 std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
-                " probe rays, 1024x32 irradiance + depth atlases.";
+                " probe rays, 4096x32 SH-L1 probe atlas + depth moments.";
         }
         state.indirectReady = realtimeLit;
         state.dispatches += realtimeLit ? 2u : 1u;
@@ -1835,7 +1835,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (frame.probeUpdate)
             state.message += " Ray-traced DDGI probe atlas active (" +
                 std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
-                " rays per probe, 1024x32 RGBA16F).";
+                " rays per probe, 4096x32 SH-L1 RGBA16F).";
         return true;
     } catch (const std::exception& exception) {
         if (recording) { state.list->Close(); state.geometryReady = false; }
@@ -1868,7 +1868,7 @@ ID3D11Texture2D* HardwareRayTracing::probeDepth() const {
     return impl_->probeAtlasReady ? impl_->sharedProbeDepth.Get() : nullptr;
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::probeAtlasSize() const {
-    return {1024, 32};
+    return {4096, 32};
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::nativeOutputSize() const {
     return {impl_->width, impl_->height};
