@@ -53,7 +53,7 @@ void bindRhiMesh(const GpuMesh& mesh) {
 
 void drawRhiFullscreen(unsigned shader, bool hasDepth) {
     diagnosticVS = "Private/Scene.hlsl::VSFullscreen";
-    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite"};
+    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite", "PSProbeComposite"};
     diagnosticPS = shader < std::size(entries) ? entries[shader] : "Unknown";
     sceneCommands().bindGraphicsPipeline(graphicsPipeline(shader, 0, 16, true, hasDepth));
     sceneCommands().draw(3);

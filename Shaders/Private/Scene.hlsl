@@ -976,8 +976,9 @@ float4 SoftwareProbeTrace(int2 pixel, int3 dimensions, int ix, int iy, int iz, f
     float3 radiance = 0.0;
     float hitWeight = 0.0;
     const uint directionCount = 8u;
-    float stepSize = max(spacing * 0.6, 0.05);
-    float tolerance = max(spacing * 1.5, 0.25);
+    const uint stepCount = 24u;
+    float stepSize = max(spacing * 0.75, 0.2);
+    float tolerance = max(spacing * 1.5, stepSize * 1.25);
     [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
     {
         float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
@@ -985,7 +986,7 @@ float4 SoftwareProbeTrace(int2 pixel, int3 dimensions, int ix, int iy, int iz, f
         float phi = float(directionIndex) * 2.39996323;
         float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
         float3 sampleWorld = world + direction * stepSize;
-        [loop] for (uint step = 0; step < 8u; ++step)
+        [loop] for (uint step = 0; step < stepCount; ++step)
         {
             float4 clip = mul(float4(sampleWorld, 1.0), viewProjection);
             if (clip.w > 0.0001)
@@ -1063,6 +1064,19 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     radiance /= totalWeight;
     float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
     return float4(lerp(previous.rgb, radiance, blend), 1.0);
+}
+
+float4 PSProbeComposite(FullscreenOutput input) : SV_TARGET
+{
+    int3 pixel = int3(int2(input.position.xy), 0);
+    int debugMode = (int)(viewportDebug.z + 0.5);
+    float4 position = positionBuffer.Load(pixel);
+    float4 direct = ssgiDirectCurrent.Load(pixel);
+    if (position.w < 0.5) return debugMode == 11 ? float4(0.0, 0.0, 0.0, 1.0) : direct;
+    float4 albedo = albedoBuffer.Load(pixel);
+    float3 indirect = ProbeIrradiance(position.xyz) * albedo.rgb * 2.0;
+    if (debugMode == 11) return float4(saturate(indirect * 2.0), 1.0);
+    return float4(saturate(direct.rgb + indirect), 1.0);
 }
 
 struct ProbeDebugVertex
@@ -1155,13 +1169,20 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     if (debugMode == 11)
     {
         if (probeParameters.x > 0.5)
-            return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb * 4.0), 1.0);
-        if (giViewport.x > 0.5)
+        {
+            // Hardware DDGI publishes a complete atlas before Deferred runs, so
+            // its debug view can resolve here. Software DDGI needs the current
+            // direct color as its trace source and is composited in
+            // PSProbeComposite instead.
+            if (probeParameters.w < 2.5)
+                return float4(saturate(ProbeIrradiance(position.xyz) * albedoBuffer.Load(pixel).rgb * 4.0), 1.0);
+        }
+        else if (giViewport.x > 0.5)
             return float4(DisplayColor(indirectLightingBuffer.Load(pixel).rgb), 1.0);
         // SSGI's trace consumes the direct-lit colour. Keep the normal direct
         // output here; the composite pass replaces the final colour with the
         // indirect-only debug result.
-        if (giViewport.w < 0.5) return 0.0;
+        else if (giViewport.w < 0.5) return 0.0;
     }
 #endif
     float4 albedo = albedoBuffer.Load(pixel);
@@ -1173,7 +1194,7 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
     material.grid = 0; // Grid color is already evaluated in the G-buffer pass.
     float4 color = OutputSurface(position.xyz, normalize(normal.xyz), material, input.uv, true);
 #if !defined(RAE_HARDWARE_RAYTRACING)
-    if (probeParameters.x > 0.5)
+    if (probeParameters.w < 2.5)
         color.rgb = saturate(color.rgb + ProbeIrradiance(position.xyz) * albedo.rgb * 2.0);
 #endif
     return color;

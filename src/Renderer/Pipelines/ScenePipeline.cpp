@@ -42,7 +42,7 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
         kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiComposite ||
-        kind == RenderPassKind::ProbeUpdate;
+        kind == RenderPassKind::ProbeUpdate || kind == RenderPassKind::ProbeComposite;
 }
 
 } // namespace
@@ -71,6 +71,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::ScreenSpaceGi: return "SSGI trace";
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
+    case RenderPassKind::ProbeComposite: return "DDGI composite";
     case RenderPassKind::ForwardBackground: return "Forward background";
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
     case RenderPassKind::HardwareResolve: return "Hardware resolve";
@@ -136,11 +137,16 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                     PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
-        if (inputs.probeGridGi && !inputs.hardwareTransport)
+        if (inputs.probeGridGi && !inputs.hardwareTransport) {
             add(RenderPassKind::ProbeUpdate, "DDGI probe update",
                 PipelineResource::SceneDepth |
-                    PipelineResource::GBufferNormal | rasterColor,
+                    PipelineResource::GBufferNormal | PipelineResource::ScreenSpaceDirectCurrent,
                 PipelineResource::ProbeAtlas);
+            add(RenderPassKind::ProbeComposite, "DDGI composite",
+                PipelineResource::ProbeAtlas | PipelineResource::ScreenSpaceDirectCurrent |
+                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferPosition,
+                rasterColor);
+        }
     } else {
         // The background writes the first colour; geometry draws on top of it,
         // so SceneColor is both an input and an output of the geometry pass.

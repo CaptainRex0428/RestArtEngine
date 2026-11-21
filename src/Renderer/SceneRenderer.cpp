@@ -540,7 +540,7 @@ struct SceneRenderer::Impl {
     bool probeLayoutAutoFit = false;
     bool probeLayoutValid = false;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 14> pixelModules;
+    std::array<rhi::ShaderHandle, 15> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
     rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
@@ -763,6 +763,8 @@ struct SceneRenderer::Impl {
         ComPtr<ID3D11PixelShader> ssgiTracePS, ssgiCompositePS;
         if (!pixelShader("PSScreenSpaceGi", ssgiTracePS) ||
             !pixelShader("PSScreenSpaceGiComposite", ssgiCompositePS)) return false;
+        ComPtr<ID3D11PixelShader> probeCompositePS;
+        if (!pixelShader("PSProbeComposite", probeCompositePS)) return false;
         shader.Reset();
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
                 "VSProbeDebug", "vs_5_0", shader, error)) return false;
@@ -2688,11 +2690,15 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         }
         case RenderPassKind::ProbeUpdate: {
             state.beginDiagnosticPass(pass.name);
+            // Software DDGI traces against direct lighting only. Copy the
+            // direct-lit image before adding probe indirect so probes cannot
+            // feed their own previous atlas back into the trace.
+            copyColorTexture(state.ssgiDirectCurrentImage, rasterDestinationImage);
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
             rasterPass.colors = {{state.probeAtlasB, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
-                {state.probeAtlasA, 14}, {rasterDestinationImage, 15}};
+                {state.probeAtlasA, 14}, {state.ssgiDirectCurrentImage, 15}};
             commands.beginRenderPass(rasterPass);
             commands.setViewport({0.0f, 0.0f, 1024.0f, 32.0f, 0.0f, 1.0f});
             state.drawRhiFullscreen(11, false);
@@ -2701,6 +2707,18 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             commands.endRenderPass();
             std::swap(state.probeAtlasA, state.probeAtlasB);
             state.probeAtlasValid = true;
+            break;
+        }
+        case RenderPassKind::ProbeComposite: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{destinationImage, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[2], 2},
+                {state.probeAtlasA, 14}, {state.ssgiDirectCurrentImage, 17}};
+            commands.beginRenderPass(rasterPass);
+            state.drawRhiFullscreen(14, false);
+            commands.endRenderPass();
             break;
         }
         case RenderPassKind::ForwardBackground: {

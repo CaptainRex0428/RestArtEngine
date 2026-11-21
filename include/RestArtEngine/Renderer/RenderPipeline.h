@@ -96,6 +96,7 @@ enum class RenderPassKind : std::uint8_t {
     ScreenSpaceGi,
     ScreenSpaceGiComposite,
     ProbeUpdate,
+    ProbeComposite,
     ForwardBackground,
     ForwardGeometry,
     HardwareResolve,
