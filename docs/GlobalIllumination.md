@@ -1,4 +1,4 @@
-﻿# 全局光照与路径追踪
+# 全局光照与路径追踪
 
 GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminationSettings`／`GlobalIlluminationStatus` 表达算法、更新模式、贡献、采样预算及实际状态，与 Forward／Deferred 管线组织及图形 API 分开。
 
@@ -109,9 +109,15 @@ SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径�
 
 ### Probe grid (DDGI)
 
-DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。DXR 后端（native D3D12 与 hybrid D3D11+DXR）使用逐 probe 光线追踪：每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/环境光求入射 radiance，hysteresis 与上一帧 irradiance atlas 混合，并把 mean/mean-squared hit distance 写入 depth atlas；Deferred 采样 8 个相邻 probe，按 Chebyshev visibility 和 hit ratio 加权。关闭 Hardware ray tracing 时，DDGI 使用**软件光线追踪 fallback**：`PSProbeUpdate` 对每个 probe 发 64 条带 per-probe 旋转的球面方向，在屏幕空间按 world-space position buffer 做最多 24 步 ray march，命中点采样当帧 direct-lit colour 并积分；同样使用 hysteresis，并把每个 probe 与上一帧 atlas 邻域混合，接收端再对 3×3×3 probe 做软滤波，避免稀疏方向在漫反射大面上形成点状/岛状亮斑。Deferred 在软件 fallback 下先输出 direct-only，`DDGI probe update` 从 direct copy 追踪，随后独立 `DDGI composite` pass 才把 probe 间接光加回 SceneColor，因此 probe 不会采样自己的上一帧结果形成反馈；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。软件 probe 存储的是显示空间 radiance 平均值，composite 使用单位增益，并按接收面直接光亮度限制间接亮度，避免纯红/纯绿场景被 DDGI 推成自发光盒子；这是对显示空间近似的能量补偿，纯色高饱和场景仍建议提高 probe 网格/降低 intensity 或使用 DXR 路径。irradiance/depth atlas 均为 1024×32 RGBA16F（width = X×Z，height = Y）。
+DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。probe atlas 为 **4096×32 RGBA16F**，每个 probe 4 个 texel，存储 **SH-L1 入射 radiance 的 4 个 RGB 系数**（首帧起按 4π/N 投影）；depth atlas 仍按 probe 存 mean / mean-squared hit distance 与 hit ratio。
 
-限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas，属于近似但仍比单像素投影更完整的 probe 积分。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+DXR 后端（native D3D12 与 hybrid D3D11+DXR）每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/面积光求 **线性 radiance**，未命中用 Environment；结果投影到 SH-L1，按 `probeHysteresis` 与上一帧 atlas 混合。
+
+关闭 Hardware ray tracing 时使用**软件光线追踪 fallback**：`ProbeLinearSource` 先从 G-buffer 重新计算**线性 direct radiance**（含直接光、面积光、阴影与环境），`DDGI probe update` 对每个 probe 发 64 条带 per-probe 旋转的球面方向，在屏幕空间按 world-space position buffer 做最多 24 步 ray march，命中点采样线性 radiance，投影到 SH-L1，再写 4 个 atlas texel。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。
+
+两个后端共用 `DDGI composite`：接收端采样 8 个相邻 probe，对 SH-L1 系数做三线性插值，按接收面法线计算 clamped-cosine 辐照度 `E(N)`，再以 `albedo / π * E(N)` 合成；合成在线性空间完成后只做一次 `DisplayColor`。硬件路径用 Chebyshev depth-moment visibility，软件路径由屏幕空间命中决定 confidence。`BoundProbeIndirect` 仅作为饱和色安全上限，不是主要能量修正；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。
+
+限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas。SH-L1 是**一阶球谐近似**，能按法线正确积分余弦项和颜色方向，但不含 L2 的方向细节；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
 ### Debug views
 
