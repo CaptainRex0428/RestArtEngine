@@ -84,6 +84,7 @@ Texture2D<float4> motionBuffer : register(t16);
 Texture2D<float4> ssgiDirectCurrent : register(t17);
 Texture2D<float4> ssgiRawIndirect : register(t18);
 Texture2D<float4> ssgiHistoryIndirect : register(t19);
+Texture2D<float4> ssgiSpecularRaw : register(t21);
 Texture2D<float4> probeAtlasRead : register(t14);
 Texture2D<float4> probeColorSource : register(t15);
 Texture2D<float4> probeDepthAtlas : register(t20);
@@ -889,12 +890,65 @@ float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
     return float4(ScreenSpaceTrace(uint2(pixel.xy), position.xyz, normal), 1.0);
 }
 
+float3 ScreenSpaceSpecular(uint2 pixel, float3 position, float3 normal,
+    float roughness, float metallic, float3 albedo)
+{
+    if (giScreenSpace.x < 0.5 || giViewport.w < 0.5) return 0.0;
+    uint steps = max((uint)giViewport.w, 1u);
+    float radius = max(giScreenSpace.y, 0.05);
+    float stepSize = radius / float(steps);
+    float thickness = max(giScreenSpace.z, stepSize * 1.25);
+    float3 view = normalize(cameraPosition.xyz - position);
+    float3 reflection = reflect(-view, normal);
+    float seed = frac(sin(dot(float2(pixel) + giHistory.y * 37.0,
+        float2(12.9898, 78.233))) * 43758.5453);
+    if (roughness > 0.01)
+    {
+        float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
+        float3 bitangent = cross(normal, tangent);
+        float angle = seed * 6.2831853;
+        reflection = normalize(reflection + (tangent * cos(angle) + bitangent * sin(angle)) *
+            roughness * 0.45);
+        if (dot(reflection, normal) < 0.01) reflection = normalize(normal + reflection * 0.05);
+    }
+    float3 radiance = Environment(reflection, roughness);
+    [loop] for (uint step = 1; step <= steps; ++step)
+    {
+        float3 samplePosition = position + reflection * (float(step) * stepSize);
+        float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
+        if (clip.w <= 0.0001) break;
+        float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+        if (any(uv < 0.0) || any(uv > 1.0)) break;
+        float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
+        if (scenePosition.w < 0.5) continue;
+        float3 delta = scenePosition.xyz - samplePosition;
+        if (dot(delta, delta) > thickness * thickness) continue;
+        float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
+        if (dot(hitNormal, reflection) > -0.05) continue;
+        radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
+        break;
+    }
+    float nv = saturate(dot(normal, view));
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
+    return min(radiance, 4.0) * fresnel * saturate(1.0 - roughness * 0.85);
+}
+
+float4 PSScreenSpaceGiSpecular(FullscreenOutput input) : SV_TARGET
+{
+    float4 position = positionBuffer.SampleLevel(gbufferSampler, input.uv, 0);
+    if (position.w < 0.5) return 0.0;
+    float4 normalBufferValue = normalBuffer.SampleLevel(gbufferSampler, input.uv, 0);
+    float4 albedo = albedoBuffer.SampleLevel(gbufferSampler, input.uv, 0);
+    return float4(ScreenSpaceSpecular(uint2(input.position.xy), position.xyz,
+        normalize(normalBufferValue.xyz), albedo.a, normalBufferValue.a, albedo.rgb), 1.0);
+}
+
 struct SSGICompositeOutput
 {
     float4 color : SV_TARGET0;
     float4 history : SV_TARGET1;
 };
-
 SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
 {
     SSGICompositeOutput output;
@@ -956,9 +1010,10 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
     }
     output.history = float4(indirect, 1.0);
     float3 directLinear = probeColorSource.Load(pixel).rgb;
+    float3 specular = ssgiSpecularRaw.SampleLevel(gbufferSampler, input.uv, 0).rgb;
     indirect *= albedoBuffer.Load(pixel).rgb;
-    output.color = giHistory.w > 1.5 ? float4(DisplayColor(indirect), 1.0)
-        : float4(DisplayColor(directLinear + indirect * giScreenSpace.w), 1.0);
+    output.color = giHistory.w > 1.5 ? float4(DisplayColor(indirect + specular), 1.0)
+        : float4(DisplayColor(directLinear + indirect * giScreenSpace.w + specular), 1.0);
     return output;
 }
 

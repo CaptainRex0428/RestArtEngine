@@ -41,7 +41,8 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 
 bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
-        kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiComposite ||
+        kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiSpecular ||
+        kind == RenderPassKind::ScreenSpaceGiComposite ||
         kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
         kind == RenderPassKind::ProbeFilter || kind == RenderPassKind::ProbeComposite;
 }
@@ -70,6 +71,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::GBuffer: return "G-Buffer";
     case RenderPassKind::DeferredLighting: return "Deferred lighting";
     case RenderPassKind::ScreenSpaceGi: return "SSGI trace";
+    case RenderPassKind::ScreenSpaceGiSpecular: return "SSGI specular trace";
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeLinearSource: return "DDGI linear source";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
@@ -137,15 +139,24 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         if (inputs.screenSpaceGi) {
             add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance |
-                    PipelineResource::ScreenSpaceHistory,
+                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance,
                 PipelineResource::ScreenSpaceRawIndirect);
-            add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
+            if (inputs.screenSpaceSpecular)
+                add(RenderPassKind::ScreenSpaceGiSpecular, "SSGI specular trace",
+                    PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
+                        PipelineResource::GBufferPosition | PipelineResource::GBufferAlbedo |
+                        PipelineResource::ProbeLinearRadiance,
+                    PipelineResource::ScreenSpaceRawSpecular);
+            PipelineResource compositeReads =
                 PipelineResource::ProbeLinearRadiance | PipelineResource::ScreenSpaceRawIndirect |
-                    PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
-                    PipelineResource::MotionVectors |
-                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition,
+                PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
+                PipelineResource::MotionVectors |
+                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                PipelineResource::GBufferPosition;
+            if (inputs.screenSpaceSpecular)
+                compositeReads = compositeReads | PipelineResource::ScreenSpaceRawSpecular;
+            add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
+                compositeReads,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
         if (inputs.probeGridGi) {

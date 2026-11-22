@@ -67,6 +67,7 @@ enum class PipelineResource : std::uint64_t {
     ScreenSpaceRawIndirect = 1ull << 19,
     ProbeLinearRadiance = 1ull << 20,
     MotionVectors = 1ull << 21,
+    ScreenSpaceRawSpecular = 1ull << 22,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -96,6 +97,7 @@ enum class RenderPassKind : std::uint8_t {
     GBuffer,
     DeferredLighting,
     ScreenSpaceGi,
+    ScreenSpaceGiSpecular,
     ScreenSpaceGiComposite,
     ProbeLinearSource,
     ProbeUpdate,
@@ -139,6 +141,7 @@ struct PipelineBuildInputs {
     bool realtimeIndirect = false;
     bool hardwareProbeGi = false;
     bool screenSpaceGi = false;
+    bool screenSpaceSpecular = false;
     bool probeGridGi = false;
     bool giDebugProbes = false;
     bool depthOfField = false;

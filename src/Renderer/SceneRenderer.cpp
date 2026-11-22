@@ -257,6 +257,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"ssgiDirectCurrent", D3D_SIT_TEXTURE, 17, 0},
         {"ssgiRawIndirect", D3D_SIT_TEXTURE, 18, 0},
         {"ssgiHistoryIndirect", D3D_SIT_TEXTURE, 19, 0},
+        {"ssgiSpecularRaw", D3D_SIT_TEXTURE, 21, 0},
         {"probeAtlasRead", D3D_SIT_TEXTURE, 14, 0},
         {"probeColorSource", D3D_SIT_TEXTURE, 15, 0},
         {"probeDepthAtlas", D3D_SIT_TEXTURE, 20, 0},
@@ -509,7 +510,7 @@ struct SceneRenderer::Impl {
     // ping-pong denoised indirect history. Keeping indirect out of the colour
     // sampled by the trace avoids the feedback-firefly problem.
     rhi::TextureHandle ssgiDirectHistoryImage, ssgiDirectCurrentImage;
-    rhi::TextureHandle ssgiRawImage, ssgiIndirectHistoryImage, ssgiIndirectHistoryWriteImage;
+    rhi::TextureHandle ssgiRawImage, ssgiSpecularRawImage, ssgiIndirectHistoryImage, ssgiIndirectHistoryWriteImage;
     XMFLOAT4X4 ssgiPreviousViewProjection{};
     std::uint32_t ssgiFrameCounter = 0;
     // The native DXR module owns and transitions its HDR indirect image; the
@@ -548,7 +549,7 @@ struct SceneRenderer::Impl {
     std::unordered_map<std::uint64_t, XMMATRIX> previousActorMatrices;
     std::unordered_map<std::uint64_t, XMMATRIX> currentActorMatrices;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 17> pixelModules;
+    std::array<rhi::ShaderHandle, 18> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
     rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
@@ -651,7 +652,7 @@ struct SceneRenderer::Impl {
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
         rhi::TextureHandle colorImage, depthImage;
-        rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiHistoryRead, ssgiHistoryWrite;
+        rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiSpecular, ssgiHistoryRead, ssgiHistoryWrite;
         rhi::TextureHandle probeAtlasA, probeAtlasB, probeDepthAtlas, probeLinear;
         std::array<rhi::TextureHandle, 3> images;
         rhi::TextureHandle motion;
@@ -701,6 +702,7 @@ struct SceneRenderer::Impl {
             retired.ssgiDirectHistory = std::move(ssgiDirectHistoryImage);
             retired.ssgiDirectCurrent = std::move(ssgiDirectCurrentImage);
             retired.ssgiRaw = std::move(ssgiRawImage);
+            retired.ssgiSpecular = std::move(ssgiSpecularRawImage);
             retired.ssgiHistoryRead = std::move(ssgiIndirectHistoryImage);
             retired.ssgiHistoryWrite = std::move(ssgiIndirectHistoryWriteImage);
             retired.probeAtlasA = std::move(probeAtlasA);
@@ -781,6 +783,8 @@ struct SceneRenderer::Impl {
         if (!pixelShader("PSProbeLinear", probeLinearPS)) return false;
         ComPtr<ID3D11PixelShader> probeFilterPS;
         if (!pixelShader("PSProbeFilter", probeFilterPS)) return false;
+        ComPtr<ID3D11PixelShader> ssgiSpecularPS;
+        if (!pixelShader("PSScreenSpaceGiSpecular", ssgiSpecularPS)) return false;
         shader.Reset();
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
                 "VSProbeDebug", "vs_5_0", shader, error)) return false;
@@ -2171,6 +2175,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.hardwareProbeGi = hardwareProbeGi;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
+    pipelineInputs.screenSpaceSpecular = screenSpaceGi &&
+        settings.globalIllumination.indirectSpecular;
     pipelineInputs.probeGridGi = probeGridGi;
     pipelineInputs.giDebugProbes = giDebugProbes;
     pipelineInputs.depthOfField = depthOfField;
@@ -2703,6 +2709,22 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             commands.endRenderPass();
             break;
         }
+        case RenderPassKind::ScreenSpaceGiSpecular: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{state.ssgiSpecularRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
+                {state.gbufferImages[2], 2}, {state.probeLinearImage, 15}};
+            commands.beginRenderPass(rasterPass);
+            commands.setViewport({0.0f, 0.0f, std::ceil(sceneViewport.Width * 0.5f),
+                std::ceil(sceneViewport.Height * 0.5f), 0.0f, 1.0f});
+            state.drawRhiFullscreen(17, false);
+            commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
+                sceneViewport.Width, sceneViewport.Height});
+            commands.endRenderPass();
+            break;
+        }
         case RenderPassKind::ScreenSpaceGiComposite: {
             state.beginDiagnosticPass(pass.name);
             rhi::RenderPassDesc rasterPass;
@@ -2714,6 +2736,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.gbufferImages[2], 2},
                 {state.probeLinearImage, 15}, {state.motionImage, 16},
                 {state.ssgiRawImage, 18}, {state.ssgiIndirectHistoryImage, 19}};
+            if (settings.globalIllumination.indirectSpecular)
+                rasterPass.reads.push_back({state.ssgiSpecularRawImage, 21});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(13, false);
             commands.endRenderPass();
