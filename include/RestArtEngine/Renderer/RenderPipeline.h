@@ -142,6 +142,8 @@ struct PipelineBuildInputs {
     bool hardwareProbeGi = false;
     bool screenSpaceGi = false;
     bool screenSpaceSpecular = false;
+    bool hardwareReflection = false;
+    bool probeFallbackGi = false;
     bool probeGridGi = false;
     bool giDebugProbes = false;
     bool depthOfField = false;

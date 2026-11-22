@@ -117,6 +117,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         PipelineResource writes = PipelineResource::HardwareImage;
         if (inputs.realtimeIndirect) writes |= PipelineResource::IndirectLighting;
         if (inputs.hardwareProbeGi) writes |= PipelineResource::ProbeAtlas;
+        if (inputs.hardwareReflection) writes |= PipelineResource::ScreenSpaceRawSpecular;
         add(RenderPassKind::HardwareTransport, "Hardware ray tracing transport",
             PipelineResource::None, writes);
     }
@@ -136,10 +137,22 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                 PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                     PipelineResource::GBufferPosition,
                 PipelineResource::ProbeLinearRadiance);
-        if (inputs.screenSpaceGi) {
-            add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
+        if (inputs.probeFallbackGi) {
+            add(RenderPassKind::ProbeUpdate, "SSGI probe fallback update",
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance,
+                    PipelineResource::ProbeLinearRadiance,
+                PipelineResource::ProbeAtlas);
+            add(RenderPassKind::ProbeFilter, "SSGI probe fallback filter",
+                PipelineResource::ProbeAtlas,
+                PipelineResource::ProbeAtlas);
+        }
+        if (inputs.screenSpaceGi) {
+            PipelineResource traceReads =
+                PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
+                PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance;
+            if (inputs.probeFallbackGi) traceReads = traceReads | PipelineResource::ProbeAtlas;
+            add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
+                traceReads,
                 PipelineResource::ScreenSpaceRawIndirect);
             if (inputs.screenSpaceSpecular)
                 add(RenderPassKind::ScreenSpaceGiSpecular, "SSGI specular trace",
@@ -153,7 +166,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                 PipelineResource::MotionVectors |
                 PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition;
-            if (inputs.screenSpaceSpecular)
+            if (inputs.screenSpaceSpecular || inputs.hardwareReflection)
                 compositeReads = compositeReads | PipelineResource::ScreenSpaceRawSpecular;
             add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
                 compositeReads,
@@ -188,7 +201,8 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     // A resolved hardware image replaces the raster colour after lighting.
     // DDGI hardware transport only publishes the probe atlas; the raster scene
     // still owns the colour image.
-    if (inputs.hardwareTransport && !inputs.hardwareProbeGi)
+    if (inputs.hardwareTransport && !inputs.hardwareProbeGi && !inputs.hardwareReflection &&
+        !inputs.screenSpaceGi)
         add(RenderPassKind::HardwareResolve, "Hardware image resolve",
             PipelineResource::HardwareImage, rasterColor);
 

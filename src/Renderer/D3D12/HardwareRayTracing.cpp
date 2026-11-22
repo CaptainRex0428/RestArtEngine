@@ -1387,7 +1387,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         const bool pathRequested = frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
         const bool pathLit = pathRequested && frame.sceneConstants[34] == 0.0f;
         const bool realtime = frame.globalIllumination.mode == GlobalIlluminationMode::Realtime;
-        const bool realtimeLit = pathLit && realtime;
+        const bool realtimeLit = pathLit && realtime && !frame.reflectionOnly;
         // Realtime exports indirect transport only and normally keeps physical
         // visibility for secondary illumination. The global Disabled selection
         // is an explicit override for all light shadowing, including transport.
@@ -1512,7 +1512,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         }
         const HardwareConstants hardware{frame.inverseViewProjection,
             {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
-            {frame.reflections ? 1.0f : 0.0f, static_cast<float>(targetSamples), indirectDiffuseIntensity,
+            {frame.reflectionOnly ? 2.0f : (frame.reflections ? 1.0f : 0.0f), static_cast<float>(targetSamples), indirectDiffuseIntensity,
                 static_cast<float>(restirPacked)},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
             {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}, frame.areaLight, frame.thinLens};
@@ -1804,8 +1804,8 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
                 std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
                 std::string(" probe rays, 9216x32 ") + probeSh + " probe atlas + depth moments.";
         }
-        state.indirectReady = realtimeLit;
-        state.dispatches += realtimeLit ? 2u : 1u;
+        state.indirectReady = realtimeLit || frame.reflectionOnly;
+        state.dispatches += 1u;
         state.message = "D3D12 DXR 1.1 active: " + std::to_string(state.triangleCount) + " triangles. ";
         if (pathRequested) {
             state.message += (realtime ? "Realtime GI " : "Progressive GI ") + std::to_string(state.accumulatedSamples) + "/" +

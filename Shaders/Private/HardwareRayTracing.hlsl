@@ -270,6 +270,62 @@ void ResolveProbeAtlas(uint2 pixel)
     }
 }
 
+// Reflection-only dispatch used by the raster SSGI specular composite. It
+// writes incident radiance reflected from the primary surface into the shared
+// indirect texture; the raster composite applies its own Fresnel/roughness
+// weighting, so this stays a pure radiance transport result.
+void ResolveReflection(uint2 pixel)
+{
+    float3 origin, direction;
+    float farDistance;
+    PathPrimaryRay(pixel, 0.5, origin, direction, farDistance);
+    float distance;
+    float3 hitNormal;
+    int object;
+    bool hit = TraceScene(origin, direction, distance, hitNormal, object, false);
+    if (!hit || distance > farDistance)
+    {
+        indirectLightingOutput[pixel] = 0.0;
+        return;
+    }
+    RayTriangle tri = rayTriangles[-object - 2];
+    float3 position = origin + direction * distance;
+    float3 geometricNormal = tri.normal;
+    if (dot(geometricNormal, direction) > 0.0) geometricNormal = -geometricNormal;
+    float3 normal = normalize(hitNormal);
+    if (dot(normal, geometricNormal) < 0.0) normal = geometricNormal;
+    if (dot(normal, -direction) <= 1e-6) normal = geometricNormal;
+    Surface material = TriangleMaterialAt(position, normal, (uint)(-object - 2));
+    float3 view = normalize(-direction);
+    float3 reflection = reflect(-view, normal);
+    uint randomState = PathHash(pixel.x + pixel.y * outputInfo.x + 0x51ed270bu);
+    if (material.roughness > 0.01)
+    {
+        float3 tangent = PathToWorld(float3(1.0, 0.0, 0.0), normal);
+        float3 bitangent = cross(normal, tangent);
+        float angle = PathRandom(randomState) * 2.0 * PI;
+        reflection = normalize(reflection + (tangent * cos(angle) + bitangent * sin(angle)) *
+            material.roughness * 0.3);
+        if (dot(reflection, normal) < 0.01) reflection = normalize(normal + reflection * 0.05);
+    }
+    float3 radiance = Environment(reflection, material.roughness);
+    float reflectedDistance;
+    float3 reflectedNormal;
+    int reflectedObject;
+    if (TraceScene(position + geometricNormal * RAY_EPSILON, reflection,
+        reflectedDistance, reflectedNormal, reflectedObject, false))
+    {
+        float3 reflectedPosition = position + reflection * reflectedDistance;
+        Surface reflectedMaterial = TriangleMaterialAt(reflectedPosition,
+            normalize(reflectedNormal), (uint)(-reflectedObject - 2));
+        radiance = PathDirectLight(reflectedPosition, normalize(reflectedNormal),
+            normalize(reflectedNormal), -reflection, reflectedMaterial);
+        radiance += PathAreaDirect(reflectedPosition, normalize(reflectedNormal),
+            normalize(reflectedNormal), -reflection, reflectedMaterial, randomState);
+    }
+    indirectLightingOutput[pixel] = float4(clamp(radiance, 0.0, 65504.0), 1.0);
+}
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 thread : SV_DispatchThreadID)
 {
@@ -279,6 +335,11 @@ void CSMain(uint3 thread : SV_DispatchThreadID)
         return;
     }
     if (any(thread.xy >= outputInfo.xy)) return;
+    if (traceOptions.x > 1.5)
+    {
+        ResolveReflection(thread.xy);
+        return;
+    }
     if (accumulationInfo.w == 1 && viewportDebug.z < 0.5)
     {
         bool realtime = giOptions.x == 1;

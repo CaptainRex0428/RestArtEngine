@@ -2089,7 +2089,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         (lighting.info[1] < .5f || lighting.info[2] >= 0);
     const bool hardwareTransport = diagnosticMainScene && hardwareDepthCompatible && hardwareBackendAllowed &&
         settings.hardwareRayTracing && state.hardwarePipelineReady && state.hardwareRayTracing &&
-        state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
+        state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed &&
+        (settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing ||
+            settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid ||
+            (settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace &&
+                settings.hardwareRayTracingReflections &&
+                settings.globalIllumination.indirectSpecular &&
+                (settings.editorViewport || settings.offscreenTarget)));
     const bool hardwareProbeGi = hardwareTransport &&
         (settings.debugView == 0 || settings.debugView == 11 || settings.debugView == 12) &&
         (settings.editorViewport || settings.offscreenTarget) &&
@@ -2099,11 +2105,19 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     const bool debugGiProbes = settings.debugView == 12;
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested &&
         (settings.debugView == 0 || debugGiIndirect);
-    const bool screenSpaceGi = diagnosticMainScene &&
+    const bool screenSpaceRequested = diagnosticMainScene &&
         (settings.debugView == 0 || debugGiIndirect) &&
         (settings.editorViewport || settings.offscreenTarget) &&
         settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace &&
-        settings.path == RenderPath::Deferred && !hardwareTransport;
+        settings.path == RenderPath::Deferred;
+    // Native DXR can supply reflection-only radiance while the raster SSGI
+    // chain still owns lighting/composite. Hybrid keeps the pure SSR path.
+    const bool hardwareReflection = hardwareTransport && screenSpaceRequested &&
+        settings.hardwareRayTracingReflections && state.native12 &&
+        settings.globalIllumination.indirectSpecular;
+    const bool screenSpaceGi = screenSpaceRequested &&
+        (!hardwareTransport || hardwareReflection);
+    const bool probeFallbackGi = screenSpaceGi && !hardwareTransport;
     if (diagnosticMainScene && state.ssgiViewId != settings.viewId) {
         state.ssgiHistoryValid = false;
         state.ssgiViewId = settings.viewId;
@@ -2176,7 +2190,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
     pipelineInputs.screenSpaceSpecular = screenSpaceGi &&
-        settings.globalIllumination.indirectSpecular;
+        settings.globalIllumination.indirectSpecular && !hardwareReflection;
+    pipelineInputs.hardwareReflection = hardwareReflection;
+    pipelineInputs.probeFallbackGi = probeFallbackGi;
     pipelineInputs.probeGridGi = probeGridGi;
     pipelineInputs.giDebugProbes = giDebugProbes;
     pipelineInputs.depthOfField = depthOfField;
@@ -2307,9 +2323,11 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.giStatus.reason += " Probe spacing " + std::to_string(probeSpacing) +
             (autoFitApplied ? " m (scene auto-fit)." : " m.");
     }
-    probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
-        probeGridGi && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
-        probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : 0.0f));
+    const bool probeAtlasActive = probeGridGi || probeFallbackGi;
+    probeData.parameters = XMFLOAT4(probeAtlasActive ? 1.0f : 0.0f,
+        probeAtlasActive && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
+        probeSettings.indirectDiffuseIntensity,
+        hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : (probeFallbackGi ? 4.0f : 0.0f)));
     probeData.layout = XMFLOAT4(static_cast<float>(std::clamp(
         settings.globalIllumination.probeShOrder, 1u, 2u)), 0.0f, 0.0f, 0.0f);
     state.probeDebugVertexCount = 0;
@@ -2551,8 +2569,16 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             frame.width = static_cast<std::uint32_t>(viewportWidth);
             frame.height = static_cast<std::uint32_t>(viewportHeight);
             frame.reflections = settings.hardwareRayTracingReflections;
+            frame.reflectionOnly = hardwareReflection;
             frame.shadows = settings.hardwareRayTracingShadows && settings.shadowMethod != ShadowMethod::Disabled;
             frame.globalIllumination = settings.globalIllumination;
+            if (hardwareReflection) {
+                // The DXR renderer validates PathTracing as its only supported
+                // method; reflectionOnly suppresses the path resolve dispatch
+                // and redirects CSMain to the reflection-only branch.
+                frame.globalIllumination.method = GlobalIlluminationMethod::PathTracing;
+                frame.globalIllumination.mode = GlobalIlluminationMode::Realtime;
+            }
             frame.probeUpdate = hardwareProbeGi;
             if (hardwareProbeGi) {
                 frame.probeGrid = {static_cast<float>(probeSettings.probeGridX),
@@ -2590,6 +2616,23 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             std::string hardwareError;
             if (state.hardwareRayTracing->render(frame, world, assets, materialOverride, hardwareError)) {
                 hardwareFrameReady = true;
+                if (hardwareReflection && state.native12) {
+                    if (auto* reflection = state.hardwareRayTracing->nativeIndirect()) {
+                        const auto dimensions = state.hardwareRayTracing->nativeOutputSize();
+                        if (!state.nativeIndirectCopy ||
+                            state.nativeIndirectCopy->description().width != dimensions.first ||
+                            state.nativeIndirectCopy->description().height != dimensions.second)
+                            state.nativeIndirectCopy = state.rhiDevice->createTexture(
+                                rhi::TextureDesc{dimensions.first, dimensions.second, 1,
+                                    rhi::Format::RGBA16Float, true, "Native DXR reflection copy"});
+                        const auto imported = state.native12->importTexture(reflection,
+                            rhi::TextureDesc{dimensions.first, dimensions.second, 1,
+                                rhi::Format::RGBA16Float, false, "Native DXR reflection source"},
+                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                        state.native12->copyTextureRegion(state.nativeIndirectCopy, imported, 0, 0,
+                            dimensions.first, dimensions.second);
+                    }
+                }
                 thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
                     settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
                     !realtimeGiRequested;
@@ -2700,6 +2743,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.colors = {{state.ssgiRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
                 {state.probeLinearImage, 15}, {state.ssgiIndirectHistoryImage, 19}};
+            if (probeFallbackGi) {
+                rasterPass.reads.push_back({state.probeAtlasA, 14});
+                rasterPass.reads.push_back({state.probeDepthAtlasImage, 20});
+            }
             commands.beginRenderPass(rasterPass);
             commands.setViewport({0.0f, 0.0f, std::ceil(sceneViewport.Width * 0.5f),
                 std::ceil(sceneViewport.Height * 0.5f), 0.0f, 1.0f});
@@ -2716,6 +2763,10 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.colors = {{state.ssgiSpecularRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
                 {state.gbufferImages[2], 2}, {state.probeLinearImage, 15}};
+            if (probeFallbackGi) {
+                rasterPass.reads.push_back({state.probeAtlasA, 14});
+                rasterPass.reads.push_back({state.probeDepthAtlasImage, 20});
+            }
             commands.beginRenderPass(rasterPass);
             commands.setViewport({0.0f, 0.0f, std::ceil(sceneViewport.Width * 0.5f),
                 std::ceil(sceneViewport.Height * 0.5f), 0.0f, 1.0f});
@@ -2736,7 +2787,9 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.gbufferImages[2], 2},
                 {state.probeLinearImage, 15}, {state.motionImage, 16},
                 {state.ssgiRawImage, 18}, {state.ssgiIndirectHistoryImage, 19}};
-            if (settings.globalIllumination.indirectSpecular)
+            if (hardwareReflection && state.nativeIndirectCopy)
+                rasterPass.reads.push_back({state.nativeIndirectCopy, 21});
+            else if (settings.globalIllumination.indirectSpecular)
                 rasterPass.reads.push_back({state.ssgiSpecularRawImage, 21});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(13, false);

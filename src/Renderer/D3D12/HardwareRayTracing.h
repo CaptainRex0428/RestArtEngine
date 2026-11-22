@@ -40,6 +40,9 @@ struct Frame {
     std::uint32_t width = 0, height = 0;
     bool reflections = true, shadows = true;
     bool probeUpdate = false;
+    // Reflection-only frame used by raster SSGI; the resolved texture is
+    // exposed through nativeIndirect()/indirectLighting().
+    bool reflectionOnly = false;
     GlobalIlluminationSettings globalIllumination;
     // Changed by the owning scene renderer for explicit restart or re-enable.
     std::uint64_t historyEpoch = 0;

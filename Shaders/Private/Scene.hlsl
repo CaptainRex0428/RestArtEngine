@@ -813,6 +813,8 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 // Screen-space diffuse GI trace. The depth/normal buffer and previous-frame
 // direct colour are current; the indirect result is accumulated separately so
 // the trace never samples its own previous indirect contribution.
+float3 ProbeIrradiance(float3 position, float3 normal);
+
 float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
 {
     if (giScreenSpace.x < 0.5 || giHistory.x < 0.5 || giViewport.w < 0.5) return 0.0;
@@ -870,10 +872,12 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
         }
         if (!resolved)
         {
-            // No depth hit (screen edge or off-screen): use the environment as
-            // a conservative off-screen GI fallback instead of dropping the ray.
-            sum += Environment(direction, 0.0) * 0.25;
-            weight += 0.25;
+            // No depth hit (screen edge or off-screen): use the low-resolution
+            // DDGI probe atlas for off-screen energy, with environment as the
+            // remaining fallback.
+            float3 probeFallback = ProbeIrradiance(position, normal);
+            sum += Environment(direction, 0.0) * 0.25 + probeFallback;
+            weight += max(0.25, dot(abs(probeFallback), float3(0.333, 0.333, 0.333)));
         }
     }
     return weight > 0.0 ? sum / weight : 0.0;
@@ -912,6 +916,7 @@ float3 ScreenSpaceSpecular(uint2 pixel, float3 position, float3 normal,
         if (dot(reflection, normal) < 0.01) reflection = normalize(normal + reflection * 0.05);
     }
     float3 radiance = Environment(reflection, roughness);
+    bool reflected = false;
     [loop] for (uint step = 1; step <= steps; ++step)
     {
         float3 samplePosition = position + reflection * (float(step) * stepSize);
@@ -926,8 +931,11 @@ float3 ScreenSpaceSpecular(uint2 pixel, float3 position, float3 normal,
         float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
         if (dot(hitNormal, reflection) > -0.05) continue;
         radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
+        reflected = true;
         break;
     }
+    if (!reflected)
+        radiance += ProbeIrradiance(position, reflection);
     float nv = saturate(dot(normal, view));
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
