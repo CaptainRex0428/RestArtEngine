@@ -195,7 +195,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
         }
         if (gi.method == renderer::GlobalIlluminationMethod::ProbeGrid) {
-            ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; without DXR it uses a software ray-traced screen-space probe fallback. Probe rays controls the DXR per-probe ray budget.");
+            ImGui::TextWrapped("DDGI fits a probe grid to the scene bounds (or cameraTarget when auto-fit is off). DXR backends ray-trace each probe; without DXR it uses a software ray-traced screen-space probe fallback. Probe rays controls the DXR per-probe ray budget; Probe SH order selects SH-L1 (4 coefficients) or SH-L2 (9 coefficients) incident irradiance.");
             if (!settings.hardwareRayTracing &&
                 projectBackendAllowsHardware(projectRenderingDraft_.backendPreference) &&
                 renderer.hardwareRayTracingSupported())
@@ -205,6 +205,12 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             if (ImGui::SliderInt("Probe rays", &rays, 1, static_cast<int>(renderer::kGiMaxProbeRays),
                     "%d", ImGuiSliderFlags_AlwaysClamp)) {
                 gi.probeRayCount = static_cast<std::uint32_t>(rays);
+                changed = true;
+            }
+            int shOrder = gi.probeShOrder > 1 ? 1 : 0;
+            const char* shOrderLabels[] = {"SH-L1 (4 coefficients)", "SH-L2 (9 coefficients)"};
+            if (ImGui::Combo("Probe SH order", &shOrder, shOrderLabels, 2)) {
+                gi.probeShOrder = static_cast<std::uint32_t>(shOrder + 1);
                 changed = true;
             }
             int x = static_cast<int>(gi.probeGridX), y = static_cast<int>(gi.probeGridY), z = static_cast<int>(gi.probeGridZ);

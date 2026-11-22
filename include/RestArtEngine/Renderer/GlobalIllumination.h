@@ -64,6 +64,9 @@ struct GlobalIlluminationSettings {
     float probeHysteresis = 0.95f;
     bool probeAutoFit = true;
     std::uint32_t probeRayCount = 16;
+    // Per-probe SH order for incident radiance: 1 = L1 (4 coefficients),
+    // 2 = L2 (9 coefficients). Both paths evaluate clamped-cosine irradiance.
+    std::uint32_t probeShOrder = 1;
     // Realtime reconstruction. Defaults preserve the legacy spatial resolve.
     GlobalIlluminationDenoiser denoiser = GlobalIlluminationDenoiser::Spatial;
     GlobalIlluminationMotionVectors motionVectors = GlobalIlluminationMotionVectors::Automatic;

@@ -5,12 +5,13 @@
 #include "Scene.hlsl"
 
 // The raster scene header hides the DDGI constants in the hardware build, but
-// the probe-update dispatch shares the same 48-byte b9 layout.
+// the probe-update dispatch shares the same 64-byte b9 layout.
 cbuffer ProbeConstants : register(b9)
 {
     float4 probeGrid;
     float4 probeOrigin;
     float4 probeParameters;
+    float4 probeLayout;
 };
 
 RWTexture2D<float4> hardwareOutput : register(u0);
@@ -179,10 +180,11 @@ void ResolveRealtimeGi(uint2 pixel)
 void ResolveProbeAtlas(uint2 pixel)
 {
     int3 dimensions = int3(probeGrid.xyz);
-    int atlasBase = int(pixel.x) * 4;
+    int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
+    int atlasBase = int(pixel.x) * coefficientCount;
     if (dimensions.x <= 0 || dimensions.y <= 0 || dimensions.z <= 0)
     {
-        [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
+        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
             probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
         return;
     }
@@ -191,12 +193,13 @@ void ResolveProbeAtlas(uint2 pixel)
     int iy = int(pixel.y);
     if (iz >= dimensions.z || iy >= dimensions.y || ix >= dimensions.x)
     {
-        [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
+        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
             probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
         return;
     }
     float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
     float3 sh0 = 0.0, sh1 = 0.0, sh2 = 0.0, sh3 = 0.0;
+    float3 sh4 = 0.0, sh5 = 0.0, sh6 = 0.0, sh7 = 0.0, sh8 = 0.0;
     float distanceSum = 0.0;
     float distanceSquaredSum = 0.0;
     uint hitCount = 0;
@@ -204,6 +207,9 @@ void ResolveProbeAtlas(uint2 pixel)
     const float shProjection = 4.0 * 3.14159265359 / float(directionCount);
     const float shY00 = 0.2820947918;
     const float shY1 = 0.4886025119;
+    const float shY2 = 1.0925484306;
+    const float shY20 = 0.3153915653;
+    const float shY22 = 0.5462742153;
     [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
     {
         float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
@@ -230,9 +236,15 @@ void ResolveProbeAtlas(uint2 pixel)
         sh1 += radiance * (shProjection * shY1 * direction.y);
         sh2 += radiance * (shProjection * shY1 * direction.z);
         sh3 += radiance * (shProjection * shY1 * direction.x);
+        sh4 += radiance * (shProjection * shY2 * direction.x * direction.y);
+        sh5 += radiance * (shProjection * shY2 * direction.y * direction.z);
+        sh6 += radiance * (shProjection * shY20 * (3.0 * direction.z * direction.z - 1.0));
+        sh7 += radiance * (shProjection * shY2 * direction.x * direction.z);
+        sh8 += radiance * (shProjection * shY22 *
+            (direction.x * direction.x - direction.y * direction.y));
     }
-    float3 coefficients[4] = {sh0, sh1, sh2, sh3};
-    [unroll] for (int coefficient = 0; coefficient < 4; ++coefficient)
+    float3 coefficients[9] = {sh0, sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8};
+    [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
     {
         float4 current = float4(clamp(coefficients[coefficient], 0.0, 65504.0),
             coefficient == 0 ? 1.0 : 0.0);

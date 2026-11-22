@@ -294,6 +294,7 @@ void globalIlluminationRoundTrip() {
         loaded.rendering.globalIllumination.probeHysteresis == 0.95f &&
         loaded.rendering.globalIllumination.probeAutoFit &&
         loaded.rendering.globalIllumination.probeRayCount == 16 &&
+        loaded.rendering.globalIllumination.probeShOrder == 1 &&
         loaded.rendering.globalIllumination.sampling == renderer::GlobalIlluminationSampling::Uniform &&
         loaded.rendering.globalIllumination.restirCandidates == 4 &&
         loaded.rendering.globalIllumination.restirDirect && loaded.rendering.globalIllumination.restirIndirect &&
@@ -354,6 +355,7 @@ void globalIlluminationRoundTrip() {
     requested.globalIllumination.probeHysteresis = 0.8f;
     requested.globalIllumination.probeAutoFit = false;
     requested.globalIllumination.probeRayCount = 24;
+    requested.globalIllumination.probeShOrder = 2;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "DDGI probe grid settings survive project reload.");
@@ -361,7 +363,8 @@ void globalIlluminationRoundTrip() {
     require(savedDdgi.at("method") == "probeGrid" && savedDdgi.at("probeGridX") == 20 &&
         savedDdgi.at("probeGridY") == 10 && savedDdgi.at("probeGridZ") == 24 &&
         savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f &&
-        savedDdgi.at("probeAutoFit") == false && savedDdgi.at("probeRayCount") == 24,
+        savedDdgi.at("probeAutoFit") == false && savedDdgi.at("probeRayCount") == 24 &&
+        savedDdgi.at("probeShOrder") == 2,
         "DDGI serializes its probe grid and history controls.");
     requested.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
     requested.globalIllumination.restirCandidates = 7;
@@ -445,6 +448,8 @@ void globalIlluminationValidation() {
         reject(Json{{"probeAutoFit", invalid}}, "probeAutoFit");
     for (const auto& invalid : {Json(0), Json(-1), Json(33), Json("16"), Json(1.5), Json(nullptr)})
         reject(Json{{"probeRayCount", invalid}}, "probeRayCount");
+    for (const auto& invalid : {Json(0), Json(3), Json(-1), Json("2"), Json(1.5), Json(nullptr)})
+        reject(Json{{"probeShOrder", invalid}}, "probeShOrder");
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{contribution, invalid}}, contribution);

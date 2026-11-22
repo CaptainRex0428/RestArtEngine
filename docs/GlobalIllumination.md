@@ -8,7 +8,7 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 | 更新模式 `mode` | Progressive accumulation／Realtime | 渐进式累积完整画面，或持续计算供光栅管线使用的间接光。SSGI／DDGI 固定为实时。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 分别选择接收表面的颜色溢出与反射贡献，直接光不受这两个开关影响。 |
 | SSGI 参数 | steps／radius／thickness | 屏幕空间步数、世界空间追踪半径与命中厚度容差。 |
-| DDGI 参数 | grid X/Y/Z／spacing／hysteresis／auto-fit／probe rays | probe 网格尺寸、世界间距、历史混合、场景自动拟合，以及每个 probe 的光线数。 |
+| DDGI 参数 | grid X/Y/Z／spacing／hysteresis／auto-fit／probe rays／SH order | probe 网格尺寸、世界间距、历史混合、场景自动拟合、每个 probe 的光线数，以及 SH-L1（4 系数）或 SH-L2（9 系数）入射辐照度表示。 |
 | 采样策略 `sampling` | Uniform／ReSTIR | Path tracing 实时模式可选择加权 reservoir 采样；direct/indirect 各自开关，候选数控制每像素候选。 |
 
 当前实现是 Windows 上同适配器 DX11／DX12 DXR 1.1 的组合。其他 GI 算法、Vulkan／OpenGL 后端及 Linux／macOS GI 尚未实现。不支持的请求保留在项目中，并显示不能生效的原因；不能将架构接口视为各平台已支持。
@@ -109,15 +109,15 @@ SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径�
 
 ### Probe grid (DDGI)
 
-DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。probe atlas 为 **4096×32 RGBA16F**，每个 probe 4 个 texel，存储 **SH-L1 入射 radiance 的 4 个 RGB 系数**（首帧起按 4π/N 投影）；depth atlas 仍按 probe 存 mean / mean-squared hit distance 与 hit ratio。
+DDGI 要求 **Deferred** 路径。渲染器以场景网格包围盒自动拟合 `probeGridX × probeGridY × probeGridZ` 的 probe 网格（`probeAutoFit` 默认开启；关闭后使用 `cameraTarget` + `probeSpacing`）。probe atlas 为 **9216×32 RGBA16F**，按 `probeShOrder` 配置为 **SH-L1（每 probe 4 个 RGB 系数）** 或 **SH-L2（每 probe 9 个 RGB 系数）**；系数按 4π/N 投影入射 radiance。depth atlas 仍按 probe 存 mean / mean-squared hit distance 与 hit ratio。
 
-DXR 后端（native D3D12 与 hybrid D3D11+DXR）每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/面积光求 **线性 radiance**，未命中用 Environment；结果投影到 SH-L1，按 `probeHysteresis` 与上一帧 atlas 混合。
+DXR 后端（native D3D12 与 hybrid D3D11+DXR）每个 probe 发射 `probeRayCount` 条球面方向光线，命中后用材质 + 直接光/面积光求 **线性 radiance**，未命中用 Environment；结果按 `probeShOrder` 投影到 SH-L1/L2，按 `probeHysteresis` 与上一帧 atlas 混合。
 
-关闭 Hardware ray tracing 时使用**软件光线追踪 fallback**：`ProbeLinearSource` 先从 G-buffer 重新计算**线性 direct radiance**（含直接光、面积光、阴影与环境），`DDGI probe update` 对每个 probe 发 64 条带 per-probe 旋转的球面方向，在屏幕空间按 world-space position buffer 做最多 24 步 ray march，命中点采样线性 radiance，投影到 SH-L1，再写 4 个 atlas texel。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。
+关闭 Hardware ray tracing 时使用**软件光线追踪 fallback**：`ProbeLinearSource` 先从 G-buffer 重新计算**线性 direct radiance**（含直接光、面积光、阴影与环境），`DDGI probe update` 对每个 probe 发 64 条带 per-probe 旋转的球面方向，在屏幕空间按 world-space position buffer 做最多 24 步 ray march，命中点采样线性 radiance，按同一 `probeShOrder` 投影到 SH-L1/L2，再写 4 或 9 个 atlas texel。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。
 
-两个后端共用 `DDGI composite`：接收端采样 8 个相邻 probe，对 SH-L1 系数做三线性插值，按接收面法线计算 clamped-cosine 辐照度 `E(N)`，再以 `albedo / π * E(N)` 合成；合成在线性空间完成后只做一次 `DisplayColor`。硬件路径用 Chebyshev depth-moment visibility，软件路径由屏幕空间命中决定 confidence。`BoundProbeIndirect` 仅作为饱和色安全上限，不是主要能量修正；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。
+两个后端共用 `DDGI composite`：接收端采样 8 个相邻 probe，对当前 `probeShOrder` 的 SH 系数做三线性插值，按接收面法线计算 clamped-cosine 辐照度 `E(N)`，再以 `albedo / π * E(N)` 合成；合成在线性空间完成后只做一次 `DisplayColor`。硬件路径用 Chebyshev depth-moment visibility，软件路径由屏幕空间命中决定 confidence。`BoundProbeIndirect` 仅作为饱和色安全上限，不是主要能量修正；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。
 
-限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas。SH-L1 是**一阶球谐近似**，能按法线正确积分余弦项和颜色方向，但不含 L2 的方向细节；`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
+限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas。SH 投影仍是**带限近似**：`probeShOrder=1` 只保留一阶方向项，`probeShOrder=2` 增加 L2 方向细节；两者都按法线正确积分余弦项，但不等于完整 radiance 分布。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
 ### Debug views
 
@@ -175,6 +175,7 @@ Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path
   "probeHysteresis": 0.95,
   "probeAutoFit": true,
   "probeRayCount": 16,
+  "probeShOrder": 1,
   "sampling": "restir",
   "restirCandidates": 4,
   "restirDirect": true,
@@ -183,7 +184,7 @@ Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path
 }
 ```
 
-缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95／auto-fit 开启／16 rays，缺失采样字段默认 `uniform`／4／true／true／true。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；`sampling` 可为 `uniform` 或 `restir`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
+缺失对象或 `method` 时默认 `disabled`；缺失 `mode` 默认 `progressive`，缺失两个贡献开关默认 `true`，缺失 `indirectDiffuseIntensity` 默认 `1.0`，因此旧路径追踪项目保持原来的光照强度。缺失 `denoiser` 默认 `spatial`（保持旧画面），缺失 `motionVectors` 默认 `automatic`，缺失 `denoiseIterations` 默认 2，缺失 SSGI 参数默认 8／2.0／0.2，缺失 DDGI 参数默认 16／8／16／1.0／0.95／auto-fit 开启／16 rays／SH-L1，缺失采样字段默认 `uniform`／4／true／true／true。`method` 可为 `disabled`、`pathTracing`、`screenSpace` 或 `probeGrid`；`sampling` 可为 `uniform` 或 `restir`；强度必须为 0–8 的有限数值，布尔值、字符串和越界值均拒绝。算法和模式字符串、贡献布尔值及整数范围同样严格验证。保存保留未知嵌套字段，失败保留原 manifest；请求值不随设备能力自动改写。
 
 运行 `RestArtEngine.exe --gi-self-test --capture-dir artifacts/gi` 检查实际 GPU 画面。颜色溢出、粗糙反射、低／高样本误差、历史重置、曝光独立、模式和贡献开关、两条光栅路径接收实时间接光都需要相应证据；`--hardware-rt-self-test` 补充配置真实交互和保存重载。设备不可用时明确报告跳过，不能把零错误或 dispatch 计数作为 GI 画质证明。本页说明实现契约，不宣称所有检查已运行通过。
 

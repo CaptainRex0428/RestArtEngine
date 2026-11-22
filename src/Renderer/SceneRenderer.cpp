@@ -117,9 +117,10 @@ static_assert(sizeof(GlobalIlluminationConstants) == 112);
 struct alignas(16) ProbeConstants {
     XMFLOAT4 grid; // x, y, z, hysteresis
     XMFLOAT4 origin; // x, y, z, spacing
-    XMFLOAT4 parameters; // enabled, valid, intensity, reserved
+    XMFLOAT4 parameters; // enabled, valid, intensity, mode
+    XMFLOAT4 layout; // SH order, reserved...
 };
-static_assert(sizeof(ProbeConstants) == 48);
+static_assert(sizeof(ProbeConstants) == 64);
 struct ProbeDebugMeshVertex {
     float position[3];
     float normal[3];
@@ -540,6 +541,7 @@ struct SceneRenderer::Impl {
     std::array<std::uint32_t, 3> probeLayoutGrid{};
     float probeLayoutSpacing = 0.0f;
     bool probeLayoutAutoFit = false;
+    std::uint32_t probeLayoutShOrder = 0;
     bool probeLayoutValid = false;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
     std::array<rhi::ShaderHandle, 16> pixelModules;
@@ -569,6 +571,7 @@ struct SceneRenderer::Impl {
     bool probeDebugOverlay = false;
     float probeEffectiveSpacing = 0.0f;
     bool probeAutoFitUsed = false;
+    std::uint32_t probeShOrderUsed = 1;
     std::uint64_t ssgiViewId = 0;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
@@ -2254,12 +2257,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         autoFitApplied ? originZ : snapProbe(originZ), probeSpacing);
     state.probeEffectiveSpacing = probeSpacing;
     state.probeAutoFitUsed = autoFitApplied;
+    state.probeShOrderUsed = std::clamp(settings.globalIllumination.probeShOrder, 1u, 2u);
     const bool probeLayoutChanged = !state.probeLayoutValid ||
         state.probeLayoutGrid[0] != probeSettings.probeGridX ||
         state.probeLayoutGrid[1] != probeSettings.probeGridY ||
         state.probeLayoutGrid[2] != probeSettings.probeGridZ ||
         std::abs(state.probeLayoutSpacing - probeSpacing) > 1e-5f ||
-        state.probeLayoutAutoFit != autoFitApplied;
+        state.probeLayoutAutoFit != autoFitApplied ||
+        state.probeLayoutShOrder != settings.globalIllumination.probeShOrder;
     if (probeLayoutChanged) {
         // Grid/spacing changes remap atlas pixels. Old probe values must not be
         // blended into the new layout, otherwise the first frames show large
@@ -2271,6 +2276,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             probeSettings.probeGridZ};
         state.probeLayoutSpacing = probeSpacing;
         state.probeLayoutAutoFit = autoFitApplied;
+        state.probeLayoutShOrder = settings.globalIllumination.probeShOrder;
         state.probeLayoutValid = true;
     }
     if (probeGridGi) {
@@ -2280,6 +2286,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     probeData.parameters = XMFLOAT4(probeGridGi ? 1.0f : 0.0f,
         probeGridGi && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
         probeSettings.indirectDiffuseIntensity, hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : 0.0f));
+    probeData.layout = XMFLOAT4(static_cast<float>(std::clamp(
+        settings.globalIllumination.probeShOrder, 1u, 2u)), 0.0f, 0.0f, 0.0f);
     state.probeDebugVertexCount = 0;
     state.probeDebugIndexCount = 0;
     state.probeDebugInstanceCount = 0;
@@ -2716,7 +2724,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
                 {state.probeAtlasA, 14}, {state.probeLinearImage, 15}};
             commands.beginRenderPass(rasterPass);
-            commands.setViewport({0.0f, 0.0f, 4096.0f, 32.0f, 0.0f, 1.0f});
+            const float probeWriteWidth = settings.globalIllumination.probeShOrder > 1 ? 9216.0f : 4096.0f;
+            commands.setViewport({0.0f, 0.0f, probeWriteWidth, 32.0f, 0.0f, 1.0f});
             state.drawRhiFullscreen(11, false);
             commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
                 sceneViewport.Width, sceneViewport.Height});
@@ -3123,6 +3132,7 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
             impl_->hardwareStatus.find("Ray-traced DDGI") != std::string::npos;
         status.reason = impl_->lastProbeGridGi
             ? std::string(rayTracedProbe ? "Ray-traced DDGI" : "Software ray-traced DDGI") +
+                (impl_->probeShOrderUsed > 1 ? " (SH-L2)" : " (SH-L1)") +
                 " updates a scene-fitted diffuse probe atlas. Probe spacing " +
                 std::to_string(impl_->probeEffectiveSpacing) + " m" +
                 (impl_->probeAutoFitUsed ? " (scene auto-fit)." : ".") +

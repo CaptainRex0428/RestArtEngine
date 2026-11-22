@@ -90,7 +90,8 @@ cbuffer ProbeConstants : register(b9)
 {
     float4 probeGrid;    // x, y, z probe counts, history hysteresis
     float4 probeOrigin;  // grid origin xyz, world spacing
-    float4 probeParameters;  // enabled, previous atlas valid, intensity, reserved
+    float4 probeParameters;  // enabled, previous atlas valid, intensity, mode
+    float4 probeLayout;      // x = SH order (1 or 2), yzw reserved
 };
 #endif
 
@@ -926,26 +927,39 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
 
 static const float kShY00 = 0.2820947918;
 static const float kShY1 = 0.4886025119;
+static const float kShY2 = 1.0925484306;
+static const float kShY20 = 0.3153915653;
+static const float kShY22 = 0.5462742153;
 
-// First-order SH incident-radiance representation. The probe stores the L1
-// projection of incident radiance; the receiver evaluates the clamped-cosine
-// convolution for its actual normal instead of using an averaged RGB value.
-float3 ProbeshIrradiance(float3 c0, float3 c1, float3 c2, float3 c3, float3 normal)
+float3 ProbeshIrradiance(float3 c0, float3 c1, float3 c2, float3 c3,
+    float3 c4, float3 c5, float3 c6, float3 c7, float3 c8, int order, float3 normal)
 {
     float3 n = normalize(normal);
     float3 irradiance = PI * c0 * kShY00 +
         (2.0 * PI / 3.0) * kShY1 * (c1 * n.y + c2 * n.z + c3 * n.x);
+    if (order > 1)
+    {
+        float3 l2 = c4 * (kShY2 * n.x * n.y) +
+            c5 * (kShY2 * n.y * n.z) +
+            c6 * (kShY20 * (3.0 * n.z * n.z - 1.0)) +
+            c7 * (kShY2 * n.x * n.z) +
+            c8 * (kShY22 * (n.x * n.x - n.y * n.y));
+        irradiance += (PI / 4.0) * l2;
+    }
     return irradiance / PI;
 }
 
 float3 ProbeIrradiance(float3 position, float3 normal)
 {
     if (probeParameters.x < 0.5 || probeParameters.y < 0.5) return 0.0;
+    int shOrder = probeLayout.x > 1.5 ? 2 : 1;
+    int coefficientCount = shOrder == 2 ? 9 : 4;
     int3 dimensions = int3(probeGrid.xyz);
     float3 local = (position - probeOrigin.xyz) / max(probeOrigin.w, 1e-4) - 0.5;
     int3 base = int3(floor(local));
     float3 fraction = saturate(local - floor(local));
-    float3 c0 = 0.0, c1 = 0.0, c2 = 0.0, c3 = 0.0;
+    float3 c[9];
+    [unroll] for (int shIndex = 0; shIndex < 9; ++shIndex) c[shIndex] = 0.0;
     float weightSum = 0.0;
     [unroll] for (int y = 0; y < 2; ++y)
     [unroll] for (int z = 0; z < 2; ++z)
@@ -955,12 +969,9 @@ float3 ProbeIrradiance(float3 position, float3 normal)
         float weight = (x ? fraction.x : 1.0 - fraction.x) *
             (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
         int2 probeCoordinate = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
-        int atlasBase = probeCoordinate.x * 4;
-        float4 sh0 = probeAtlasRead.Load(int3(atlasBase + 0, probeCoordinate.y, 0));
-        float4 sh1 = probeAtlasRead.Load(int3(atlasBase + 1, probeCoordinate.y, 0));
-        float4 sh2 = probeAtlasRead.Load(int3(atlasBase + 2, probeCoordinate.y, 0));
-        float4 sh3 = probeAtlasRead.Load(int3(atlasBase + 3, probeCoordinate.y, 0));
-        float confidence = probeParameters.w > 1.5 && probeParameters.w < 2.5 ? 1.0 : sh0.a;
+        int atlasBase = probeCoordinate.x * coefficientCount;
+        float confidence = probeParameters.w > 1.5 && probeParameters.w < 2.5 ? 1.0 :
+            probeAtlasRead.Load(int3(atlasBase, probeCoordinate.y, 0)).a;
         if (probeParameters.w > 1.5 && probeParameters.w < 2.5)
         {
             // Chebyshev visibility still uses the per-probe depth moments.
@@ -976,15 +987,16 @@ float3 ProbeIrradiance(float3 position, float3 normal)
             confidence *= saturate(0.35 + 0.65 * visibility * saturate(depthSample.z));
         }
         float weighted = weight * confidence;
-        c0 += sh0.rgb * weighted;
-        c1 += sh1.rgb * weighted;
-        c2 += sh2.rgb * weighted;
-        c3 += sh3.rgb * weighted;
+        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
+            c[coefficient] += probeAtlasRead.Load(int3(
+                atlasBase + coefficient, probeCoordinate.y, 0)).rgb * weighted;
         weightSum += weighted;
     }
     float inverseWeight = 1.0 / max(weightSum, 1e-5);
-    return ProbeshIrradiance(c0 * inverseWeight, c1 * inverseWeight,
-        c2 * inverseWeight, c3 * inverseWeight, normal) * probeParameters.z;
+    return ProbeshIrradiance(c[0] * inverseWeight, c[1] * inverseWeight,
+        c[2] * inverseWeight, c[3] * inverseWeight, c[4] * inverseWeight,
+        c[5] * inverseWeight, c[6] * inverseWeight, c[7] * inverseWeight,
+        c[8] * inverseWeight, shOrder, normal) * probeParameters.z;
 }
 
 float3 BoundProbeIndirect(float3 directColor, float3 indirect)
@@ -1006,13 +1018,20 @@ struct ProbeSH
     float3 c1;
     float3 c2;
     float3 c3;
+    float3 c4;
+    float3 c5;
+    float3 c6;
+    float3 c7;
+    float3 c8;
 };
 
 ProbeSH SoftwareProbeTrace(int3 probe, int3 dimensions)
 {
     float spacing = max(probeOrigin.w, 0.01);
     float3 world = probeOrigin.xyz + (float3(probe) + 0.5) * spacing;
-    ProbeSH sh; sh.c0 = 0.0; sh.c1 = 0.0; sh.c2 = 0.0; sh.c3 = 0.0;
+    ProbeSH sh;
+    sh.c0 = 0.0; sh.c1 = 0.0; sh.c2 = 0.0; sh.c3 = 0.0;
+    sh.c4 = 0.0; sh.c5 = 0.0; sh.c6 = 0.0; sh.c7 = 0.0; sh.c8 = 0.0;
     const uint directionCount = 64u;
     const uint stepCount = 24u;
     const float shProjection = 4.0 * PI / float(directionCount);
@@ -1051,6 +1070,12 @@ ProbeSH SoftwareProbeTrace(int3 probe, int3 dimensions)
         sh.c1 += radiance * (shProjection * kShY1 * direction.y);
         sh.c2 += radiance * (shProjection * kShY1 * direction.z);
         sh.c3 += radiance * (shProjection * kShY1 * direction.x);
+        sh.c4 += radiance * (shProjection * kShY2 * direction.x * direction.y);
+        sh.c5 += radiance * (shProjection * kShY2 * direction.y * direction.z);
+        sh.c6 += radiance * (shProjection * kShY20 * (3.0 * direction.z * direction.z - 1.0));
+        sh.c7 += radiance * (shProjection * kShY2 * direction.x * direction.z);
+        sh.c8 += radiance * (shProjection * kShY22 *
+            (direction.x * direction.x - direction.y * direction.y));
     }
     return sh;
 }
@@ -1059,8 +1084,9 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
 {
     int2 pixel = int2(input.position.xy);
     int3 dimensions = int3(probeGrid.xyz);
-    int coefficient = pixel.x % 4;
-    int probeX = pixel.x / 4;
+    int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
+    int coefficient = pixel.x % coefficientCount;
+    int probeX = pixel.x / coefficientCount;
     int ix = probeX % max(dimensions.x, 1);
     int iz = probeX / max(dimensions.x, 1);
     int iy = pixel.y;
@@ -1071,8 +1097,16 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     if (probeParameters.w > 2.5)
     {
         ProbeSH sh = SoftwareProbeTrace(int3(ix, iy, iz), dimensions);
-        float3 current = coefficient == 0 ? sh.c0 :
-            coefficient == 1 ? sh.c1 : coefficient == 2 ? sh.c2 : sh.c3;
+        float3 current;
+        if (coefficient == 0) current = sh.c0;
+        else if (coefficient == 1) current = sh.c1;
+        else if (coefficient == 2) current = sh.c2;
+        else if (coefficient == 3) current = sh.c3;
+        else if (coefficient == 4) current = sh.c4;
+        else if (coefficient == 5) current = sh.c5;
+        else if (coefficient == 6) current = sh.c6;
+        else if (coefficient == 7) current = sh.c7;
+        else current = sh.c8;
         float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
         return float4(lerp(previous.rgb, current, blend), 1.0);
     }
@@ -1171,7 +1205,8 @@ ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
     output.worldPosition = worldPosition;
     output.worldNormal = input.normal;
     int2 probeCoordinate = int2(input.atlas);
-    float4 probe = probeAtlasRead.Load(int3(probeCoordinate.x * 4, probeCoordinate.y, 0));
+    int probeStride = probeLayout.x > 1.5 ? 9 : 4;
+    float4 probe = probeAtlasRead.Load(int3(probeCoordinate.x * probeStride, probeCoordinate.y, 0));
     output.color = float4(saturate(probe.rgb), 1.0);
     return output;
 }

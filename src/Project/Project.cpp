@@ -254,6 +254,14 @@ RenderingSettings readRenderingSettings(const Json& value) {
             settings.globalIllumination.probeRayCount =
                 static_cast<std::uint32_t>(encoded.get<std::int64_t>());
         }
+        if (gi.contains("probeShOrder")) {
+            const auto& encoded = gi.at("probeShOrder");
+            if (!encoded.is_number_integer() || (encoded.get<std::int64_t>() != 1 &&
+                encoded.get<std::int64_t>() != 2))
+                throw std::runtime_error("rendering.globalIllumination.probeShOrder must be 1 or 2.");
+            settings.globalIllumination.probeShOrder =
+                static_cast<std::uint32_t>(encoded.get<std::int64_t>());
+        }
         if (gi.contains("probeHysteresis")) {
             const auto& encoded = gi.at("probeHysteresis");
             if (!encoded.is_number())
@@ -1074,6 +1082,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["probeHysteresis"] = settings.globalIllumination.probeHysteresis;
         gi["probeAutoFit"] = settings.globalIllumination.probeAutoFit;
         gi["probeRayCount"] = settings.globalIllumination.probeRayCount;
+        gi["probeShOrder"] = settings.globalIllumination.probeShOrder;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

@@ -527,10 +527,10 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             }
             auto* constants = reflection->GetConstantBufferByName(binding.Name);
             D3D12_SHADER_BUFFER_DESC probeDescription{};
-            if (FAILED(constants->GetDesc(&probeDescription)) || probeDescription.Size != 48) {
-                error = "DXR ProbeConstants must match the 48-byte CPU layout."; return false;
+            if (FAILED(constants->GetDesc(&probeDescription)) || probeDescription.Size != 64) {
+                error = "DXR ProbeConstants must match the 64-byte CPU layout."; return false;
             }
-            const char* fields[] = {"probeGrid", "probeOrigin", "probeParameters"};
+            const char* fields[] = {"probeGrid", "probeOrigin", "probeParameters", "probeLayout"};
             for (UINT field = 0; field < std::size(fields); ++field) {
                 D3D12_SHADER_VARIABLE_DESC variable{};
                 D3D12_SHADER_TYPE_DESC type{};
@@ -647,7 +647,7 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12Resource> outputTexture, accumulationTexture, normalGuide, indirectTexture, albedoGuide;
-    // Ray-traced DDGI SH-L1 atlas (RGBA16F, 4096x32, four texels per probe) and depth moments.
+    // Ray-traced DDGI SH-L1 atlas (RGBA16F, 9216x32, four texels per probe) and depth moments.
     ComPtr<ID3D12Resource> probeAtlasTexture, probeDepthTexture, probeAtlasHistory;
     ComPtr<ID3D11Texture2D> sharedProbeAtlas, sharedProbeDepth;
     ComPtr<ID3D11ShaderResourceView> probeAtlasView;
@@ -1490,7 +1490,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         std::memcpy(constants.data() + denoiseOffset, &denoise, sizeof(denoise));
         std::memcpy(constants.data() + lightingOffset, &frame.lighting, sizeof(frame.lighting));
-        std::array<float, 12> probeConstants{};
+        std::array<float, 16> probeConstants{};
         std::copy_n(frame.probeGrid.begin(), 4, probeConstants.begin());
         std::copy_n(frame.probeOrigin.begin(), 4, probeConstants.begin() + 4);
         const bool probeHistoryValid = state.probeHistoryValid &&
@@ -1499,6 +1499,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         probeConstants[9] = probeHistoryValid ? 1.0f : 0.0f;
         probeConstants[10] = 0.0f;
         probeConstants[11] = frame.probeUpdate ? 1.0f : 0.0f;
+        probeConstants[12] = static_cast<float>(std::clamp(frame.globalIllumination.probeShOrder, 1u, 2u));
         std::memcpy(constants.data() + probeOffset, probeConstants.data(), sizeof(probeConstants));
         std::uint32_t restirPacked = 0;
         if (frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir) {
@@ -1520,7 +1521,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         resolve.giOptions[2] = 1;
         std::memcpy(constants.data() + 512, &resolve, sizeof(resolve));
         if (!state.upload(constants.data(), constants.size(), state.constants, error)) return fail();
-        constexpr UINT probeAtlasWidth = 4096, probeCountWidth = 1024, probeHeight = 32;
+        constexpr UINT probeAtlasWidth = 9216, probeCountWidth = 1024, probeHeight = 32;
         if (frame.probeUpdate && (!state.probeAtlasTexture || !state.probeDepthTexture || !state.probeAtlasReady)) {
             if (!state.wait(dx11Done, error)) return fail();
             D3D12_RESOURCE_DESC probeDescription{};
@@ -1795,12 +1796,13 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             : GlobalIlluminationMotionVectors::CameraOnly;
         state.giStatus.accumulatedSamples = state.accumulatedSamples;
         if (frame.probeUpdate) {
+            const char* probeSh = frame.globalIllumination.probeShOrder > 1 ? "SH-L2" : "SH-L1";
             state.giStatus.effective = GlobalIlluminationMethod::ProbeGrid;
             state.giStatus.effectiveMode = GlobalIlluminationMode::Realtime;
             state.giStatus.accumulatedSamples = 1;
             state.giStatus.reason = "Hardware ray-traced DDGI: " +
                 std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
-                " probe rays, 4096x32 SH-L1 probe atlas + depth moments.";
+                std::string(" probe rays, 9216x32 ") + probeSh + " probe atlas + depth moments.";
         }
         state.indirectReady = realtimeLit;
         state.dispatches += realtimeLit ? 2u : 1u;
@@ -1835,7 +1837,9 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         if (frame.probeUpdate)
             state.message += " Ray-traced DDGI probe atlas active (" +
                 std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
-                " rays per probe, 4096x32 SH-L1 RGBA16F).";
+                " rays per probe, 9216x32 " +
+                std::string(frame.globalIllumination.probeShOrder > 1 ? "SH-L2" : "SH-L1") +
+                " RGBA16F).";
         return true;
     } catch (const std::exception& exception) {
         if (recording) { state.list->Close(); state.geometryReady = false; }
@@ -1868,7 +1872,7 @@ ID3D11Texture2D* HardwareRayTracing::probeDepth() const {
     return impl_->probeAtlasReady ? impl_->sharedProbeDepth.Get() : nullptr;
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::probeAtlasSize() const {
-    return {4096, 32};
+    return {9216, 32};
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::nativeOutputSize() const {
     return {impl_->width, impl_->height};

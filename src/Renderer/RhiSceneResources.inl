@@ -21,11 +21,11 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA16Float, true, "SSGI indirect history read"});
         candidate.ssgiHistoryWrite = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA16Float, true, "SSGI indirect history write"});
-        candidate.probeAtlasA = rhiDevice->createTexture({4096, 32, 1,
+        candidate.probeAtlasA = rhiDevice->createTexture({9216, 32, 1,
             rhi::Format::RGBA16Float, true, "DDGI probe atlas A"});
-        candidate.probeAtlasB = rhiDevice->createTexture({4096, 32, 1,
+        candidate.probeAtlasB = rhiDevice->createTexture({9216, 32, 1,
             rhi::Format::RGBA16Float, true, "DDGI probe atlas B"});
-        candidate.probeDepthAtlas = rhiDevice->createTexture({4096, 32, 1,
+        candidate.probeDepthAtlas = rhiDevice->createTexture({9216, 32, 1,
             rhi::Format::RGBA16Float, true, "DDGI probe depth atlas"});
         candidate.probeLinear = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA16Float, true, "DDGI linear direct radiance"});
