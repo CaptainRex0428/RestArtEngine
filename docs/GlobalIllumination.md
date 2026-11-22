@@ -100,12 +100,12 @@ Sandbox 的红、蓝示例材质使用非金属涂漆：金属度 0、粗糙度 
 
 SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 native D3D12 的 **Deferred** 路径运行；Forward 请求会报告不可用。它拆成两个 pass：
 
-1. `SSGI trace`：用当前帧 position G-buffer 做世界空间屏幕追踪，命中点采样**当前帧 direct-lit colour 副本**（在 SSGI composite 写入前复制，不含 SSGI），因此不会采样自身形成能量反馈。
-2. `SSGI composite`：对 raw indirect 做 3×3 几何加权空域滤波，再用当前世界位置 + 上一帧 ViewProjection 重投影上一帧 indirect history、clamp 到当前邻域后做时域混合；最后按接收面 albedo 调制并与当前 direct colour 相加。composite 显式绑定 albedo；debug `GI indirect` 视图保留 direct 输出给 trace 使用，再只显示间接结果。
+1. `SSGI trace`：在**半分辨率**目标上对每个像素发 4 条 cosine-weighted 半球方向，沿世界空间方向在 depth/position G-buffer 上**按距离从近到远 march**；第一次进入 thickness 容差且命中面朝向来光方向时停止。命中点采样共享的**线性 direct-radiance** 纹理，并叠加一帧 previous indirect 作为第二次反弹；离屏/无命中方向使用环境 radiance 作为保守 fallback。
+2. `SSGI composite`：对 half-res raw indirect 做 3×3 几何加权空域滤波并双线性上采样，再用 **per-object previous-world-position G-buffer** 投影到上一帧 UV，clamp 到当前邻域后做时域混合；最后乘接收面 albedo，在线性空间加 direct 后只做一次 `DisplayColor`。composite 显式绑定 albedo；debug `GI indirect` 视图输出 display-space 间接结果。
 
-`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制步数、世界空间半径和深度容差；厚度有 `0.5 * radius` 的最小值，避免小 thickness 在远距离/大场景把所有样本拒绝导致全黑。trace 会拒绝过亮的 emitter-like 像素，避免把灯／白色高光当作普通漫反射辐照度。SSGI 参数或 GI history epoch 变化时直接丢弃 temporal history，composite 当前帧权重为 25%；`GI indirect` debug 视图不做 temporal 混合，保证参数/相机调整后当前帧即可看到 raw 间接结果。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
+`SSGI steps`、`SSGI radius`、`SSGI thickness` 控制每根 ray 的 march 步数、世界空间半径和深度容差；trace 会用命中面 normal、前后朝向和厚度拒绝背面/穿墙样本，再对过亮 emitter-like 线性 radiance 做保守拒绝。SSGI 参数或 GI history epoch 变化时丢弃 temporal history；`GI indirect` debug 视图不做 temporal 混合，保证参数/相机调整后当前帧即可看到 raw 间接结果。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
 
-SSGI 当前只在编辑器／离屏场景目标启用（runtime 交换链路径暂不启用），并在 display-space 颜色上合成；历史为独立 indirect buffer，不读取最终 scene colour，因此不会再出现首版的自反馈 firefly。快速相机运动/屏幕外信息仍限制屏幕空间 GI 的准确性。
+SSGI 当前只在编辑器／离屏场景目标启用；历史为独立 indirect buffer，不读取最终 scene colour，避免自反馈。剩余限制：仍是屏幕空间可见性、只有一次额外反弹、没有间接镜面；屏幕外物体只能由环境 fallback 近似，半分辨率会有轻微细节损失。
 
 ### Probe grid (DDGI)
 
@@ -204,4 +204,4 @@ Uniform 是默认值，保持旧的逐灯精确直接光；ReSTIR 只影响 Path
 
 采样侧的扩展集中在 `PathTracing.hlsli`：新的光源类型、环境重要性采样、更稳的 MIS 权重、时域降噪都动这里。改完用 `--gi-self-test` 的颜色溢出、收敛和历史重置用例验证，并确认实时模式的 5×5 滤波没有把边缘抹花——它按法线、平面距离、albedo 和粗糙度抑制跨边缘混合，加字段就要一起改。
 
-路线上的缺口按依赖排：相机重投影 + temporal/spatial 降噪已经接入（逐物体运动向量仍待扩展）；随后是 SSGI、DDGI、ReSTIR 与逐物体运动向量，再谈环境重要性采样、透明与发光材质，最后才是 Vulkan 光追和每视图独立历史。当前 `GlobalIlluminationMethod` 枚举只有 `Disabled` 和 `Path tracing`，新增算法必须以真实实现和验证为准，不能用不存在的选项做功能承诺。
+路线上的缺口按依赖排：相机重投影 + temporal/spatial 降噪已经接入；SSGI 已增加 per-object previous-world motion、前向 depth march、半分辨率 trace 和 off-screen 环境 fallback；随后是 DDGI、ReSTIR 的进一步收敛，再谈环境重要性采样、透明与发光材质，最后才是 Vulkan 光追和每视图独立历史。当前 `GlobalIlluminationMethod` 枚举只有 `Disabled` 和 `Path tracing`，新增算法必须以真实实现和验证为准，不能用不存在的选项做功能承诺。
