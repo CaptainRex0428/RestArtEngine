@@ -19,6 +19,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA16Float, true, "SSGI raw indirect (half resolution)"});
         candidate.ssgiSpecular = rhiDevice->createTexture({(targetWidth + 1) / 2, (targetHeight + 1) / 2, 1,
             rhi::Format::RGBA16Float, true, "SSGI raw specular (half resolution)"});
+        candidate.hardwareReflection = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA16Float, true, "DXR reflection radiance"});
         candidate.ssgiHistoryRead = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA16Float, true, "SSGI indirect history read"});
         candidate.ssgiHistoryWrite = rhiDevice->createTexture({targetWidth, targetHeight, 1,
@@ -54,6 +56,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         ssgiDirectCurrentImage = std::move(candidate.ssgiDirectCurrent);
         ssgiRawImage = std::move(candidate.ssgiRaw);
         ssgiSpecularRawImage = std::move(candidate.ssgiSpecular);
+        hardwareReflectionImage = std::move(candidate.hardwareReflection);
         ssgiIndirectHistoryImage = std::move(candidate.ssgiHistoryRead);
         ssgiIndirectHistoryWriteImage = std::move(candidate.ssgiHistoryWrite);
         probeAtlasA = std::move(candidate.probeAtlasA);

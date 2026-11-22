@@ -510,7 +510,7 @@ struct SceneRenderer::Impl {
     // ping-pong denoised indirect history. Keeping indirect out of the colour
     // sampled by the trace avoids the feedback-firefly problem.
     rhi::TextureHandle ssgiDirectHistoryImage, ssgiDirectCurrentImage;
-    rhi::TextureHandle ssgiRawImage, ssgiSpecularRawImage, ssgiIndirectHistoryImage, ssgiIndirectHistoryWriteImage;
+    rhi::TextureHandle ssgiRawImage, ssgiSpecularRawImage, hardwareReflectionImage, ssgiIndirectHistoryImage, ssgiIndirectHistoryWriteImage;
     XMFLOAT4X4 ssgiPreviousViewProjection{};
     std::uint32_t ssgiFrameCounter = 0;
     // The native DXR module owns and transitions its HDR indirect image; the
@@ -652,7 +652,7 @@ struct SceneRenderer::Impl {
     std::uint32_t sceneWidth = 0, sceneHeight = 0;
     struct SceneTargets {
         rhi::TextureHandle colorImage, depthImage;
-        rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiSpecular, ssgiHistoryRead, ssgiHistoryWrite;
+        rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiSpecular, hardwareReflection, ssgiHistoryRead, ssgiHistoryWrite;
         rhi::TextureHandle probeAtlasA, probeAtlasB, probeDepthAtlas, probeLinear;
         std::array<rhi::TextureHandle, 3> images;
         rhi::TextureHandle motion;
@@ -703,6 +703,7 @@ struct SceneRenderer::Impl {
             retired.ssgiDirectCurrent = std::move(ssgiDirectCurrentImage);
             retired.ssgiRaw = std::move(ssgiRawImage);
             retired.ssgiSpecular = std::move(ssgiSpecularRawImage);
+            retired.hardwareReflection = std::move(hardwareReflectionImage);
             retired.ssgiHistoryRead = std::move(ssgiIndirectHistoryImage);
             retired.ssgiHistoryWrite = std::move(ssgiIndirectHistoryWriteImage);
             retired.probeAtlasA = std::move(probeAtlasA);
@@ -2113,7 +2114,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     // Native DXR can supply reflection-only radiance while the raster SSGI
     // chain still owns lighting/composite. Hybrid keeps the pure SSR path.
     const bool hardwareReflection = hardwareTransport && screenSpaceRequested &&
-        settings.hardwareRayTracingReflections && state.native12 &&
+        settings.hardwareRayTracingReflections &&
         settings.globalIllumination.indirectSpecular;
     const bool screenSpaceGi = screenSpaceRequested &&
         (!hardwareTransport || hardwareReflection);
@@ -2632,6 +2633,22 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                         state.native12->copyTextureRegion(state.nativeIndirectCopy, imported, 0, 0,
                             dimensions.first, dimensions.second);
                     }
+                } else if (hardwareReflection && state.context) {
+                    if (auto* reflection = state.hardwareRayTracing->indirectLighting()) {
+                        ID3D11Resource* source = nullptr;
+                        reflection->GetResource(&source);
+                        if (source) {
+                            const auto reflectionSize = state.hardwareRayTracing->nativeOutputSize();
+                            const auto& destination = state.hardwareReflectionImage->description();
+                            D3D11_BOX box{0, 0, 0,
+                                std::min<std::uint32_t>(reflectionSize.first, destination.width),
+                                std::min<std::uint32_t>(reflectionSize.second, destination.height), 1};
+                            state.context->CopySubresourceRegion(
+                                d3d11::nativeTexture(state.hardwareReflectionImage), 0, 0, 0, 0,
+                                source, 0, &box);
+                            source->Release();
+                        }
+                    }
                 }
                 thinLensImage = hardwareFrameReady && settings.debugView == 0 &&
                     settings.globalIllumination.method == GlobalIlluminationMethod::PathTracing &&
@@ -2787,9 +2804,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.gbufferImages[2], 2},
                 {state.probeLinearImage, 15}, {state.motionImage, 16},
                 {state.ssgiRawImage, 18}, {state.ssgiIndirectHistoryImage, 19}};
-            if (hardwareReflection && state.nativeIndirectCopy)
-                rasterPass.reads.push_back({state.nativeIndirectCopy, 21});
-            else if (settings.globalIllumination.indirectSpecular)
+            if (hardwareReflection) {
+                if (state.native12 && state.nativeIndirectCopy)
+                    rasterPass.reads.push_back({state.nativeIndirectCopy, 21});
+                else
+                    rasterPass.reads.push_back({state.hardwareReflectionImage, 21});
+            } else if (settings.globalIllumination.indirectSpecular)
                 rasterPass.reads.push_back({state.ssgiSpecularRawImage, 21});
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(13, false);
