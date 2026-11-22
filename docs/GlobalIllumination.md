@@ -115,7 +115,7 @@ DXR 后端（native D3D12 与 hybrid D3D11+DXR）每个 probe 发射 `probeRayCo
 
 关闭 Hardware ray tracing 时使用**软件光线追踪 fallback**：`ProbeLinearSource` 先从 G-buffer 重新计算**线性 direct radiance**（含直接光、面积光、阴影与环境），`DDGI probe update` 对每个 probe 发 64 条带 per-probe 旋转的球面方向，在屏幕空间按 world-space position buffer 做最多 24 步 ray march，命中点采样线性 radiance，按同一 `probeShOrder` 投影到 SH-L1/L2，再写 4 或 9 个 atlas texel。该路径可在 native D3D12 raster 与 strict D3D11 运行，状态显示 `Software ray-traced DDGI`。
 
-两个后端共用 `DDGI composite`：接收端采样 8 个相邻 probe，对当前 `probeShOrder` 的 SH 系数做三线性插值，按接收面法线计算 clamped-cosine 辐照度 `E(N)`，再以 `albedo / π * E(N)` 合成；合成在线性空间完成后只做一次 `DisplayColor`。硬件路径用 Chebyshev depth-moment visibility，软件路径由屏幕空间命中决定 confidence。`BoundProbeIndirect` 仅作为饱和色安全上限，不是主要能量修正；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。
+两个后端共用 `DDGI composite`：`DDGI probe filter` 先对 SH 系数做 3×3×3 probe 邻域 Gaussian 平滑，接收端再采样 8 个相邻 probe，对当前 `probeShOrder` 的 SH 系数做三线性插值，按接收面法线计算 clamped-cosine 辐照度 `E(N)`，再以 `albedo / π * E(N)` 合成；合成在线性空间完成后只做一次 `DisplayColor`。硬件路径用 Chebyshev depth-moment visibility，软件路径由屏幕空间命中决定 confidence。`BoundProbeIndirect` 仅作为饱和色安全上限，不是主要能量修正；composite 写入 `rasterDestinationImage`，AA 开启时也会进入 AA resolve，不会被 FXAA/TAA 覆盖；debug `GI indirect` 也由 composite 输出当前帧间接结果。
 
 限制：DXR 后端为逐 probe 光线追踪；软件 fallback 仍依赖屏幕可见表面，被遮挡/屏幕外 probe 保留旧值，且没有硬件 depth/visibility atlas。SH 投影仍是**带限近似**：`probeShOrder=1` 只保留一阶方向项，`probeShOrder=2` 增加 L2 方向细节；两者都按法线正确积分余弦项，但不等于完整 radiance 分布。`Indirect specular` 不参与 DDGI；Forward、runtime swapchain 和同帧 DXR path tracing 传输下不可用。首帧没有有效 atlas，第二帧开始贡献。
 
