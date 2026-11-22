@@ -1116,6 +1116,35 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     return previous;
 }
 
+float4 PSProbeFilter(FullscreenOutput input) : SV_TARGET
+{
+    int2 pixel = int2(input.position.xy);
+    int3 dimensions = int3(probeGrid.xyz);
+    int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
+    int coefficient = pixel.x % coefficientCount;
+    int probeX = pixel.x / coefficientCount;
+    int ix = probeX % max(dimensions.x, 1);
+    int iz = probeX / max(dimensions.x, 1);
+    int iy = pixel.y;
+    if (iz >= dimensions.z || iy >= dimensions.y) return 0.0;
+    float3 center = probeAtlasRead.Load(int3(pixel, 0)).rgb;
+    float3 filtered = 0.0;
+    float weightSum = 0.0;
+    [unroll] for (int dz = -1; dz <= 1; ++dz)
+    [unroll] for (int dy = -1; dy <= 1; ++dy)
+    [unroll] for (int dx = -1; dx <= 1; ++dx)
+    {
+        int3 coordinate = int3(ix + dx, iy + dy, iz + dz);
+        if (any(coordinate < int3(0, 0, 0)) || any(coordinate >= dimensions)) continue;
+        int atlasBase = (coordinate.x + coordinate.z * dimensions.x) * coefficientCount;
+        float weight = exp(-0.75 * float(dx * dx + dy * dy + dz * dz));
+        filtered += probeAtlasRead.Load(int3(atlasBase + coefficient, coordinate.y, 0)).rgb * weight;
+        weightSum += weight;
+    }
+    if (weightSum <= 0.0) return float4(center, 1.0);
+    return float4(lerp(center, filtered / weightSum, 0.65), 1.0);
+}
+
 float4 PSProbeComposite(FullscreenOutput input) : SV_TARGET
 {
     int3 pixel = int3(int2(input.position.xy), 0);

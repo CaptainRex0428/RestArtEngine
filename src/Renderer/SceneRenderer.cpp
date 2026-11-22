@@ -544,7 +544,7 @@ struct SceneRenderer::Impl {
     std::uint32_t probeLayoutShOrder = 0;
     bool probeLayoutValid = false;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 16> pixelModules;
+    std::array<rhi::ShaderHandle, 17> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
     rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
@@ -773,6 +773,8 @@ struct SceneRenderer::Impl {
         if (!pixelShader("PSProbeComposite", probeCompositePS)) return false;
         ComPtr<ID3D11PixelShader> probeLinearPS;
         if (!pixelShader("PSProbeLinear", probeLinearPS)) return false;
+        ComPtr<ID3D11PixelShader> probeFilterPS;
+        if (!pixelShader("PSProbeFilter", probeFilterPS)) return false;
         shader.Reset();
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
                 "VSProbeDebug", "vs_5_0", shader, error)) return false;
@@ -2727,6 +2729,23 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             const float probeWriteWidth = settings.globalIllumination.probeShOrder > 1 ? 9216.0f : 4096.0f;
             commands.setViewport({0.0f, 0.0f, probeWriteWidth, 32.0f, 0.0f, 1.0f});
             state.drawRhiFullscreen(11, false);
+            commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
+                sceneViewport.Width, sceneViewport.Height});
+            commands.endRenderPass();
+            std::swap(state.probeAtlasA, state.probeAtlasB);
+            state.probeAtlasValid = true;
+            break;
+        }
+        case RenderPassKind::ProbeFilter: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{state.probeAtlasB, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.probeAtlasA, 14}};
+            commands.beginRenderPass(rasterPass);
+            const float probeWriteWidth = settings.globalIllumination.probeShOrder > 1 ? 9216.0f : 4096.0f;
+            commands.setViewport({0.0f, 0.0f, probeWriteWidth, 32.0f, 0.0f, 1.0f});
+            state.drawRhiFullscreen(16, false);
             commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
                 sceneViewport.Width, sceneViewport.Height});
             commands.endRenderPass();

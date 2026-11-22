@@ -43,7 +43,7 @@ bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
         kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiComposite ||
         kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
-        kind == RenderPassKind::ProbeComposite;
+        kind == RenderPassKind::ProbeFilter || kind == RenderPassKind::ProbeComposite;
 }
 
 } // namespace
@@ -73,6 +73,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeLinearSource: return "DDGI linear source";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
+    case RenderPassKind::ProbeFilter: return "DDGI probe filter";
     case RenderPassKind::ProbeComposite: return "DDGI composite";
     case RenderPassKind::ForwardBackground: return "Forward background";
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
@@ -149,6 +150,9 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                     PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
                         PipelineResource::ProbeLinearRadiance,
                     PipelineResource::ProbeAtlas);
+            add(RenderPassKind::ProbeFilter, "DDGI probe filter",
+                PipelineResource::ProbeAtlas,
+                PipelineResource::ProbeAtlas);
             add(RenderPassKind::ProbeComposite, "DDGI composite",
                 PipelineResource::ProbeAtlas | PipelineResource::ProbeLinearRadiance |
                     PipelineResource::ScreenSpaceDirectCurrent |
