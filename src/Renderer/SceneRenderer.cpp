@@ -99,7 +99,7 @@ struct alignas(16) SceneConstants {
 };
 static_assert(sizeof(SceneConstants) == 176);
 struct alignas(16) ObjectConstants {
-    XMFLOAT4X4 worldMatrix, normalMatrix;
+    XMFLOAT4X4 worldMatrix, normalMatrix, motionMatrix;
     XMFLOAT4 color, parameters;
 };
 struct alignas(16) RayObject {
@@ -158,7 +158,7 @@ struct alignas(16) ShadowConstants {
     XMFLOAT4 parameters; // texel size, depth bias, normal bias, filter/cascade mode
     XMFLOAT4 cascadeParameters; // split distance, enabled, reserved, reserved
 };
-static_assert(sizeof(ObjectConstants) == 160 && sizeof(RayConstants) == 5136 && sizeof(RayTriangle) == 116);
+static_assert(sizeof(ObjectConstants) == 224 && sizeof(RayConstants) == 5136 && sizeof(RayTriangle) == 116);
 static_assert(sizeof(ShadowConstants) == 160);
 // Editor-only outline constants, kept out of SceneConstants so the runtime scene
 // contract is unchanged when no editor selection exists.
@@ -253,7 +253,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"depthBuffer", D3D_SIT_TEXTURE, 6, 0},
         {"indirectLightingBuffer", D3D_SIT_TEXTURE, 9, 0},
         {"screenSpaceHistory", D3D_SIT_TEXTURE, 13, 0},
-        {"ssgiDirectHistory", D3D_SIT_TEXTURE, 16, 0},
+        {"motionBuffer", D3D_SIT_TEXTURE, 16, 0},
         {"ssgiDirectCurrent", D3D_SIT_TEXTURE, 17, 0},
         {"ssgiRawIndirect", D3D_SIT_TEXTURE, 18, 0},
         {"ssgiHistoryIndirect", D3D_SIT_TEXTURE, 19, 0},
@@ -309,7 +309,8 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"SceneConstants","parameters",112,16}, {"SceneConstants","viewportDebug",128,16},
         {"SceneConstants","cameraForward",144,16}, {"SceneConstants","cameraLensParams",160,16},
         {"ObjectConstants","worldMatrix",0,64}, {"ObjectConstants","normalMatrix",64,64},
-        {"ObjectConstants","objectColor",128,16}, {"ObjectConstants","objectParameters",144,16},
+        {"ObjectConstants","motionMatrix",128,64},
+        {"ObjectConstants","objectColor",192,16}, {"ObjectConstants","objectParameters",208,16},
         {"RayConstants","rayInfo",0,16}, {"RayConstants","rayObjects",16,5120},
         {"ShadowConstants","lightViewProjection",0,64},
         {"ShadowConstants","lightViewProjectionCascade1",64,64},
@@ -399,7 +400,7 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         }
     }
     if (entry[0] == 'P' && entry[1] == 'S') {
-        const UINT outputs = std::strcmp(entry, "PSGBuffer") == 0 ? 3u
+        const UINT outputs = std::strcmp(entry, "PSGBuffer") == 0 ? 4u
             : std::strcmp(entry, "PSScreenSpaceGiComposite") == 0 ? 2u : 1u;
         if (desc.OutputParameters != outputs) { error = std::string(entry) + ": incompatible render-target count."; return false; }
         for (UINT i = 0; i < outputs; ++i) {
@@ -523,6 +524,7 @@ struct SceneRenderer::Impl {
     rhi::TextureHandle probeLinearImage;
     bool probeAtlasValid = false;
     std::array<rhi::TextureHandle, 3> gbufferImages;
+    rhi::TextureHandle motionImage;
     rhi::ShaderHandle geometryModule, fullscreenModule;
     rhi::ShaderHandle probeDebugVS, probeDebugPS;
     rhi::GraphicsPipelineHandle probeDebugPipeline;
@@ -543,6 +545,8 @@ struct SceneRenderer::Impl {
     bool probeLayoutAutoFit = false;
     std::uint32_t probeLayoutShOrder = 0;
     bool probeLayoutValid = false;
+    std::unordered_map<std::uint64_t, XMMATRIX> previousActorMatrices;
+    std::unordered_map<std::uint64_t, XMMATRIX> currentActorMatrices;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
     std::array<rhi::ShaderHandle, 17> pixelModules;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
@@ -650,6 +654,7 @@ struct SceneRenderer::Impl {
         rhi::TextureHandle ssgiDirectHistory, ssgiDirectCurrent, ssgiRaw, ssgiHistoryRead, ssgiHistoryWrite;
         rhi::TextureHandle probeAtlasA, probeAtlasB, probeDepthAtlas, probeLinear;
         std::array<rhi::TextureHandle, 3> images;
+        rhi::TextureHandle motion;
         ComPtr<ID3D11RenderTargetView> colorTarget;
         ComPtr<ID3D11Texture2D> color;
         ComPtr<ID3D11ShaderResourceView> colorView;
@@ -702,6 +707,7 @@ struct SceneRenderer::Impl {
             retired.probeAtlasB = std::move(probeAtlasB);
         retired.probeDepthAtlas = std::move(probeDepthAtlasImage);
             retired.probeLinear = std::move(probeLinearImage);
+            retired.motion = std::move(motionImage);
             retired.images = std::move(gbufferImages);
             retired.colorTarget = std::move(sceneTarget);
             retired.color = std::move(sceneTexture);
@@ -1119,6 +1125,12 @@ struct SceneRenderer::Impl {
             const auto matrix = actorMatrix(actor);
             XMStoreFloat4x4(&data.worldMatrix, matrix);
             XMStoreFloat4x4(&data.normalMatrix, XMMatrixTranspose(XMMatrixInverse(nullptr, matrix)));
+            XMMATRIX previousMatrix = matrix;
+            if (const auto found = previousActorMatrices.find(actor.id); found != previousActorMatrices.end())
+                previousMatrix = found->second;
+            XMStoreFloat4x4(&data.motionMatrix, XMMatrixMultiply(previousMatrix,
+                XMMatrixInverse(nullptr, matrix)));
+            currentActorMatrices[actor.id] = matrix;
             bindRhiMesh(gpu);
             meshAttributes::sections(*mesh, [&](std::uint32_t first, std::uint32_t count, std::uint32_t slot) {
                 const auto* material = resolveMaterial(assets, actor.mesh.materialForSlot(*mesh, slot), materialPreview);
@@ -1777,10 +1789,14 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
     try {
     error.clear();
     auto& state = *impl_;
+    const bool diagnosticMainScene = !settings.offscreenTarget;
+    if (diagnosticMainScene) {
+        state.previousActorMatrices = std::move(state.currentActorMatrices);
+        state.currentActorMatrices.clear();
+    }
     ++state.usageEpoch;
     if (state.native12) state.swapchainImage = state.native12->backbuffer();
     state.raySceneActive = false;
-    const bool diagnosticMainScene = !settings.offscreenTarget;
     if (diagnosticMainScene) state.beginGeometryFrame(world, assets);
     if (!state.rhiDevice || !state.swapchainImage) {
         if (diagnosticMainScene) state.failGeometryFrame();
@@ -2642,6 +2658,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.name = pass.name;
             for (const auto& image : state.gbufferImages)
                 rasterPass.colors.push_back({image, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}});
+            rasterPass.colors.push_back({state.motionImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}});
             rasterPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Clear};
             if (contains(pass.reads, PipelineResource::ShadowMap))
                 rasterPass.reads.push_back({state.shadowImage, 3});
@@ -2676,9 +2693,13 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
             rasterPass.name = pass.name;
             rasterPass.colors = {{state.ssgiRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
-                {state.probeLinearImage, 15}};
+                {state.probeLinearImage, 15}, {state.ssgiIndirectHistoryImage, 19}};
             commands.beginRenderPass(rasterPass);
+            commands.setViewport({0.0f, 0.0f, std::ceil(sceneViewport.Width * 0.5f),
+                std::ceil(sceneViewport.Height * 0.5f), 0.0f, 1.0f});
             state.drawRhiFullscreen(12, false);
+            commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
+                sceneViewport.Width, sceneViewport.Height});
             commands.endRenderPass();
             break;
         }
@@ -2691,8 +2712,8 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.ssgiIndirectHistoryWriteImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
                 {state.gbufferImages[2], 2},
-                {state.probeLinearImage, 15}, {state.ssgiRawImage, 18},
-                {state.ssgiIndirectHistoryImage, 19}};
+                {state.probeLinearImage, 15}, {state.motionImage, 16},
+                {state.ssgiRawImage, 18}, {state.ssgiIndirectHistoryImage, 19}};
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(13, false);
             commands.endRenderPass();

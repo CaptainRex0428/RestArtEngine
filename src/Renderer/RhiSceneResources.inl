@@ -15,8 +15,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA8Unorm, true, "SSGI direct history"});
         candidate.ssgiDirectCurrent = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA8Unorm, true, "SSGI current direct color"});
-        candidate.ssgiRaw = rhiDevice->createTexture({targetWidth, targetHeight, 1,
-            rhi::Format::RGBA16Float, true, "SSGI raw indirect"});
+        candidate.ssgiRaw = rhiDevice->createTexture({(targetWidth + 1) / 2, (targetHeight + 1) / 2, 1,
+            rhi::Format::RGBA16Float, true, "SSGI raw indirect (half resolution)"});
         candidate.ssgiHistoryRead = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA16Float, true, "SSGI indirect history read"});
         candidate.ssgiHistoryWrite = rhiDevice->createTexture({targetWidth, targetHeight, 1,
@@ -29,6 +29,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
             rhi::Format::RGBA16Float, true, "DDGI probe depth atlas"});
         candidate.probeLinear = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA16Float, true, "DDGI linear direct radiance"});
+        candidate.motion = rhiDevice->createTexture({targetWidth, targetHeight, 1,
+            rhi::Format::RGBA16Float, true, "Previous world position (motion)"});
         if (device) {
             candidate.color = d3d11::nativeTexture(candidate.colorImage);
             candidate.colorTarget = d3d11::nativeColorTarget(candidate.colorImage);
@@ -55,6 +57,7 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         probeAtlasB = std::move(candidate.probeAtlasB);
         probeDepthAtlasImage = std::move(candidate.probeDepthAtlas);
         probeLinearImage = std::move(candidate.probeLinear);
+        motionImage = std::move(candidate.motion);
         gbufferImages = std::move(candidate.images);
         sceneTarget = std::move(candidate.colorTarget);
         sceneTexture = std::move(candidate.color);

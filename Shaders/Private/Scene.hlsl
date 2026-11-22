@@ -14,6 +14,7 @@ cbuffer ObjectConstants : register(b1)
 {
     row_major float4x4 worldMatrix;
     row_major float4x4 normalMatrix;
+    row_major float4x4 motionMatrix; // current world -> previous world
     float4 objectColor;
     float4 objectParameters;
 };
@@ -79,7 +80,7 @@ cbuffer GlobalIlluminationConstants : register(b6)
     float4 giHistory;
 };
 Texture2D<float4> indirectLightingBuffer : register(t9);
-Texture2D<float4> ssgiDirectHistory : register(t16);
+Texture2D<float4> motionBuffer : register(t16);
 Texture2D<float4> ssgiDirectCurrent : register(t17);
 Texture2D<float4> ssgiRawIndirect : register(t18);
 Texture2D<float4> ssgiHistoryIndirect : register(t19);
@@ -789,6 +790,9 @@ struct GBufferOutput
     float4 albedo : SV_TARGET0;
     float4 normal : SV_TARGET1;
     float4 position : SV_TARGET2;
+    // Previous-frame world position after the object's current->previous
+    // motion transform. SSGI projects this with the previous view-projection.
+    float4 motion : SV_TARGET3;
 };
 
 GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
@@ -800,6 +804,7 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
     output.albedo = float4(material.albedo, material.roughness);
     output.normal = float4(normal, material.metallic);
     output.position = float4(input.worldPosition, 1.0);
+    output.motion = mul(float4(input.worldPosition, 1.0), motionMatrix);
     return output;
 }
 
@@ -831,6 +836,7 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
         // diffuse irradiance / π and composes directly with receiver albedo.
         float3 direction = normalize(tangent * (cos(phi) * sinTheta) +
             bitangent * (sin(phi) * sinTheta) + normal * cosTheta);
+        bool resolved = false;
         [loop] for (uint step = 1; step <= steps; ++step)
         {
             float travel = float(step) * stepSize;
@@ -848,13 +854,25 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
             float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
             if (dot(hitNormal, direction) > -0.05) continue;
             float3 radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
+            // One additional diffuse bounce: the previous resolved indirect
+            // image is the best available incident radiance for surfaces that
+            // are themselves only indirectly lit.
+            radiance += ssgiHistoryIndirect.SampleLevel(gbufferSampler, uv, 0).rgb * 0.5;
             // Emissive/light surfaces are not diffuse receivers. Linear radiance
             // can exceed one, so reject only clearly HDR emitters.
             float luminance = dot(radiance, float3(0.2126, 0.7152, 0.0722));
             if (luminance > 4.0) continue;
             sum += min(radiance, 4.0);
             weight += 1.0;
+            resolved = true;
             break;
+        }
+        if (!resolved)
+        {
+            // No depth hit (screen edge or off-screen): use the environment as
+            // a conservative off-screen GI fallback instead of dropping the ray.
+            sum += Environment(direction, 0.0) * 0.25;
+            weight += 0.25;
         }
     }
     return weight > 0.0 ? sum / weight : 0.0;
@@ -863,9 +881,11 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
 float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
 {
     int3 pixel = int3(int2(input.position.xy), 0);
-    float4 position = positionBuffer.Load(pixel);
+    // Trace at half resolution; sample the full-resolution G-buffer through
+    // normalized UVs so the half-res pixel still addresses its true receiver.
+    float4 position = positionBuffer.SampleLevel(gbufferSampler, input.uv, 0);
     if (position.w < 0.5) return 0.0;
-    float3 normal = normalize(normalBuffer.Load(pixel).xyz);
+    float3 normal = normalize(normalBuffer.SampleLevel(gbufferSampler, input.uv, 0).xyz);
     return float4(ScreenSpaceTrace(uint2(pixel.xy), position.xyz, normal), 1.0);
 }
 
@@ -888,7 +908,8 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
     }
     float4 normal = normalBuffer.Load(pixel);
     float3 normalValue = normalize(normal.xyz);
-    float3 raw = ssgiRawIndirect.Load(pixel).rgb;
+    float3 raw = ssgiRawIndirect.SampleLevel(gbufferSampler, input.uv, 0).rgb;
+    float2 rawTexel = 2.0 / max(giViewport.zw, float2(1.0, 1.0));
     float3 spatialSum = raw;
     float spatialWeight = 1.0;
     float3 low = raw;
@@ -909,7 +930,8 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
         float3 delta = otherPosition.xyz - position.xyz;
         float plane = abs(dot(delta, normalValue));
         if (plane > 0.75) continue;
-        float3 sample = ssgiRawIndirect.Load(neighbourPixel).rgb;
+        float3 sample = ssgiRawIndirect.SampleLevel(gbufferSampler,
+            input.uv + float2(x, y) * rawTexel, 0).rgb;
         float weight = 1.0 / (1.0 + length(delta) + abs(x) + abs(y));
         spatialSum += sample * weight;
         spatialWeight += weight;
@@ -919,7 +941,8 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
     float3 indirect = spatialSum / max(spatialWeight, 1e-5);
     if (giHistory.x > 0.5 && giHistory.w < 1.5)
     {
-        float4 clip = mul(float4(position.xyz, 1.0), giPreviousViewProjection);
+        float4 previousWorld = motionBuffer.Load(pixel);
+        float4 clip = mul(float4(previousWorld.xyz, 1.0), giPreviousViewProjection);
         if (clip.w > 0.0001)
         {
             float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);

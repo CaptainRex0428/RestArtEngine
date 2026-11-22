@@ -21,7 +21,7 @@ rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
     description.depthCompare = static_cast<rhi::CompareOperation>(std::min(comparison, 7u));
     if (hasDepth) description.depthFormat = rhi::Format::Depth32Float;
     if (shaderIndex == 1)
-        description.colorFormats.assign(3, rhi::Format::RGBA16Float);
+        description.colorFormats.assign(4, rhi::Format::RGBA16Float);
     else if (shaderIndex == 9 || shaderIndex == 11 || shaderIndex == 12 || shaderIndex == 15 || shaderIndex == 16) description.colorFormats = {rhi::Format::RGBA16Float};
     else if (shaderIndex == 13) description.colorFormats = {rhi::Format::RGBA8Unorm, rhi::Format::RGBA16Float};
     else if (shaderIndex != 7) description.colorFormats = {rhi::Format::RGBA8Unorm};

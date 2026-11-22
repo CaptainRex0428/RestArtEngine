@@ -123,7 +123,8 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         add(RenderPassKind::GBuffer, "GBuffer",
             PipelineResource::None,
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                PipelineResource::GBufferPosition | PipelineResource::SceneDepth);
+                PipelineResource::GBufferPosition | PipelineResource::SceneDepth |
+                PipelineResource::MotionVectors);
         add(RenderPassKind::DeferredLighting, "Deferred lighting / debug",
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | directLightingReads,
@@ -136,11 +137,13 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         if (inputs.screenSpaceGi) {
             add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance,
+                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance |
+                    PipelineResource::ScreenSpaceHistory,
                 PipelineResource::ScreenSpaceRawIndirect);
             add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
                 PipelineResource::ProbeLinearRadiance | PipelineResource::ScreenSpaceRawIndirect |
                     PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
+                    PipelineResource::MotionVectors |
                     PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                     PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
