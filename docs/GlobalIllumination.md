@@ -105,7 +105,7 @@ SSGI 是独立于 DXR 的光栅算法，可在严格 D3D11、DX11 + DXR 和 nati
 
 `SSGI steps`、`SSGI radius`、`SSGI thickness` 控制每根 ray 的 march 步数、世界空间半径和深度容差；trace 会用命中面 normal、前后朝向和厚度拒绝背面/穿墙样本，再对过亮 emitter-like 线性 radiance 做保守拒绝。SSGI 参数或 GI history epoch 变化时丢弃 temporal history；`GI indirect` debug 视图不做 temporal 混合，保证参数/相机调整后当前帧即可看到 raw 间接结果。DXR 硬件不参与该路径，硬件请求不会被 SSGI 强制清除，但同帧 DXR 传输会跳过 SSGI。
 
-SSGI 当前只在编辑器／离屏场景目标启用；历史为独立 indirect buffer，不读取最终 scene colour，避免自反馈。剩余限制：仍是屏幕空间可见性、只有一次额外反弹、没有间接镜面；屏幕外物体只能由环境 fallback 近似，半分辨率会有轻微细节损失。
+SSGI 当前只在编辑器／离屏场景目标启用；历史为独立 indirect buffer，不读取最终 scene colour，避免自反馈。`indirectSpecular` 开启时还会运行 `SSGI specular trace`：从 G-buffer normal 计算反射方向，按 roughness 抖动，在半分辨率上做 screen-space front-to-back march，采样线性 radiance，未命中用 `Environment(reflection, roughness)`；composite 用 Fresnel + roughness 衰减把 specular 加进线性结果。剩余限制：仍是屏幕空间可见性、只有一次额外 diffuse bounce、rough specular 是近似、半分辨率会有细节损失。
 
 ### Probe grid (DDGI)
 
