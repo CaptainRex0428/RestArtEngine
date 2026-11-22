@@ -128,23 +128,24 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | directLightingReads,
             rasterColor);
+        if (inputs.screenSpaceGi || inputs.probeGridGi)
+            add(RenderPassKind::ProbeLinearSource, "Linear direct source",
+                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                    PipelineResource::GBufferPosition,
+                PipelineResource::ProbeLinearRadiance);
         if (inputs.screenSpaceGi) {
             add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition | PipelineResource::ScreenSpaceDirectCurrent,
+                    PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance,
                 PipelineResource::ScreenSpaceRawIndirect);
             add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
-                PipelineResource::ScreenSpaceDirectCurrent | PipelineResource::ScreenSpaceRawIndirect |
+                PipelineResource::ProbeLinearRadiance | PipelineResource::ScreenSpaceRawIndirect |
                     PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
                     PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                     PipelineResource::GBufferPosition,
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
         if (inputs.probeGridGi) {
-            add(RenderPassKind::ProbeLinearSource, "DDGI linear source",
-                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition,
-                PipelineResource::ProbeLinearRadiance);
             if (!inputs.hardwareTransport)
                 add(RenderPassKind::ProbeUpdate, "DDGI probe update",
                     PipelineResource::SceneDepth | PipelineResource::GBufferNormal |

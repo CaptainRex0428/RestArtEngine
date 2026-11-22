@@ -106,13 +106,18 @@ void screenSpaceGiInputs() {
     const auto composite = indexOf(pipeline, RenderPassKind::ScreenSpaceGiComposite);
     require(trace < pipeline.passes.size() && composite < pipeline.passes.size(),
         "SSGI trace/composite passes are missing.");
-    require(contains(passAt(pipeline, trace).reads, PipelineResource::ScreenSpaceDirectCurrent),
-        "SSGI trace must declare the current direct-lit colour it integrates.");
+    const auto linear = indexOf(pipeline, RenderPassKind::ProbeLinearSource);
+    require(linear < pipeline.passes.size(), "SSGI linear direct source pass missing.");
+    require(contains(passAt(pipeline, linear).writes, PipelineResource::ProbeLinearRadiance),
+        "SSGI linear source must publish linear radiance.");
+    require(contains(passAt(pipeline, trace).reads, PipelineResource::ProbeLinearRadiance),
+        "SSGI trace must declare the linear direct radiance it integrates.");
     require(contains(passAt(pipeline, trace).writes, PipelineResource::ScreenSpaceRawIndirect),
         "SSGI trace must publish raw indirect.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceRawIndirect) &&
-        contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceHistory),
-        "SSGI composite must consume raw indirect and denoised history.");
+        contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceHistory) &&
+        contains(passAt(pipeline, composite).reads, PipelineResource::ProbeLinearRadiance),
+        "SSGI composite must consume linear direct, raw indirect and denoised history.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::GBufferAlbedo),
         "SSGI composite must read receiver albedo.");
     require(contains(passAt(pipeline, composite).writes, PipelineResource::ScreenSpaceHistory),

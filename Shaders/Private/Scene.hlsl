@@ -811,39 +811,53 @@ float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
 {
     if (giScreenSpace.x < 0.5 || giHistory.x < 0.5 || giViewport.w < 0.5) return 0.0;
     uint steps = max((uint)giViewport.w, 1u);
+    uint rayCount = 4u;
+    float radius = max(giScreenSpace.y, 0.05);
+    float stepSize = radius / float(steps);
+    float thickness = max(giScreenSpace.z, stepSize * 1.25);
     float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
     float3 bitangent = cross(normal, tangent);
-    float seed = frac(sin(dot(float2(pixel) + giHistory.y * 37.0, float2(12.9898, 78.233))) * 43758.5453);
+    float frame = giHistory.y;
     float3 sum = 0.0;
     float weight = 0.0;
-    [loop] for (uint i = 0; i < steps; ++i)
+    [loop] for (uint rayIndex = 0; rayIndex < rayCount; ++rayIndex)
     {
-        float angle = seed * 6.2831853 + float(i) * 2.3999632;
-        float radial = sqrt(frac(seed + float(i) * 0.6180339));
-        float3 direction = normalize(tangent * cos(angle) * radial + bitangent * sin(angle) * radial + normal * 0.75);
-        float travel = giScreenSpace.y * (float(i) + 1.0) / float(steps);
-        float3 samplePosition = position + direction * travel;
-        float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
-        if (clip.w <= 0.0001) continue;
-        float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
-        if (any(uv < 0.0) || any(uv > 1.0)) continue;
-        float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
-        if (scenePosition.w < 0.5) continue;
-        float3 delta = scenePosition.xyz - samplePosition;
-        // Keep a minimum world-space thickness so a small UI value cannot reject
-        // every screen-space sample on large scenes.
-        float thickness = max(giScreenSpace.z, 0.5 * max(giScreenSpace.y, 0.5));
-        if (dot(delta, delta) > thickness * thickness) continue;
-        float3 radiance = ssgiDirectCurrent.SampleLevel(gbufferSampler, uv, 0).rgb;
-        // Reject emitter-like white pixels; with no G-buffer object/emission id
-        // this is the cheapest guard against SSGI sampling a light fixture as
-        // ordinary diffuse radiance.
-        float luminance = dot(radiance, float3(0.2126, 0.7152, 0.0722));
-        if (luminance > 0.85) continue;
-        sum += min(radiance, 0.5);
-        weight += 1.0;
+        float seed = frac(sin(dot(float2(pixel) + float2(frame * 37.0, rayIndex * 19.0),
+            float2(12.9898, 78.233))) * 43758.5453);
+        float phi = seed * 6.2831853 + float(rayIndex) * 2.3999632;
+        float cosTheta = sqrt(frac(seed + float(rayIndex) * 0.6180339));
+        float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+        // Cosine-weighted hemisphere: the averaged incident radiance is the
+        // diffuse irradiance / π and composes directly with receiver albedo.
+        float3 direction = normalize(tangent * (cos(phi) * sinTheta) +
+            bitangent * (sin(phi) * sinTheta) + normal * cosTheta);
+        [loop] for (uint step = 1; step <= steps; ++step)
+        {
+            float travel = float(step) * stepSize;
+            float3 samplePosition = position + direction * travel;
+            float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
+            if (clip.w <= 0.0001) break;
+            float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
+            if (any(uv < 0.0) || any(uv > 1.0)) break;
+            float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
+            if (scenePosition.w < 0.5) continue;
+            float3 delta = scenePosition.xyz - samplePosition;
+            if (dot(delta, delta) > thickness * thickness) continue;
+            // A ray hitting a front-facing surface must approach it from the
+            // front; reject back faces and distant depth mismatches.
+            float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
+            if (dot(hitNormal, direction) > -0.05) continue;
+            float3 radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
+            // Emissive/light surfaces are not diffuse receivers. Linear radiance
+            // can exceed one, so reject only clearly HDR emitters.
+            float luminance = dot(radiance, float3(0.2126, 0.7152, 0.0722));
+            if (luminance > 4.0) continue;
+            sum += min(radiance, 4.0);
+            weight += 1.0;
+            break;
+        }
     }
-    return min(weight > 0.0 ? sum / weight : 0.0, 16.0);
+    return weight > 0.0 ? sum / weight : 0.0;
 }
 
 float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
@@ -918,10 +932,10 @@ SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
         }
     }
     output.history = float4(indirect, 1.0);
-    float3 direct = ssgiDirectCurrent.Load(pixel).rgb;
+    float3 directLinear = probeColorSource.Load(pixel).rgb;
     indirect *= albedoBuffer.Load(pixel).rgb;
-    output.color = giHistory.w > 1.5 ? float4(indirect, 1.0)
-        : float4(saturate(direct + indirect * giScreenSpace.w), 1.0);
+    output.color = giHistory.w > 1.5 ? float4(DisplayColor(indirect), 1.0)
+        : float4(DisplayColor(directLinear + indirect * giScreenSpace.w), 1.0);
     return output;
 }
 

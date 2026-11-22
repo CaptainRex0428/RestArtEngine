@@ -2139,7 +2139,7 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         state.giStatus.accumulatedSamples = screenSpaceGi ? 1u : 0u;
         state.giStatus.targetSamples = 1;
         state.giStatus.reason = screenSpaceGi
-            ? "Realtime screen-space GI consumes the deferred G-buffer and the previous frame's lit colour."
+            ? "Realtime screen-space GI traces linear direct radiance against the depth G-buffer and resolves an indirect history."
             : settings.path == RenderPath::Forward ? "SSGI requires the Deferred raster path."
             : !(settings.editorViewport || settings.offscreenTarget) ? "SSGI currently requires the editor/offscreen scene target."
             : "SSGI is unavailable for this frame.";
@@ -2672,12 +2672,11 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
         }
         case RenderPassKind::ScreenSpaceGi: {
             state.beginDiagnosticPass(pass.name);
-            copyColorTexture(state.ssgiDirectCurrentImage, rasterDestinationImage);
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
             rasterPass.colors = {{state.ssgiRawImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
-                {state.ssgiDirectCurrentImage, 17}};
+                {state.probeLinearImage, 15}};
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(12, false);
             commands.endRenderPass();
@@ -2692,13 +2691,12 @@ bool SceneRenderer::render(const SceneSettings& settings, const scene::World& wo
                 {state.ssgiIndirectHistoryWriteImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
                 {state.gbufferImages[2], 2},
-                {state.ssgiDirectCurrentImage, 17}, {state.ssgiRawImage, 18},
+                {state.probeLinearImage, 15}, {state.ssgiRawImage, 18},
                 {state.ssgiIndirectHistoryImage, 19}};
             commands.beginRenderPass(rasterPass);
             state.drawRhiFullscreen(13, false);
             commands.endRenderPass();
             copyColorTexture(state.ssgiIndirectHistoryImage, state.ssgiIndirectHistoryWriteImage);
-            copyColorTexture(state.ssgiDirectHistoryImage, state.ssgiDirectCurrentImage);
             state.ssgiHistoryValid = true;
             ++state.ssgiFrameCounter;
             break;
@@ -3136,7 +3134,7 @@ GlobalIlluminationStatus SceneRenderer::globalIlluminationStatus() const {
         status.accumulatedSamples = impl_->lastScreenSpaceGi ? 1u : 0u;
         status.targetSamples = 1;
         status.reason = impl_->lastScreenSpaceGi
-            ? "Realtime screen-space GI consumes the deferred G-buffer and the previous frame's lit colour."
+            ? "Realtime screen-space GI traces linear direct radiance against the depth G-buffer and resolves an indirect history."
             : "SSGI is unavailable for the current frame.";
     }
     if (impl_->lastGiMethod == GlobalIlluminationMethod::ProbeGrid) {
