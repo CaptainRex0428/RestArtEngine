@@ -32,6 +32,31 @@
 
 namespace {
 void require(bool value, const std::string& error) { if (!value) throw std::runtime_error(error); }
+// Automation often runs without foreground rights, so SetForegroundWindow can
+// be refused even for a valid, visible window. Attach to the current
+// foreground thread for the activation, then detach. SwitchToThisWindow is the
+// last-resort fallback for shells that keep the foreground lock.
+void forceForegroundWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+    using SwitchFn = void (WINAPI*)(HWND, BOOL);
+    static const auto switchWindow = reinterpret_cast<SwitchFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SwitchToThisWindow"));
+    ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+    for (int attempt = 0; attempt < 20 && GetForegroundWindow() != hwnd; ++attempt) {
+        const HWND foreground = GetForegroundWindow();
+        const DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+        const DWORD currentThread = GetCurrentThreadId();
+        const bool attached = foregroundThread != 0 && foregroundThread != currentThread &&
+            AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        if (switchWindow) switchWindow(hwnd, TRUE);
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+        if (attached) AttachThreadInput(currentThread, foregroundThread, FALSE);
+        if (GetForegroundWindow() != hwnd) Sleep(10);
+    }
+}
 std::string contents(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), {});
@@ -176,7 +201,7 @@ struct SmokeInput {
                 if (pressed) {
                     const auto window = static_cast<HWND>(hovered->PlatformHandle);
                     if (!IsWindowVisible(window)) ShowWindow(window, SW_SHOWNOACTIVATE);
-                    SetForegroundWindow(window);
+                    forceForegroundWindow(window);
                 }
             }
         };
@@ -998,6 +1023,8 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
     {
         require(!assets::MaterialAsset{}.twoSided, "New materials must default to single-sided rendering.");
         const auto fixtureRoot = output / "TwoSidedSerialization";
+        // Reruns must not inherit .rasset files from an earlier failed run.
+        std::filesystem::remove_all(fixtureRoot);
         const auto materialFolder = fixtureRoot / "Materials";
         const auto sceneFile = fixtureRoot / "scene.rascene";
         assets::AssetLibrary fixtureAssets;
@@ -4082,9 +4109,20 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             return ImVec2(XMVectorGetX(point), XMVectorGetY(point));
         };
         const auto beginFloatingAssetDrag = [&](const std::string& path, bool grid) {
-            SetForegroundWindow(contentHwnd);
+            forceForegroundWindow(contentHwnd);
             capture("floating_content_native_focus", true);
             capture("floating_content_native_focus", true);
+            if (GetForegroundWindow() != contentHwnd) {
+                const HWND foreground = GetForegroundWindow();
+                DWORD foregroundPid = 0;
+                if (foreground) GetWindowThreadProcessId(foreground, &foregroundPid);
+                std::cerr << "[focus] content=" << contentHwnd
+                          << " foreground=" << foreground
+                          << " foregroundPid=" << foregroundPid
+                          << " selfPid=" << GetCurrentProcessId()
+                          << " visible=" << IsWindowVisible(contentHwnd)
+                          << " iconic=" << IsIconic(contentHwnd) << '\n';
+            }
             require(GetForegroundWindow() == contentHwnd, "Native Content did not gain focus before the drag.");
             const auto* entry = editor.assetRegistry().find(path);
             require(entry != nullptr, "Native Content drag asset is not registered: " + path);
@@ -4339,7 +4377,7 @@ Surface EvaluateMaterial(float3 worldPosition, float3 normal, Surface material)
             "External Scene tab could not be docked back into the main editor.");
         // Native tools can overlap on smaller desktops. Raise the source as
         // a user would before grabbing its tab, then resolve its current bounds.
-        SetForegroundWindow(contentHwnd);
+        forceForegroundWindow(contentHwnd);
         capture("floating_content_redock_focus", true);
         capture("floating_content_redock_focus", true);
         const auto contentTab = dockTabCenter(findWindow("Content & Editors"));
