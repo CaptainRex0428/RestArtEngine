@@ -643,13 +643,16 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "The old ambiguous top-level ray-tracing checkbox remains visible.");
         const auto launchBackend = renderer.mainBackendSelection().requested;
         const auto launchD3D12Attempt = renderer.d3d12InitializationAttempted();
-        const auto selectBackend = [&](const char* label, int index) {
-            click(itemRect(findChild("ProjectSettingsContent"), "##MainBackend").GetCenter());
+        const auto selectOption = [&](const char* control, const char* label, int index) {
+            click(itemRect(findChild("ProjectSettingsContent"), control).GetCenter());
             require(!context->OpenPopupStack.empty() && context->OpenPopupStack.back().Window,
-                "Main backend choices did not open.");
+                std::string("Choices did not open for ") + control);
             auto* popup = context->OpenPopupStack.back().Window;
             const auto id = ImHashStr(label, 0, popup->GetID(index));
             click(itemRect(popup, label, ImGuiNavLayer_Main, id).GetCenter());
+        };
+        const auto selectBackend = [&](const char* label, int index) {
+            selectOption("##MainBackend", label, index);
         };
         const bool nativeLaunch = launchBackend.preference == renderer::MainRenderBackend::D3D12;
         const auto beforeBackendEdit = uiSettings;
@@ -944,6 +947,110 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
             "Saving project settings destroyed an unrelated manifest field.");
         uiFrame("project-settings-saved.bmp");
         write(output / "project-settings-ui.txt", uiText);
+
+        // Exercise the raster modes even on devices without DXR. Keep this
+        // after the path-tracing persistence checks so their fixture is intact.
+        using GiMethod = renderer::GlobalIlluminationMethod;
+        using GiQuality = renderer::GlobalIlluminationQuality;
+        ShowWindow(static_cast<HWND>(context->Viewports[0]->PlatformHandle), SW_SHOWNOACTIVATE);
+        editor.resetLayout();
+        uiFrame(); uiFrame();
+        require(uiSettings.viewportVisible && uiSettings.viewportWidth > 0 && uiSettings.viewportHeight > 0,
+            "Raster GI settings validation requires a visible scene viewport.");
+        click(itemRect(findChild("ProjectSettingsContent"), "Hardware ray tracing").GetCenter());
+        require(!uiSettings.hardwareRayTracing, "Raster GI checks require DXR requests to be off.");
+        const auto requireActive = [&](GiMethod method, GiQuality quality) {
+            const auto actual = renderer.globalIlluminationStatus();
+            require(actual.effective == method && actual.effectiveQuality == quality &&
+                !actual.usesHardwareProbeTrace && !actual.usesHardwareReflections,
+                "Raster quality did not reach the last scene frame: " + actual.reason);
+        };
+        selectOption("GI method", "Screen space (SSGI)", 2);
+        const auto stepRect = itemRect(findChild("ProjectSettingsContent"), "SSGI steps");
+        click(ImVec2(stepRect.Min.x + stepRect.GetWidth() * .65f, stepRect.GetCenter().y));
+        const auto customSteps = uiSettings.globalIllumination.screenSpaceSteps;
+        require(customSteps != renderer::GlobalIlluminationSettings{}.screenSpaceSteps,
+            "The custom SSGI march budget was not edited.");
+        selectOption("SSGI quality", "Low", 1);
+        requireActive(GiMethod::ScreenSpace, GiQuality::Low);
+        click(itemRect(findWindow("Project Settings"), "Save project settings").GetCenter());
+        require(!editor.projectSettingsDirty(), "Saving the SSGI preset left an unsaved project.");
+        const auto savedSsgi = contents(project.manifest);
+        click(itemRect(findChild("ProjectSettingsContent"), "GI indirect").GetCenter());
+        require(uiSettings.debugView == 11, "GI indirect did not select the isolated contribution.");
+        const auto savedGain = uiSettings.globalIllumination.indirectDiffuseIntensity;
+        selectOption("Indirect view EV", "+3 EV", 3);
+        require(uiSettings.giDebugExposureEv == 3 && uiSettings.globalIllumination.indirectDiffuseIntensity == savedGain &&
+            !editor.projectSettingsDirty() && contents(project.manifest) == savedSsgi,
+            "Inspecting indirect light changed the project or the physical GI gain.");
+        uiFrame("project-settings-ssgi-low-indirect.bmp");
+        click(itemRect(findChild("ProjectSettingsContent"), "Lit").GetCenter());
+        require(uiSettings.debugView == 0, "Lit did not restore the combined output.");
+        selectOption("SSGI quality", "Custom", 0);
+        requireActive(GiMethod::ScreenSpace, GiQuality::Custom);
+        require(uiSettings.globalIllumination.screenSpaceSteps == customSteps &&
+            renderer::resolveGiQuality(uiSettings.globalIllumination).screenSpaceSteps == customSteps,
+            "SSGI did not restore the edited custom march budget.");
+        selectOption("SSGI quality", "Low", 1);
+        selectOption("GI method", "Probe grid (DDGI)", 3);
+        const auto raysRect = itemRect(findChild("ProjectSettingsContent"), "Probe rays");
+        click(ImVec2(raysRect.Min.x + raysRect.GetWidth() * .30f, raysRect.GetCenter().y));
+        const auto customRays = uiSettings.globalIllumination.probeRayCount;
+        require(customRays != renderer::GlobalIlluminationSettings{}.probeRayCount,
+            "The custom DDGI ray budget was not edited.");
+        selectOption("DDGI quality", "Medium", 2);
+        requireActive(GiMethod::ProbeGrid, GiQuality::Medium);
+        const auto ddgiDiffuse = uiSettings.globalIllumination.indirectDiffuse;
+        const auto ddgiHardwareReflections = uiSettings.hardwareRayTracingReflections;
+        const auto ddgiSpecular = uiSettings.globalIllumination.indirectSpecular;
+        const auto requireDdgiReflections = [&](bool enabled) {
+            const auto status = renderer.globalIlluminationStatus();
+            const auto* label = enabled ? "Scene reflections: Screen space (SSR)" : "Scene reflections: Off";
+            require(status.usesScreenSpaceProbes && status.usesScreenSpaceReflections == enabled &&
+                !status.usesHardwareReflections && uiText.find(label) != std::string::npos,
+                "DDGI did not report the separate active reflection path.");
+        };
+        const auto editSsrDistance = [&] {
+            const auto rect = itemRect(findChild("ProjectSettingsContent"), "SSR distance");
+            const float before = uiSettings.globalIllumination.screenSpaceRadius;
+            const float fraction = before < 10.0f ? .65f : .35f;
+            click(ImVec2(rect.Min.x + rect.GetWidth() * fraction, rect.GetCenter().y));
+            require(uiSettings.globalIllumination.screenSpaceRadius != before,
+                "DDGI's screen-space reflection distance did not update live.");
+        };
+        requireDdgiReflections(ddgiSpecular);
+        if (ddgiSpecular) editSsrDistance();
+        click(itemRect(findChild("ProjectSettingsContent"), "Indirect specular (reflections)").GetCenter());
+        require(uiSettings.globalIllumination.indirectSpecular != ddgiSpecular &&
+            uiSettings.globalIllumination.indirectDiffuse == ddgiDiffuse &&
+            uiSettings.hardwareRayTracingReflections == ddgiHardwareReflections,
+            "DDGI reflection toggle changed the diffuse contribution or the hardware reflection preference.");
+        requireDdgiReflections(!ddgiSpecular);
+        if (!ddgiSpecular) editSsrDistance();
+        const auto savedSsrDistance = uiSettings.globalIllumination.screenSpaceRadius;
+        click(itemRect(findChild("ProjectSettingsContent"), "GI probes").GetCenter());
+        require(uiSettings.debugView == 12 && uiText.find("DDGI (screen-space probes)") != std::string::npos,
+            "The DDGI image and active trace description did not identify the probe view.");
+        uiFrame("project-settings-ddgi-medium-probes.bmp");
+        click(itemRect(findWindow("Project Settings"), "Save project settings").GetCenter());
+        require(project::loadProject(project.manifest, reloaded, error), error);
+        const auto& persisted = reloaded.rendering.globalIllumination;
+        require(persisted.method == GiMethod::ProbeGrid && persisted.screenSpaceQuality == GiQuality::Low &&
+            persisted.probeQuality == GiQuality::Medium && persisted.screenSpaceSteps == customSteps &&
+            persisted.screenSpaceRadius == savedSsrDistance &&
+            persisted.probeRayCount == customRays && persisted.indirectDiffuseIntensity == savedGain &&
+            persisted.indirectSpecular != ddgiSpecular && persisted.indirectDiffuse == ddgiDiffuse &&
+            reloaded.rendering.hardwareRayTracingReflections == ddgiHardwareReflections &&
+            !reloaded.rendering.hardwareRayTracing && !editor.projectSettingsDirty(),
+            "Saving lost a raster GI contribution, quality preset, or custom budget.");
+        selectOption("DDGI quality", "Custom", 0);
+        requireActive(GiMethod::ProbeGrid, GiQuality::Custom);
+        require(renderer::resolveGiQuality(uiSettings.globalIllumination).probeRayCount == customRays,
+            "DDGI did not restore the edited custom ray budget.");
+        selectOption("GI method", "Screen space (SSGI)", 2);
+        require(uiSettings.debugView == 0, "Switching away from DDGI kept an unavailable probe view.");
+        requireActive(GiMethod::ScreenSpace, GiQuality::Low);
+        pass("SSGI/DDGI quality presets, independent DDGI reflections, temporary debug EV, probe view, custom budgets and save/reload");
         editor.closeProjectSettings();
         uiFrame();
         require(!editor.projectSettingsOpen(), "Project settings failed to close.");

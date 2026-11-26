@@ -746,7 +746,8 @@ int wmain(int argc, wchar_t** argv) {
     bool native12SelfTest = false, inspectorSelfTest = false, inspectorUiSelfTest = false, aaSelfTest = false, aaUiSelfTest = false;
     bool hardwareRtSelfTest = false, projectSettingsSelfTest = false;
     bool quadView = false;
-    bool giSelfTest = false, pathTracingOverride = false;
+    bool giSelfTest = false, rasterGiSelfTest = false, pathTracingOverride = false;
+    bool softwareGiSelfTest = false;
     bool renderScaleTest = false, materialRenderStateTest = false, lightingSelfTest = false, meshAttributesSelfTest = false, cameraSelfTest = false;
     std::optional<bool> hardwareRtOverride;
     std::optional<MainRenderBackend> backendOverride;
@@ -776,6 +777,8 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--hardware-rt-self-test") hardwareRtSelfTest = true;
             else if (arg == "--project-settings-self-test") hardwareRtSelfTest = projectSettingsSelfTest = true;
             else if (arg == "--gi-self-test") giSelfTest = true;
+            else if (arg == "--raster-gi-self-test") giSelfTest = rasterGiSelfTest = true;
+            else if (arg == "--software-gi-self-test") giSelfTest = rasterGiSelfTest = softwareGiSelfTest = true;
             else if (arg == "--render-scale-test") renderScaleTest = true;
             else if (arg == "--material-render-state-self-test") materialRenderStateTest = true;
             else if (arg == "--camera-self-test") cameraSelfTest = true;
@@ -843,6 +846,8 @@ int wmain(int argc, wchar_t** argv) {
                     "--render-scale-test (10M triangles, 1080p hardware realtime GI benchmark)\n"
                     "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
                     "--camera-self-test (projection, depth of field, previews and GI validation)\n"
+                    "--raster-gi-self-test (SSGI / DDGI scene readback and quality budgets on the selected backend)\n"
+                    "--software-gi-self-test (Cornell SSGI / screen-space DDGI image sequence and light-edit response)\n"
                     "--aa-self-test (FXAA/TAA image quality and history validation on the selected backend)\n"
                     "--aa-ui-self-test (live anti-aliasing controls and project persistence validation)\n"
                     "--native-d3d12-self-test (independent native D3D12 GPU validation; no fallback)\n"
@@ -927,7 +932,9 @@ int wmain(int argc, wchar_t** argv) {
             // opening the project manager first.
             const auto engineHint = enginePath.empty() ? findEngineRoot() : std::filesystem::weakly_canonical(enginePath);
             project = rae::editor::resolveProject(projectPath, engineHint);
-            if (editorSelfTest || hardwareRtSelfTest || giSelfTest || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest || aaSelfTest) {
+            // The software GI readback only reads its project. Keep its original
+            // engine root so a fixture can pin the baseline shader source tree.
+            if (editorSelfTest || hardwareRtSelfTest || (giSelfTest && !softwareGiSelfTest) || renderScaleTest || materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest || native12SelfTest || inspectorSelfTest || inspectorUiSelfTest || aaSelfTest) {
                 std::error_code copyCode;
                 isolatedProjectRoot = std::filesystem::temp_directory_path(copyCode) /
                     ("RAEngineSelfTest-" + std::to_string(GetCurrentProcessId()));
@@ -1089,7 +1096,7 @@ int wmain(int argc, wchar_t** argv) {
         ui.setWindowChrome(&windowState.chrome);
         reportMainBackend(renderer);
         if (renderer.mainBackendSelection().effective == MainRenderBackend::D3D12 &&
-            (editorSelfTest || gcSelfTest || (hardwareRtSelfTest && !projectSettingsSelfTest) || giSelfTest || renderScaleTest ||
+            (editorSelfTest || gcSelfTest || (hardwareRtSelfTest && !projectSettingsSelfTest) || (giSelfTest && !rasterGiSelfTest) || renderScaleTest ||
              materialRenderStateTest || lightingSelfTest || meshAttributesSelfTest || cameraSelfTest))
             throw std::runtime_error("This validation suite requires D3D11 native readback. Use --native-d3d12-self-test for native D3D12.");
         if (!interactive && !editor.initialize(project, renderer, error, loadProgress.range(.62f, .94f)))
@@ -1184,7 +1191,11 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         if (giSelfTest) {
-            runGlobalIlluminationSmoke(renderer, captureDir);
+            if (softwareGiSelfTest)
+                runSoftwareGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir);
+            else if (rasterGiSelfTest)
+                runRasterGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir);
+            else runGlobalIlluminationSmoke(renderer, captureDir);
             return 0;
         }
         if (renderScaleTest) {

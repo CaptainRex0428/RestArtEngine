@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
+#include <map>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -189,6 +191,56 @@ std::size_t visiblePixels(const Pixels& image, int threshold = 3) {
                       static_cast<int>(image[pixel + 2])}) > threshold) ++result;
     return result;
 }
+
+// Sample the interior of the Cornell ceiling at the smoke test's 1281x721 framing.
+// The existing scene readback is common to all backends; retain only this ROI
+// between frames. Individual pixels catch grain; 8x8 means catch broad pulses.
+template<typename RenderFrame>
+Json cornellCeilingStability(RenderFrame&& frame, const Pixels& baseline, unsigned imageWidth,
+                            const std::vector<unsigned>& tiles, float tileLimit) {
+    constexpr unsigned side = 8, frameCount = 16;
+    const auto luma = [](const Pixels& image, std::size_t index) {
+        return (image[index]*0.2126f + image[index+1]*0.7152f + image[index+2]*0.0722f);
+    };
+    const auto p95 = [](std::vector<float>& samples) {
+        const auto index = samples.size() - samples.size()/20 - 1;
+        std::nth_element(samples.begin(), samples.begin()+index, samples.end());
+        return samples[index];
+    };
+    for (unsigned i = 0; i < 32; ++i) frame(false);
+    std::vector<float> low(tiles.size(), 255.0f), high(tiles.size(), 0.0f);
+    std::vector<float> previous(tiles.size()*side*side), differences;
+    differences.reserve((frameCount-1)*previous.size());
+    double total = 0.0, totalAboveOff = 0.0;
+    for (unsigned f = 0; f < frameCount; ++f) {
+        const auto pixels = frame(true);
+        std::size_t sample = 0;
+        for (std::size_t t = 0; t < tiles.size(); ++t) {
+            float sum = 0.0f;
+            for (unsigned y = 0; y < side; ++y) for (unsigned x = 0; x < side; ++x, ++sample) {
+                const auto index = (tiles[t] + y*imageWidth + x)*4;
+                const auto value = luma(pixels, index);
+                sum += value;
+                totalAboveOff += value - luma(baseline, index);
+                if (f) differences.push_back(std::abs(value-previous[sample]));
+                previous[sample] = value;
+            }
+            total += sum;
+            const auto average = sum / (side*side);
+            low[t] = std::min(low[t], average);
+            high[t] = std::max(high[t], average);
+        }
+    }
+    for (std::size_t t = 0; t < tiles.size(); ++t) high[t] -= low[t];
+    const auto tileRange = p95(high), pixelDelta = p95(differences);
+    const auto mean = total / (previous.size()*frameCount);
+    const auto aboveOff = totalAboveOff / (previous.size()*frameCount);
+    return {{"frames",frameCount}, {"warmup",32}, {"ceilingPixels",previous.size()},
+        {"gain",3.61f}, {"meanY",mean}, {"meanAboveGiOffY",aboveOff}, {"adjacentPixelP95",pixelDelta},
+        {"tileRangeP95",tileRange}, {"tileRangeLimit",tileLimit}, {"adjacentPixelLimit",3.0f},
+        {"passed",aboveOff > 1.0 && tileRange <= tileLimit && pixelDelta <= 3.0f}};
+}
+
 struct TraceFrame {
     TraceFrame() { rae::diagnostics::beginFrame(); }
     ~TraceFrame() { rae::diagnostics::endFrame(); }
@@ -1525,6 +1577,619 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
         report["validationErrors"] = renderer.validationErrorCount();
         report["status"] = renderer.globalIlluminationStatus().reason;
         try { saveReport(); } catch (...) {}
+        throw;
+    }
+}
+
+void runRasterGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
+    const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
+    const std::filesystem::path& output) {
+    using namespace rae::renderer;
+    constexpr unsigned width = 1281, height = 721;
+    std::filesystem::create_directories(output);
+    std::string error;
+    require(renderer.ensureSceneTargetSize(width, height, error), error);
+    renderer.setDiagnosticsEnabled(true);
+    const auto initialErrors = renderer.validationErrorCount();
+    const bool testHardware = settings.hardwareRayTracing && renderer.hardwareRayTracingSupported();
+    settings.editorViewport = settings.viewportVisible = true;
+    settings.offscreenTarget = false;
+    settings.viewportX = settings.viewportY = 0;
+    settings.viewportWidth = width;
+    settings.viewportHeight = height;
+    settings.path = RenderPath::Deferred;
+    settings.rayTracing = false;
+    settings.hardwareRayTracing = false;
+    settings.antiAliasing.method = AntiAliasingMethod::Disabled;
+    settings.debugView = 0;
+    auto& gi = settings.globalIllumination;
+    gi.indirectDiffuse = true;
+    gi.indirectSpecular = false;
+    gi.indirectDiffuseIntensity = 1;
+    gi.method = GlobalIlluminationMethod::Disabled;
+    Json report{{"adapter", renderer.adapterName()}, {"width", width}, {"height", height}, {"runs", Json::array()}};
+    const rae::assets::MaterialAsset* draft = nullptr;
+    auto frame = [&](bool read) {
+        TraceFrame trace;
+        require(renderer.render(settings, world, assets, error, draft), error);
+        Pixels pixels;
+        if (read) {
+            unsigned w = 0, h = 0;
+            require(renderer.readScenePixels(pixels, w, h, error) && w == width && h == height, error);
+        }
+        require(renderer.present(false, error), error);
+        return pixels;
+    };
+    const auto declaresPass = [&](RenderPassKind kind) {
+        const auto& passes = renderer.activePipeline().passes;
+        return std::any_of(passes.begin(), passes.end(),
+            [kind](const auto& pass) { return pass.kind == kind; });
+    };
+    const auto off = frame(true);
+    require(visiblePixels(off) > width * height / 20, "Raster GI fixture needs visible, lit geometry.");
+    savePixels(output / "off.bmp", off, width, height);
+    const auto wall = std::find_if(world.actors.begin(), world.actors.end(),
+        [](const auto& actor) { return actor.name == "Red wall"; });
+    std::vector<unsigned> ceilingTiles;
+    Pixels offFxaa;
+    if (wall != world.actors.end() && std::any_of(world.actors.begin(), world.actors.end(),
+        [](const auto& actor) { return actor.name == "Ceiling" && actor.visible; })) {
+        settings.debugView = 3;
+        const auto normals = frame(true);
+        for (unsigned top = 32; top < 128; top += 8) for (unsigned left = 512; left < 768; left += 8) {
+            bool ceiling = true;
+            for (unsigned y = top; y < top+8 && ceiling; ++y) for (unsigned x = left; x < left+8; ++x) {
+                const auto i = (y*width+x)*4;
+                ceiling &= std::abs(int(normals[i])-128) < 3 && normals[i+1] < 3 &&
+                    std::abs(int(normals[i+2])-128) < 3;
+            }
+            if (ceiling) ceilingTiles.push_back(top*width + left);
+        }
+        settings.debugView = 0;
+        if (ceilingTiles.size() >= 64) {
+            settings.antiAliasing.method = AntiAliasingMethod::FXAA;
+            offFxaa = frame(true);
+            settings.antiAliasing.method = AntiAliasingMethod::Disabled;
+        } else {
+            report["ceilingTemporalSkip"] = "Fixed camera does not show sufficient down-facing ceiling in the ROI.";
+        }
+    }
+    auto test = [&](GlobalIlluminationMethod method, bool hardware, GlobalIlluminationQuality quality) {
+        const bool screens = method == GlobalIlluminationMethod::ScreenSpace;
+        gi.method = method;
+        gi.screenSpaceQuality = gi.probeQuality = quality;
+        settings.hardwareRayTracing = hardware;
+        settings.hardwareRayTracingReflections = hardware && screens;
+        gi.indirectSpecular = screens && hardware;
+        gi.indirectDiffuse = true;
+        settings.debugView = 0;
+        auto first = frame(true);
+        const auto label = std::string(screens ? "ssgi-" : "ddgi-") +
+            (hardware ? "dxr-" : "screen-") + giQualityKey(quality);
+        require(changedPixels(first, off) > 100, label + " first frame has no indirect light.");
+        const auto status = renderer.globalIlluminationStatus();
+        require(status.effective == method && status.effectiveQuality == quality &&
+            status.usesHardwareProbeTrace == (hardware && !screens) &&
+            status.usesHardwareReflections == (hardware && screens), label + " did not execute the requested path: " + status.reason);
+        require(renderer.renderFeatures().isActive(RenderFeature::HardwareRayTracing) == hardware &&
+            renderer.renderFeatures().isActive(RenderFeature::HardwareReflections) == (screens && hardware),
+            label + " feature matrix disagrees with the executed DXR passes.");
+        // Drop startup frames and deduplicate delayed timestamp results from the same GPU frame.
+        std::vector<double> durations;
+        std::map<std::string, std::vector<double>> passTimes;
+        std::vector<double> dxrDispatchTimes;
+        std::uint64_t dxrFrameId = 0;
+        std::chrono::steady_clock::time_point start;
+        std::uint64_t lastId = 0;
+        Pixels lit;
+        for (unsigned i = 0; i < 24; ++i) {
+            if (i == 8) start = std::chrono::steady_clock::now();
+            lit = frame(i == 7 || i == 23);
+            const auto& measurements = renderer.diagnosticsFrame();
+            const auto dxr = renderer.hardwareTransportTiming();
+            if (hardware && i >= 8 && dxr.frameId && dxr.frameId != dxrFrameId &&
+                dxr.probeUpdate == !screens && dxr.reflectionOnly == screens) {
+                dxrDispatchTimes.push_back(dxr.gpuMs);
+                dxrFrameId = dxr.frameId;
+            }
+            if (i < 8 || measurements.gpuStatus != GpuTimingStatus::Ready || measurements.gpuFrameId == lastId) continue;
+            lastId = measurements.gpuFrameId;
+            durations.push_back(measurements.gpuTotalMs);
+            for (const auto& pass : measurements.gpuPasses) passTimes[pass.name].push_back(pass.gpuMs);
+        }
+        const double wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-start).count() / 16;
+        std::sort(durations.begin(), durations.end());
+        require(changedPixels(lit, off) > 100, label + " lit image matches the baseline.");
+        savePixels(output / (label + "-lit.bmp"), lit, width, height);
+        settings.debugView = 11;
+        auto indirect = frame(true);
+        const auto count = visiblePixels(indirect);
+        require(count > 100, label + " indirect debug is empty.");
+        savePixels(output / (label + "-indirect.bmp"), indirect, width, height);
+        settings.giDebugExposureEv = 3;
+        const auto boosted = frame(true);
+        require(changedPixels(indirect, boosted) > 100, label + " diagnostic EV did not change the indirect display.");
+        if (quality == GlobalIlluminationQuality::Medium) savePixels(output / (label + "-indirect-ev3.bmp"), boosted, width, height);
+        // Separate probe-cell artifacts from temporal sampling noise at the same
+        // camera and exposure. Keep readbacks outside the GPU timing window.
+        if (hardware && !screens && quality == GlobalIlluminationQuality::Medium) {
+            savePixels(output / (label + "-indirect-ev3-next.bmp"), frame(true), width, height);
+            for (unsigned i = 0; i < 95; ++i) frame(false);
+            savePixels(output / (label + "-indirect-ev3-settled.bmp"), frame(true), width, height);
+        }
+        settings.giDebugExposureEv = 0;
+        gi.indirectDiffuseIntensity = 0;
+        gi.indirectSpecular = false;
+        require(visiblePixels(frame(true), 1) == 0, label + " zero gain leaves indirect contribution in debug.");
+        settings.debugView = 0;
+        require(changedPixels(frame(true), off, 2) < width * height / 100, label + " changed raster lighting at zero gain.");
+        gi.indirectDiffuseIntensity = 1;
+        if (!offFxaa.empty() && quality == GlobalIlluminationQuality::Medium) {
+            gi.indirectDiffuseIntensity = 3.61f;
+            gi.indirectSpecular = screens && hardware;
+            settings.antiAliasing.method = AntiAliasingMethod::FXAA;
+            const auto temporal = cornellCeilingStability(frame, offFxaa, width, ceilingTiles,
+                screens ? 6.0f : 8.0f);
+            report["ceilingTemporal"][label] = temporal;
+            write(output / "raster-gi.json", report.dump(2));
+            require(temporal.at("passed").get<bool>(), label + " static ceiling flicker: " + temporal.dump());
+            if (!screens) {
+                // Editing the blend weight should retain a warm probe volume.
+                // Use an explicit reset at the same weight as the cold reference.
+                const auto warm = frame(true);
+                const float originalHysteresis = gi.probeHysteresis;
+                const float editedHysteresis = originalHysteresis > 0.75f ? 0.70f : 0.90f;
+                gi.probeHysteresis = editedHysteresis;
+                const auto edited = frame(true);
+                // At zero hysteresis only one update survives. Raising the weight
+                // to one must average fresh samples starting with that single update.
+                gi.probeHysteresis = 0.0f;
+                const auto single = frame(true);
+                gi.probeHysteresis = 1.0f;
+                for (unsigned i = 0; i < 15; ++i) frame(false);
+                const auto recovered = frame(true);
+                const Mask fullFrame(width * height, 1);
+                const double singleError = meanError(single, warm, fullFrame);
+                const double recoveredError = meanError(recovered, warm, fullFrame);
+                gi.probeHysteresis = editedHysteresis;
+                renderer.resetGlobalIllumination();
+                const auto cold = frame(true);
+                const auto editDelta = changedPixels(warm, edited);
+                const auto resetDelta = changedPixels(warm, cold);
+                report["hysteresisEdit"][label] = {{"changedPixels",editDelta}, {"resetChangedPixels",resetDelta},
+                    {"singleFrameMae",singleError}, {"recoveredMae16",recoveredError}};
+                write(output / "raster-gi.json", report.dump(2));
+                require(resetDelta > 100 && editDelta < resetDelta / 2,
+                    label + " live hysteresis edit lost the converged probe volume.");
+                require(singleError > 0.0 && recoveredError < 0.65 * singleError,
+                    label + " raised hysteresis gave a single noisy update too much history.");
+                gi.probeHysteresis = originalHysteresis;
+            }
+            gi.indirectDiffuseIntensity = 1;
+            settings.antiAliasing.method = AntiAliasingMethod::Disabled;
+        }
+        Json row{{"label", label}, {"litChangedPixels", changedPixels(lit, off)}, {"indirectPixels", count},
+            {"firstFrameChangedPixels", changedPixels(first, off)}, {"timedFrames", durations.size()}};
+        if (!dxrDispatchTimes.empty()) {
+            std::sort(dxrDispatchTimes.begin(), dxrDispatchTimes.end());
+            row["medianDxrDispatchMs"] = dxrDispatchTimes[dxrDispatchTimes.size()/2];
+        }
+        row["timedDxrDispatches"] = dxrDispatchTimes.size();
+        row["wallMsPerFrame"] = wallMs;
+        for (auto& [name, values] : passTimes) {
+            std::sort(values.begin(), values.end());
+            row["medianGpuPassMs"][name] = values[values.size()/2];
+        }
+        if (!durations.empty()) row["medianGpuFrameMs"] = durations[durations.size()/2];
+        report["runs"].push_back(row);
+        write(output / "raster-gi.json", report.dump(2));
+        std::cout << "PASS " << label << " " << row.dump() << std::endl;
+    };
+    for (bool hardware : {false, true}) {
+        if (hardware && !testHardware) continue;
+        for (auto method : {GlobalIlluminationMethod::ScreenSpace, GlobalIlluminationMethod::ProbeGrid})
+            for (auto quality : {GlobalIlluminationQuality::Low, GlobalIlluminationQuality::Medium, GlobalIlluminationQuality::High})
+                test(method, hardware, quality);
+    }
+    // In the Cornell fixture recolour a single wall. Measure on neutral receivers
+    // selected from the G-buffer so the changed wall's own pixels cannot pass.
+    if (wall != world.actors.end()) {
+        const auto* original = assets.findMaterial(wall->mesh.materialId);
+        require(original != nullptr, "Cornell colour-transfer fixture is missing the red wall material.");
+        auto donor = *original;
+        gi.indirectSpecular = false;
+        settings.debugView = 3;
+        const auto normals = frame(true);
+        settings.debugView = 6;
+        const auto metallic = frame(true);
+        Mask neutral(width * height, 0);
+        // The authored floor is neutral plaster with its normal facing up.
+        // Include the floor/wall contact region, exclude the reflective spheres.
+        for (unsigned y = height/2; y < height-2; ++y)
+            for (unsigned x = 2; x < width-2; ++x) {
+                const auto i = (y*width+x)*4;
+                neutral[y*width+x] = normals[i+1] >= 254 &&
+                    std::abs(int(normals[i])-128) < 3 && std::abs(int(normals[i+2])-128) < 3 && metallic[i] < 30;
+            }
+        require(maskCount(neutral) > 1000, "Cornell fixture has no neutral receiver ROI.");
+        draft = &donor;
+        settings.debugView = 11;
+        gi.screenSpaceQuality = gi.probeQuality = GlobalIlluminationQuality::Medium;
+        for (bool hardware : {false, true}) {
+            if (hardware && !testHardware) continue;
+            for (auto method : {GlobalIlluminationMethod::ScreenSpace, GlobalIlluminationMethod::ProbeGrid}) {
+                if (hardware && method == GlobalIlluminationMethod::ScreenSpace) continue;
+                gi.method = method;
+                settings.hardwareRayTracing = hardware;
+                auto sample = [&](float red, float blue) {
+                    donor.baseColor[0] = red; donor.baseColor[1] = 0.04f; donor.baseColor[2] = blue;
+                    Pixels pixels;
+                    for (unsigned i = 0; i < 24; ++i) pixels = frame(i == 23);
+                    return meanColour(pixels, neutral);
+                };
+                const auto red = sample(.78f, .04f);
+                const auto blue = sample(.04f, .78f);
+                const auto label = method == GlobalIlluminationMethod::ScreenSpace ? "ssgi" : hardware ? "dxr-ddgi" : "screen-ddgi";
+                report["receiverTint"][label] = {{"redWall", red}, {"blueWall", blue}, {"receiverPixels", maskCount(neutral)}};
+                write(output / "raster-gi.json", report.dump(2));
+                require(red[0] > blue[0] + 0.0003 && blue[2] > red[2] + 0.0003,
+                    std::string(label) + " neutral receivers did not respond to wall colour.");
+            }
+        }
+        draft = nullptr;
+
+        const auto mirror = std::find_if(world.actors.begin(), world.actors.end(),
+            [](const auto& actor) { return actor.name == "Mirror sphere" && actor.visible; });
+        if (mirror != world.actors.end()) {
+            Mask metal(width * height, 0);
+            for (std::size_t pixel = 0; pixel < metal.size(); ++pixel)
+                metal[pixel] = metallic[pixel * 4] == 255 ? 1 : 0;
+            metal = erodeMask(metal, width, height, 2);
+            const auto metalPixels = maskCount(metal);
+            require(metalPixels > 1000, "Cornell reflection fixture needs visible pure-metal receivers.");
+
+            const auto savedGi = gi;
+            const auto savedHardware = settings.hardwareRayTracing;
+            const auto savedHardwareReflections = settings.hardwareRayTracingReflections;
+            const GlobalIlluminationSettings defaults;
+            gi.method = GlobalIlluminationMethod::ProbeGrid;
+            gi.screenSpaceQuality = GlobalIlluminationQuality::Custom;
+            gi.indirectDiffuseIntensity = 1.0f;
+            const auto paintWall = [&](const std::array<float, 3>& color) {
+                std::copy(color.begin(), color.end(), donor.baseColor);
+            };
+            const auto checkPasses = [&](const char* label, bool probes, bool specular, bool hardware) {
+                const bool dxrProbes = probes && hardware;
+                const bool dxrReflections = specular && hardware && settings.hardwareRayTracingReflections;
+                const bool screenProbes = probes && !hardware;
+                const bool screenReflections = specular && !dxrReflections;
+                const auto dispatches = renderer.hardwareRayTracingDispatchCount();
+                auto pixels = frame(true);
+                const auto& actual = renderer.globalIlluminationStatus();
+                const auto& features = renderer.renderFeatures();
+                require(actual.effective == (probes || specular ? GlobalIlluminationMethod::ProbeGrid :
+                            GlobalIlluminationMethod::Disabled) &&
+                        actual.usesHardwareProbeTrace == dxrProbes &&
+                        actual.usesScreenSpaceProbes == screenProbes &&
+                        actual.usesHardwareReflections == dxrReflections &&
+                        actual.usesScreenSpaceReflections == screenReflections &&
+                        features.isActive(RenderFeature::ProbeGridGI) == probes &&
+                        features.isActive(RenderFeature::HardwareReflections) == dxrReflections,
+                    std::string(label) + " contribution status disagrees with the requested paths: " + actual.reason);
+                require(declaresPass(RenderPassKind::ProbeRayTrace) == screenProbes &&
+                        declaresPass(RenderPassKind::ScreenSpaceGiSpecular) == screenReflections &&
+                        declaresPass(RenderPassKind::HardwareTransport) == (dxrProbes || dxrReflections) &&
+                        !declaresPass(RenderPassKind::ScreenSpaceGi) && !declaresPass(RenderPassKind::HardwareResolve),
+                    std::string(label) + " scheduled an unexpected Deferred GI pass.");
+                require(renderer.hardwareRayTracingDispatchCount() - dispatches ==
+                        static_cast<unsigned>(dxrProbes) + static_cast<unsigned>(dxrReflections),
+                    std::string(label) + " issued an unexpected number of DXR dispatches.");
+                return pixels;
+            };
+            struct ReflectionCase { const char* label; bool hardware, dxrReflection; };
+            for (const auto& [label, hardware, dxrReflection] :
+                {ReflectionCase{"screen-ssr", false, false}, ReflectionCase{"dxr-ssr", true, false},
+                 ReflectionCase{"dxr-dxr", true, true}}) {
+                if (hardware && !testHardware) continue;
+                settings.hardwareRayTracing = hardware;
+                settings.hardwareRayTracingReflections = dxrReflection;
+                gi.indirectDiffuse = true;
+                gi.indirectSpecular = true;
+                const auto prefix = std::string("ddgi-") + label;
+                settings.debugView = 0;
+                draft = nullptr;
+                gi.screenSpaceRadius = defaults.screenSpaceRadius;
+                gi.screenSpaceSteps = defaults.screenSpaceSteps;
+                gi.screenSpaceThickness = defaults.screenSpaceThickness;
+                for (unsigned i = 0; i < 8; ++i) frame(false);
+                savePixels(output / (prefix + "-default-lit.bmp"), checkPasses(label, true, true, hardware), width, height);
+
+                // The fixed metal spheres reflect a wall outside the default 2 m SSR radius.
+                gi.screenSpaceRadius = 8.0f;
+                gi.screenSpaceSteps = kGiMaxScreenSpaceSteps;
+                settings.debugView = 11;
+                draft = &donor;
+                paintWall({.78f, .04f, .04f});
+                for (unsigned i = 0; i < 8; ++i) frame(false);
+                const auto both = checkPasses(label, true, true, hardware);
+                settings.debugView = 0;
+                savePixels(output / (prefix + "-both-lit.bmp"), frame(true), width, height);
+                settings.debugView = 11;
+                gi.indirectDiffuse = false;
+                const auto specularRed = checkPasses(label, false, true, hardware);
+                paintWall({.04f, .04f, .78f});
+                const auto specularBlue = checkPasses(label, false, true, hardware);
+
+                const double reflectedRed = channelDifference(specularRed, specularBlue, metal, 0);
+                const double reflectedBlue = channelDifference(specularBlue, specularRed, metal, 2);
+                const double diffuseOnMetal = meanError(both, specularRed, metal);
+                const double diffuseOnFloor = meanError(both, specularRed, neutral);
+                report["ddgiReflections"][label] = {{"metalReceiverPixels", metalPixels},
+                    {"redWallReflectionDelta", reflectedRed}, {"blueWallReflectionDelta", reflectedBlue},
+                    {"diffuseToggleMetalMae", diffuseOnMetal}, {"diffuseToggleFloorMae", diffuseOnFloor},
+                    {"ssrRadius", gi.screenSpaceRadius}, {"ssrSteps", gi.screenSpaceSteps},
+                    {"ssrThickness", gi.screenSpaceThickness}};
+                write(output / "raster-gi.json", report.dump(2));
+                require(reflectedRed > 0.0003 && reflectedBlue > 0.0003,
+                    std::string(label) + " pure metal did not reflect the wall's changed colour.");
+                require(diffuseOnMetal < 0.001 && diffuseOnFloor > 0.001,
+                    std::string(label) + " turning off indirect diffuse changed the metal reflection or left the floor unchanged.");
+                savePixels(output / (prefix + "-specular-red.bmp"), specularRed, width, height);
+                savePixels(output / (prefix + "-specular-blue.bmp"), specularBlue, width, height);
+
+                settings.debugView = 12;
+                checkPasses(label, true, false, hardware);
+                require(declaresPass(RenderPassKind::GiDebugOverlay),
+                    std::string(label) + " probe debug view did not render its overlay.");
+                settings.debugView = 11;
+                const auto resumed = checkPasses(label, false, true, hardware);
+                require(meanError(specularBlue, resumed, metal) < 0.001,
+                    std::string(label) + " reflections did not return after leaving probe debug.");
+
+                gi.indirectDiffuse = true;
+                gi.indirectSpecular = false;
+                const auto diffuseOnly = checkPasses(label, true, false, hardware);
+                const auto metalWithoutReflection = meanColour(diffuseOnly, metal);
+                require(*std::max_element(metalWithoutReflection.begin(), metalWithoutReflection.end()) == 0 &&
+                        visiblePixels(diffuseOnly) > 1000,
+                    std::string(label) + " turning off reflections lost diffuse GI or left indirect light on pure metal.");
+
+                gi.indirectDiffuse = false;
+                settings.debugView = 0;
+                const auto bothOff = checkPasses(label, false, false, hardware);
+                require(meanError(bothOff, off, metal) < 0.001,
+                    std::string(label) + " disabling both contributions changed direct lighting on metal.");
+                std::cout << "PASS DDGI independent reflections " << label << " "
+                          << report["ddgiReflections"][label].dump() << std::endl;
+            }
+            if (testHardware) {
+                settings.hardwareRayTracing = settings.hardwareRayTracingReflections = true;
+                settings.debugView = 0;
+                draft = nullptr;
+                struct TimingCase { const char* label; bool probes, reflections; };
+                for (const auto& [label, probes, reflections] :
+                    {TimingCase{"probes-only", true, false}, TimingCase{"reflections-only", false, true},
+                     TimingCase{"probes-and-reflections", true, true}}) {
+                    gi.indirectDiffuse = probes;
+                    gi.indirectSpecular = reflections;
+                    std::vector<double> durations;
+                    auto lastFrameId = renderer.hardwareTransportTiming().frameId;
+                    for (unsigned i = 0; i < 24; ++i) {
+                        frame(false);
+                        const auto timing = renderer.hardwareTransportTiming();
+                        if (i < 8 || !timing.frameId || timing.frameId == lastFrameId ||
+                            timing.probeUpdate != probes || timing.reflectionOnly != reflections ||
+                            !std::isfinite(timing.gpuMs) || timing.gpuMs <= 0.0) continue;
+                        durations.push_back(timing.gpuMs);
+                        lastFrameId = timing.frameId;
+                    }
+                    auto& row = report["ddgiDxrTiming"][label];
+                    row["timedFrames"] = durations.size();
+                    if (!durations.empty()) {
+                        std::sort(durations.begin(), durations.end());
+                        row["medianGpuMs"] = durations[durations.size() / 2];
+                    }
+                }
+                write(output / "raster-gi.json", report.dump(2));
+            }
+            gi = savedGi;
+            settings.hardwareRayTracing = savedHardware;
+            settings.hardwareRayTracingReflections = savedHardwareReflections;
+            settings.debugView = 11;
+            draft = nullptr;
+        }
+    }
+    const auto revision = renderer.shaderRevision();
+    require(!renderer.applyShaderSource("broken material !", error) && renderer.shaderRevision() == revision,
+        "Invalid shader replaced the live pipeline.");
+    settings.debugView = 11;
+    require(visiblePixels(frame(true)) > 100, "GI image lost after failed hot compile.");
+    constexpr char blackReceiver[] = "Surface EvaluateMaterial(float3 p,float3 n,Surface m){m.albedo=0;return m;}";
+    require(renderer.applyShaderSource(blackReceiver, error) && renderer.shaderRevision() > revision, error);
+    require(visiblePixels(frame(true), 1) == 0, "Hot-compiled black receivers still show diffuse GI.");
+    require(renderer.reloadShaders(error) && renderer.shaderRevision() > revision, error);
+    require(visiblePixels(frame(true)) > 100, "GI image lost after shader reload.");
+    settings.debugView = 0;
+    settings.hardwareRayTracing = false;
+    settings.antiAliasing.method = AntiAliasingMethod::TAA;
+    gi.method = GlobalIlluminationMethod::ScreenSpace;
+    frame(false);
+    frame(false);
+    frame(false);
+    const auto stable = renderer.antiAliasingStatus();
+    gi.screenSpaceQuality = GlobalIlluminationQuality::Low;
+    frame(false);
+    require(renderer.antiAliasingStatus().historyRevision > stable.historyRevision,
+        "Live SSGI tier edit retained stale TAA history.");
+    settings.path = RenderPath::Forward;
+    frame(false);
+    require(renderer.globalIlluminationStatus().effective == GlobalIlluminationMethod::Disabled,
+        "Unsupported Forward GI reported active.");
+    const auto fallbackRevision = renderer.antiAliasingStatus().historyRevision;
+    frame(false);
+    frame(false);
+    require(renderer.antiAliasingStatus().historyRevision == fallbackRevision &&
+        renderer.antiAliasingStatus().accumulatedFrames >= 2, "Inactive Forward GI continually resets TAA.");
+    report["validationErrors"] = renderer.validationErrorCount() - initialErrors;
+    require(report["validationErrors"] == 0, "Graphics validation errors in raster GI runs.");
+    report["passed"] = true;
+    write(output / "raster-gi.json", report.dump(2));
+}
+
+void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
+    const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
+    const std::filesystem::path& output) {
+    using namespace rae::renderer;
+    constexpr unsigned width = 1281, height = 721;
+    constexpr unsigned settledFrame = 64;
+    constexpr unsigned timingWindow = 16;
+    const auto hasActor = [&world](const char* name) {
+        return std::any_of(world.actors.begin(), world.actors.end(),
+            [name](const auto& actor) { return actor.visible && actor.name == name; });
+    };
+    require(hasActor("Ceiling") && hasActor("Back wall") && world.environment.areaLight.enabled,
+        "Software GI needs the Cornell fixture with its area light, ceiling and back wall.");
+    std::filesystem::create_directories(output);
+    std::string error;
+    require(renderer.ensureSceneTargetSize(width, height, error), error);
+    renderer.setDiagnosticsEnabled(true);
+    const auto initialDispatches = renderer.hardwareRayTracingDispatchCount();
+    settings.editorViewport = settings.viewportVisible = true;
+    settings.offscreenTarget = false;
+    settings.viewportX = settings.viewportY = 0;
+    settings.viewportWidth = width;
+    settings.viewportHeight = height;
+    settings.path = RenderPath::Deferred;
+    settings.rayTracing = false;
+    settings.hardwareRayTracing = settings.hardwareRayTracingReflections = settings.hardwareRayTracingShadows = false;
+    settings.giDebugExposureEv = 0;
+    auto& gi = settings.globalIllumination;
+    const auto effectiveProbeBudget = [&gi] {
+        auto requested = gi;
+        requested.method = GlobalIlluminationMethod::ProbeGrid;
+        return resolveGiQuality(requested);
+    }();
+    auto screenBudget = gi;
+    screenBudget.method = GlobalIlluminationMethod::ScreenSpace;
+    screenBudget = resolveGiQuality(screenBudget);
+    Json report{{"adapter", renderer.adapterName()}, {"width", width}, {"height", height},
+        {"antiAliasing", antiAliasingMethodName(settings.antiAliasing.method)},
+        {"diffuseIntensity", gi.indirectDiffuseIntensity}, {"probeHysteresis", gi.probeHysteresis},
+        {"requestedProbeGrid", {gi.probeGridX, gi.probeGridY, gi.probeGridZ}},
+        {"probeGridBudget", {effectiveProbeBudget.probeGridX, effectiveProbeBudget.probeGridY, effectiveProbeBudget.probeGridZ}},
+        {"probeRayBudget", effectiveProbeBudget.probeRayCount}, {"ssgiRayBudget", screenBudget.screenSpaceRayCount},
+        {"ssgiStepBudget", screenBudget.screenSpaceSteps}, {"screenSpaceRadius", gi.screenSpaceRadius},
+        {"captures", Json::object()}, {"passed", false}};
+    const auto frame = [&](const rae::scene::World& scene, unsigned index, const std::string& name) {
+        TraceFrame trace;
+        require(renderer.render(settings, scene, assets, error), error);
+        const auto status = renderer.globalIlluminationStatus();
+        require(status.effective == gi.method && !status.usesHardwareProbeTrace && !status.usesHardwareReflections,
+            "Unexpected GI mode during software capture: " + status.reason);
+        if (!name.empty()) {
+            Pixels image;
+            unsigned w = 0, h = 0;
+            const bool read = renderer.readScenePixels(image, w, h, error);
+            require(read && w == width && h == height, "Software GI readback: " + error);
+            const auto filename = name + ".bmp";
+            savePixels(output / filename, image, width, height);
+            report["captures"][name] = {{"image", filename}, {"frame", index}, {"view", settings.debugView}};
+        }
+        require(renderer.present(false, error), error);
+    };
+    try {
+        gi.method = GlobalIlluminationMethod::Disabled;
+        settings.debugView = 3;
+        frame(world, 1, "normals");
+        settings.debugView = 0;
+        frame(world, 1, "lit-off");
+
+        auto editedWorld = world;
+        auto& editedLight = editedWorld.environment.areaLight;
+        editedLight.center[0] += 0.5f;
+        for (auto& channel : editedLight.radiance) channel *= 1.65f;
+        report["lightEdit"] = {{"horizontalOffsetMetres", 0.5}, {"radianceMultiplier", 1.65}};
+        for (const auto method : {GlobalIlluminationMethod::ProbeGrid, GlobalIlluminationMethod::ScreenSpace}) {
+            const std::string label = method == GlobalIlluminationMethod::ProbeGrid ? "ddgi" : "ssgi";
+            gi.method = method;
+            gi.indirectDiffuse = true;
+            gi.indirectSpecular = false;
+            settings.debugView = 11;
+            renderer.resetGlobalIllumination();
+            const auto series = [&](const rae::scene::World& scene, const std::string& prefix) {
+                for (unsigned i = 1; i <= settledFrame; ++i) {
+                    const bool capture = i == 1 || i == 4 || i == 8 || i == 32 || i == settledFrame;
+                    const auto suffix = (i < 10 ? "00" : "0") + std::to_string(i);
+                    frame(scene, i, capture ? prefix + "-f" + suffix : std::string{});
+                }
+            };
+            series(world, label + "-diffuse");
+            // Keep live history while editing the light, as the editor does.
+            series(editedWorld, label + "-light-edit");
+
+            settings.debugView = 0;
+            gi.indirectSpecular = true;
+            renderer.resetGlobalIllumination();
+            std::uint64_t lastTiming = 0;
+            std::vector<double> times;
+            std::map<std::string, std::vector<double>> passes;
+            for (unsigned i = 1; i <= settledFrame; ++i) {
+                const std::string name = i == 1 ? label + "-lit-f001" : i == settledFrame ? label + "-lit-f064" : "";
+                frame(world, i, name);
+                const auto& timing = renderer.diagnosticsFrame();
+                if (i <= settledFrame - timingWindow || timing.gpuStatus != GpuTimingStatus::Ready ||
+                    timing.gpuFrameId <= lastTiming) continue;
+                lastTiming = timing.gpuFrameId;
+                times.push_back(timing.gpuTotalMs);
+                for (const auto& pass : timing.gpuPasses)
+                    passes[pass.name].push_back(pass.gpuMs);
+            }
+            require(!times.empty(), label + " did not provide GPU timing samples.");
+            const auto median = [](std::vector<double>& values) {
+                std::sort(values.begin(), values.end());
+                return values[values.size() / 2];
+            };
+            auto& timing = report["timing"][label];
+            timing = {{"timedFrames", times.size()}, {"medianGpuFrameMs", median(times)}};
+            for (auto& [name, values] : passes)
+                timing["medianGpuPassMs"][name] = median(values);
+
+            // Keep history live during the orbit. Capture masks at the same
+            // camera positions so tests can exclude silhouettes and new surfaces.
+            const auto savedYaw = settings.cameraYaw;
+            const auto savedPitch = settings.cameraPitch;
+            const auto savedPose = settings.cameraPose;
+            settings.cameraPose.reset();
+            for (unsigned i = 1; i <= 16; ++i) {
+                settings.cameraYaw = savedYaw + 0.019f * static_cast<float>(i);
+                settings.cameraPitch = savedPitch - 0.004f * static_cast<float>(i);
+                frame(world, i, i == 8 || i == 16 ? label + "-orbit-" + std::to_string(i) : "");
+            }
+            for (unsigned i = 1; i <= settledFrame; ++i)
+                frame(world, i, i == settledFrame ? label + "-orbit-rest" : "");
+            gi.method = GlobalIlluminationMethod::Disabled;
+            settings.debugView = 3;
+            frame(world, 1, label + "-orbit-normals");
+            gi.method = method;
+            settings.cameraYaw = savedYaw;
+            settings.cameraPitch = savedPitch;
+            settings.cameraPose = savedPose;
+            gi.indirectDiffuse = false;
+            settings.debugView = 11;
+            frame(world, 1, label + "-specular");
+            std::cout << "PASS: software " << label << " frame sequence and light edit; "
+                << timing.dump() << std::endl;
+        }
+        report["dxrDispatches"] = renderer.hardwareRayTracingDispatchCount() - initialDispatches;
+        report["validationErrors"] = renderer.validationErrorCount();
+        require(report["dxrDispatches"] == 0 && report["validationErrors"] == 0,
+            "Software GI issued DXR work or reported GPU validation errors.");
+        report["passed"] = true;
+        write(output / "software-gi.json", report.dump(2));
+    } catch (const std::exception& failure) {
+        report["failure"] = failure.what();
+        report["validationErrors"] = renderer.validationErrorCount();
+        write(output / "software-gi.json", report.dump(2));
         throw;
     }
 }
