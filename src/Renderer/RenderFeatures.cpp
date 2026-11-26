@@ -125,6 +125,8 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
 
     // Hardware ray tracing, checked layer by layer. The first failing layer is
     // reported; later requests inherit the same reason.
+    const bool probeGi = requests.globalIllumination == GlobalIlluminationMethod::ProbeGrid;
+    const bool screenGi = requests.globalIllumination == GlobalIlluminationMethod::ScreenSpace;
     FeatureState hardwareState = FeatureState::Off;
     std::string hardwareReason = "Hardware ray tracing was not requested.";
     if (requests.hardwareRayTracing) {
@@ -153,6 +155,9 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
         } else if (capabilities.hardwareFrameFailed) {
             hardwareState = FeatureState::BlockedByDependency;
             hardwareReason = "The hardware frame failed at runtime; the raster image is retained.";
+        } else if ((probeGi || screenGi) && !capabilities.rasterGiHardwareExecuted) {
+            hardwareState = FeatureState::BlockedByDependency;
+            hardwareReason = "This raster GI frame uses no DXR dispatch.";
         } else {
             hardwareState = FeatureState::Active;
             hardwareReason.clear();
@@ -163,11 +168,14 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
     const bool hardwareActive = hardwareState == FeatureState::Active;
 
     if (requests.hardwareRayTracing && requests.hardwareRayTracingReflections) {
-        if (requests.globalIllumination != GlobalIlluminationMethod::Disabled) {
+        if (requests.globalIllumination == GlobalIlluminationMethod::PathTracing) {
             set(RenderFeature::HardwareReflections, FeatureState::BlockedByDependency,
                 "Path-traced GI owns indirect specular while it is enabled.");
         } else if (!hardwareActive) {
             set(RenderFeature::HardwareReflections, FeatureState::BlockedByDependency, hardwareReason);
+        } else if ((probeGi || screenGi) && !capabilities.rasterGiHardwareReflectionsExecuted) {
+            set(RenderFeature::HardwareReflections, FeatureState::BlockedByDependency,
+                "This raster GI frame did not dispatch DXR reflections.");
         } else {
             set(RenderFeature::HardwareReflections, FeatureState::Active);
         }
@@ -179,7 +187,7 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
                 "The scene shadow method is Disabled.");
         } else if (!hardwareActive) {
             set(RenderFeature::HardwareShadows, FeatureState::BlockedByDependency, hardwareReason);
-        } else if (requests.globalIllumination != GlobalIlluminationMethod::Disabled &&
+        } else if (requests.globalIllumination == GlobalIlluminationMethod::PathTracing &&
                    requests.globalIlluminationMode == GlobalIlluminationMode::Realtime) {
             set(RenderFeature::HardwareShadows, FeatureState::BlockedByDependency,
                 "Realtime GI transports direct shadows; the ray-traced shadow preference is retained.");
@@ -203,9 +211,8 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
         if (requests.path != RenderPath::Deferred) {
             set(RenderFeature::ScreenSpaceGI, FeatureState::BlockedByDependency,
                 "SSGI needs the Deferred G-buffer; Forward reports the request as unavailable.");
-        } else if (hardwareActive) {
-            set(RenderFeature::ScreenSpaceGI, FeatureState::BlockedByDependency,
-                "Hardware ray tracing resolved this frame; screen-space GI is skipped.");
+        } else if (!capabilities.rasterGiBlockReason.empty()) {
+            set(RenderFeature::ScreenSpaceGI, FeatureState::BlockedByDependency, capabilities.rasterGiBlockReason);
         } else {
             set(RenderFeature::ScreenSpaceGI, FeatureState::Active);
         }
@@ -215,9 +222,11 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
         if (requests.path != RenderPath::Deferred) {
             set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency,
                 "DDGI needs the Deferred G-buffer; Forward reports the request as unavailable.");
-        } else if (hardwareActive) {
+        } else if (!capabilities.rasterGiBlockReason.empty()) {
+            set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency, capabilities.rasterGiBlockReason);
+        } else if (!capabilities.rasterGiProbeGridExecuted) {
             set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency,
-                "Hardware ray tracing resolved this frame; DDGI is skipped.");
+                "This frame did not update the diffuse probe grid.");
         } else {
             set(RenderFeature::ProbeGridGI, FeatureState::Active);
         }

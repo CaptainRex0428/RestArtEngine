@@ -7,6 +7,7 @@ bool aaHistoryValid = false;
 unsigned aaHistoryRead = 0;
 std::uint32_t aaHistoryFrames = 0;
 std::uint64_t aaHistoryRevision = 0, aaSceneKey = 0;
+GlobalIlluminationSettings aaPreviousGi{};
 XMFLOAT4X4 aaPreviousViewProjection{};
 XMFLOAT4 aaPreviousEye{}, aaPreviousForward{};
 XMFLOAT2 aaJitterPixels{};
@@ -40,7 +41,7 @@ void ensureAntiAliasingTargets(unsigned w, unsigned h, bool temporal) {
 // edits follow the same markGeometryModified() contract as GPU mesh caches.
 std::uint64_t antiAliasingSceneKey(const SceneSettings& settings, const scene::World& world,
     const assets::AssetLibrary& assets, const assets::MaterialAsset* draftMaterial,
-    const camera::View& camera, const LightingConstants& lighting, const XMFLOAT4& viewport) const {
+    const camera::View& camera, const LightingConstants& lighting, const XMFLOAT4& viewport, bool linearGi = false) const {
     std::uint64_t hash = 1469598103934665603ull;
     const auto bytes = [&](const void* pointer, std::size_t size) {
         const auto* data = static_cast<const unsigned char*>(pointer);
@@ -48,14 +49,17 @@ std::uint64_t antiAliasingSceneKey(const SceneSettings& settings, const scene::W
     };
     const auto value = [&](const auto& item) { bytes(&item,sizeof(item)); };
     value(revision); value(settings.viewId); value(settings.path); value(settings.shadowMethod);
-    value(settings.rayTracing); value(settings.frustumCulling); value(settings.exposure); value(settings.debugView);
+    value(settings.rayTracing); value(settings.frustumCulling);
+    if (!linearGi) { value(settings.exposure); value(settings.debugView); }
     value(settings.roughness); value(settings.metallic); value(settings.baseColor);
     value(settings.antiAliasing.temporalCurrentWeight); value(viewport); value(world.blackBackground);
     value(lighting); value(camera.projection);
     const auto& dof = camera.lens.depthOfField;
     value(dof.enabled); value(dof.focusDistance); value(dof.fStop); value(dof.sensorHeightMm);
     for (const auto& actor : world.actors) {
-        value(actor.id); value(actor.visible); value(actor.transform);
+        value(actor.id); value(actor.visible);
+        if (!linearGi || settings.globalIllumination.method != GlobalIlluminationMethod::ScreenSpace)
+            value(actor.transform);
         if (!actor.visible || actor.light || actor.camera) continue;
         value(actor.mesh.meshId); value(actor.mesh.materialId);
         for (const auto id : actor.mesh.materialOverrides) value(id);
@@ -111,7 +115,9 @@ void prepareTemporalAntiAliasing(const SceneSettings& settings, const scene::Wor
         const float delta = camera.position[i]-previousPosition[i]; displacement += delta*delta;
         facing += camera.forward[i]*previousForward[i];
     }
-    if (!aaHistoryValid || key != aaSceneKey || displacement > 4 || facing < .8f) invalidateAntiAliasing();
+    if (!aaHistoryValid || key != aaSceneKey || !(aaPreviousGi == settings.globalIllumination) ||
+        displacement > 4 || facing < .8f) invalidateAntiAliasing();
+    aaPreviousGi = settings.globalIllumination;
     aaSceneKey = key;
     // Apply clip-space offsets to x/y using w, for perspective and orthographic.
     const unsigned sample = aaHistoryFrames % 16 + 1;

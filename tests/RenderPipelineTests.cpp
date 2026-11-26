@@ -116,25 +116,42 @@ void screenSpaceGiInputs() {
         "SSGI trace must publish raw indirect.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceRawIndirect) &&
         contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceHistory) &&
-        contains(passAt(pipeline, composite).reads, PipelineResource::ProbeLinearRadiance),
+        contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceDirectCurrent),
         "SSGI composite must consume linear direct, raw indirect and denoised history.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::GBufferAlbedo),
         "SSGI composite must read receiver albedo.");
     require(contains(passAt(pipeline, composite).writes, PipelineResource::ScreenSpaceHistory),
         "SSGI composite must publish the next indirect history.");
     require(validatePipeline(pipeline).valid, "SSGI pipeline is inconsistent.");
+    build.probeFallbackGi = true;
+    const auto software = buildScenePipeline(build);
+    const auto filter = indexOf(software, RenderPassKind::ScreenSpaceDiffuseFilter);
+    require(indexOf(software, RenderPassKind::ScreenSpaceGi) < filter &&
+        filter < indexOf(software, RenderPassKind::ScreenSpaceGiComposite) &&
+        contains(passAt(software, filter).writes, PipelineResource::ScreenSpaceFilteredIndirect) &&
+        contains(passAt(software, indexOf(software, RenderPassKind::ScreenSpaceGiComposite)).reads,
+            PipelineResource::ScreenSpaceFilteredIndirect) && validatePipeline(software).valid,
+        "Software SSGI must reconstruct diffuse before the full-resolution composite.");
+    build.screenSpaceDiffuse = false;
+    require(!hasKind(buildScenePipeline(build), RenderPassKind::ScreenSpaceDiffuseFilter),
+        "Specular-only rendering must skip the diffuse filter.");
 }
 
 void probeGridInputs() {
     auto build = inputs(RenderPath::Deferred);
     build.probeGridGi = true;
     const auto pipeline = buildScenePipeline(build);
-    require(contains(passAt(pipeline, 2).reads, PipelineResource::ProbeAtlas),
-        "Deferred lighting must consume the DDGI probe atlas.");
+    require(!hasKind(pipeline, RenderPassKind::DeferredLighting),
+        "GI linear source must shade the deferred G-buffer only once.");
     const auto update = indexOf(pipeline, RenderPassKind::ProbeUpdate);
     require(update < pipeline.passes.size(), "DDGI probe update pass missing.");
-    require(contains(passAt(pipeline, update).writes, PipelineResource::ProbeAtlas),
-        "DDGI update must publish the probe atlas.");
+    const auto filter = indexOf(pipeline, RenderPassKind::ProbeSpatialFilter);
+    require(update < filter && filter < indexOf(pipeline, RenderPassKind::ProbeComposite) &&
+        contains(passAt(pipeline, update).writes, PipelineResource::ProbeHistory) &&
+        contains(passAt(pipeline, filter).reads, PipelineResource::ProbeHistory |
+            PipelineResource::GBufferPosition | PipelineResource::GBufferNormal) &&
+        contains(passAt(pipeline, filter).writes, PipelineResource::ProbeAtlas),
+        "Filter the new raw probe history into a separate atlas before shading.");
     const auto linear = indexOf(pipeline, RenderPassKind::ProbeLinearSource);
     require(linear < pipeline.passes.size(), "DDGI linear source pass missing.");
     require(contains(passAt(pipeline, linear).writes, PipelineResource::ProbeLinearRadiance),
@@ -142,7 +159,6 @@ void probeGridInputs() {
     const auto composite = indexOf(pipeline, RenderPassKind::ProbeComposite);
     require(composite < pipeline.passes.size(), "DDGI composite pass missing.");
     require(contains(passAt(pipeline, composite).reads, PipelineResource::ProbeAtlas) &&
-        contains(passAt(pipeline, composite).reads, PipelineResource::ProbeLinearRadiance) &&
         contains(passAt(pipeline, composite).reads, PipelineResource::ScreenSpaceDirectCurrent) &&
         contains(passAt(pipeline, composite).writes, PipelineResource::SceneColor),
         "DDGI composite must add the atlas to the linear direct radiance.");
@@ -156,6 +172,55 @@ void probeGridInputs() {
         contains(passAt(debugPipeline, overlay).writes, PipelineResource::SceneColor),
         "GI probe debug overlay must sample the atlas and draw into the scene colour.");
     require(validatePipeline(debugPipeline).valid, "GI probe debug pipeline is inconsistent.");
+}
+
+void probeGridReflections() {
+    auto build = inputs(RenderPath::Deferred);
+    build.probeGridGi = true;
+    build.screenSpaceSpecular = true;
+    auto pipeline = buildScenePipeline(build);
+    auto reflections = indexOf(pipeline, RenderPassKind::ScreenSpaceGiSpecular);
+    auto composite = indexOf(pipeline, RenderPassKind::ProbeComposite);
+    require(indexOf(pipeline, RenderPassKind::ProbeLinearSource) < reflections && reflections < composite,
+        "DDGI screen reflections must use the shaded scene before probe-grid composition.");
+    require(contains(passAt(pipeline, reflections).reads, PipelineResource::ScreenSpaceDirectCurrent) &&
+        !contains(passAt(pipeline, reflections).reads, PipelineResource::ProbeLinearRadiance),
+        "DDGI screen reflection hits need visible scene radiance, including direct specular.");
+    require(contains(passAt(pipeline, composite).reads, PipelineResource::ProbeAtlas | PipelineResource::ScreenSpaceRawSpecular),
+        "The DDGI composite must combine probe diffuse and screen-space reflections.");
+    require(!hasKind(pipeline, RenderPassKind::ScreenSpaceGi) && validatePipeline(pipeline).valid,
+        "DDGI plus SSR must execute without an SSGI trace.");
+
+    build.hardwareTransport = build.hardwareProbeGi = build.hardwareReflection = true;
+    build.screenSpaceSpecular = false;
+    pipeline = buildScenePipeline(build);
+    const auto transport = indexOf(pipeline, RenderPassKind::HardwareTransport);
+    const auto sharedOutputs = PipelineResource::ProbeAtlas | PipelineResource::ProbeDepthMoments |
+        PipelineResource::ScreenSpaceRawSpecular;
+    require(contains(passAt(pipeline, transport).writes, sharedOutputs) &&
+        contains(passAt(pipeline, indexOf(pipeline, RenderPassKind::ProbeComposite)).reads, sharedOutputs),
+        "Combined DXR must publish the probe atlas, moments and scene reflections.");
+    require(!hasKind(pipeline, RenderPassKind::ScreenSpaceGiSpecular) &&
+        !hasKind(pipeline, RenderPassKind::HardwareResolve) && validatePipeline(pipeline).valid,
+        "DDGI plus DXR reflections must composite without SSR or a hardware image resolve.");
+
+    build.updateProbeGrid = false;
+    build.hardwareProbeGi = false;
+    pipeline = buildScenePipeline(build);
+    const auto reflectiveReads = passAt(pipeline, indexOf(pipeline, RenderPassKind::ProbeComposite)).reads;
+    require(!contains(reflectiveReads, PipelineResource::ProbeAtlas) &&
+        !contains(reflectiveReads, PipelineResource::ProbeDepthMoments) &&
+        contains(reflectiveReads, PipelineResource::ScreenSpaceRawSpecular),
+        "A DDGI reflection-only frame must need only the reflection term.");
+    require(!hasKind(pipeline, RenderPassKind::ProbeUpdate) && validatePipeline(pipeline).valid,
+        "DXR reflections must work without a probe update.");
+
+    build.hardwareTransport = build.hardwareReflection = false;
+    build.screenSpaceSpecular = true;
+    pipeline = buildScenePipeline(build);
+    require(hasKind(pipeline, RenderPassKind::ScreenSpaceGiSpecular) &&
+        !hasKind(pipeline, RenderPassKind::ProbeRayTrace) && !hasKind(pipeline, RenderPassKind::ProbeUpdate) &&
+        validatePipeline(pipeline).valid, "SSR must also work without a probe update.");
 }
 
 void hardwareTransport() {
@@ -185,8 +250,8 @@ void hardwareTransport() {
         "Hardware DDGI must still composite linear direct radiance with SH probe irradiance.");
     require(!hasKind(ddgiPipeline, RenderPassKind::HardwareResolve),
         "Hardware DDGI must leave raster scene colour untouched.");
-    const auto ddgiDeferred = indexOf(ddgiPipeline, RenderPassKind::DeferredLighting);
-    require(contains(passAt(ddgiPipeline, ddgiDeferred).reads, PipelineResource::ProbeAtlas),
+    const auto ddgiDeferred = indexOf(ddgiPipeline, RenderPassKind::ProbeComposite);
+    require(contains(passAt(ddgiPipeline, ddgiDeferred).reads, PipelineResource::ProbeAtlas | PipelineResource::ProbeDepthMoments),
         "Hardware DDGI deferred lighting must read the ray-traced probe atlas.");
     require(validatePipeline(ddgiPipeline).valid, "Hardware DDGI pipeline is inconsistent.");
 }
@@ -506,6 +571,7 @@ int main() {
         analyticRayInputs();
         screenSpaceGiInputs();
         probeGridInputs();
+        probeGridReflections();
         hardwareTransport();
         postChain();
         antiAliasingChain();

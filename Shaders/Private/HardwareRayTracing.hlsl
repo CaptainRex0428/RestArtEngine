@@ -5,13 +5,14 @@
 #include "Scene.hlsl"
 
 // The raster scene header hides the DDGI constants in the hardware build, but
-// the probe-update dispatch shares the same 64-byte b9 layout.
+// the probe-update dispatch shares the same 80-byte b9 layout.
 cbuffer ProbeConstants : register(b9)
 {
     float4 probeGrid;
     float4 probeOrigin;
     float4 probeParameters;
     float4 probeLayout;
+    float4 probeCellSize;
 };
 
 RWTexture2D<float4> hardwareOutput : register(u0);
@@ -24,12 +25,13 @@ RWTexture2D<float4> indirectLightingOutput : register(u3);
 RWTexture2D<float4> primaryMaterial : register(u4);
 // Previous-frame world position of the primary surface (w=0 for background).
 RWTexture2D<float4> primaryPreviousPosition : register(u7);
-// Ray-traced DDGI irradiance atlas (RGB irradiance, A confidence).
+// Signed SH radiance coefficients; alpha holds the effective sample window.
 RWTexture2D<float4> probeAtlasOutput : register(u10);
-// Probe depth moments: x = mean hit distance, y = mean squared hit distance,
-// z = hit ratio, w = reserved.
+// Six cosine^4 bins, +/- for each world axis. XY are normalized distance
+// moments in grid-cell units. Z is their mean sample weight across frames.
 RWTexture2D<float4> probeDepthOutput : register(u11);
 Texture2D<float4> probeAtlasPrevious : register(t16);
+Texture2D<float4> probeDepthPrevious : register(t17);
 
 // Realtime reconstruction and ReSTIR history. Declared before PathTracing.hlsli
 // because the direct-light reservoir updates its history from that header.
@@ -172,105 +174,192 @@ void ResolveRealtimeGi(uint2 pixel)
 }
 
 //------------------------------------------------------------------------------
-// Ray-traced DDGI probe update. Each thread owns one probe and writes four
-// RGBA16F texels containing its first-order SH projection of incident
-// radiance. The raster receiver evaluates the clamped-cosine convolution for
-// the actual surface normal.
+// One thread traces each probe and projects the same incident rays into
+// signed SH and directional depth moments. The raster receiver evaluates
+// the clamped-cosine convolution for its surface normal.
 //------------------------------------------------------------------------------
+float3 ProbeDirectDiffuse(float3 position, float3 normal, float3 geometricNormal,
+    float3 view, Surface material)
+{
+    // Match the screen-space probe's direct-diffuse source. A rare GGX
+    // highlight on the donor would otherwise spread over an entire SH cell.
+    float3 diffuse = material.albedo * (1.0 - material.metallic) / PI;
+    if (!any(diffuse > 0.0)) return 0.0;
+    float3 origin = position + geometricNormal * RAY_EPSILON;
+    float3 f0 = lerp(0.04.xxx, material.albedo, material.metallic);
+    float3 radiance = 0.0;
+    [loop] for (uint index = 0; index < min((uint)lightInfo.x, 32u); ++index)
+    {
+        SceneLight source = sceneLights[index];
+        [loop] for (uint sampleIndex = 0; sampleIndex < SceneLightSampleCount(source); ++sampleIndex)
+        {
+            SceneLightSample lightSample;
+            if (!SampleSceneLight(source, sampleIndex, origin, lightSample)) continue;
+            float cosine = dot(normal, lightSample.direction);
+            float3 halfVector = lightSample.direction + view;
+            if (cosine <= 0.0 || dot(geometricNormal, lightSample.direction) <= 0.0 ||
+                dot(halfVector, halfVector) <= 1e-12) continue;
+            // Use the geometric normal for the ray offset and the actual light
+            // sample distance. Preserve both geometry and analytic emitter blockers.
+            if (SceneLightVisibility(index, source, lightSample, position, geometricNormal, 0.0, false) <= 0.0)
+                continue;
+            if (outputInfo.w != 0u && source.spotShadow.z > 0.5)
+            {
+                float distance;
+                int emitter;
+                if (PathAreaHit(origin, lightSample.direction, distance, emitter) &&
+                    distance < lightSample.distance - RAY_EPSILON) continue;
+            }
+            float3 fresnel = Fresnel(saturate(dot(view, normalize(halfVector))), f0);
+            radiance += (1.0 - fresnel) * diffuse * cosine * lightSample.irradiance;
+        }
+    }
+    return radiance;
+}
+
 void ResolveProbeAtlas(uint2 pixel)
 {
     int3 dimensions = int3(probeGrid.xyz);
+    if (pixel.x >= uint(dimensions.x * dimensions.z) || pixel.y >= uint(dimensions.y)) return;
+    int3 coordinate = int3(int(pixel.x) % dimensions.x, int(pixel.y), int(pixel.x) / dimensions.x);
     int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
-    int atlasBase = int(pixel.x) * coefficientCount;
-    if (dimensions.x <= 0 || dimensions.y <= 0 || dimensions.z <= 0)
-    {
-        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
-            probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
-        return;
-    }
-    int ix = int(pixel.x) % dimensions.x;
-    int iz = int(pixel.x) / dimensions.x;
-    int iy = int(pixel.y);
-    if (iz >= dimensions.z || iy >= dimensions.y || ix >= dimensions.x)
-    {
-        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
-            probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = 0.0;
-        return;
-    }
-    float3 world = probeOrigin.xyz + (float3(ix, iy, iz) + 0.5) * probeOrigin.w;
-    float3 sh0 = 0.0, sh1 = 0.0, sh2 = 0.0, sh3 = 0.0;
-    float3 sh4 = 0.0, sh5 = 0.0, sh6 = 0.0, sh7 = 0.0, sh8 = 0.0;
-    float distanceSum = 0.0;
-    float distanceSquaredSum = 0.0;
-    uint hitCount = 0;
+    uint atlasBase = pixel.x * uint(coefficientCount);
+    float spacing = max(probeOrigin.w, 0.01);
+    float3 world = probeOrigin.xyz + (float3(coordinate) + 0.5) * probeCellSize.xyz;
+    float3 coefficients[9];
+    [unroll] for (int coefficient = 0; coefficient < 9; ++coefficient)
+        coefficients[coefficient] = 0.0;
+    float3 distanceMoments[kProbeDistanceDirections];
+    [unroll] for (int bin = 0; bin < kProbeDistanceDirections; ++bin)
+        distanceMoments[bin] = 0.0;
     uint directionCount = clamp((uint)probeParameters.x, 1u, 32u);
-    const float shProjection = 4.0 * 3.14159265359 / float(directionCount);
-    const float shY00 = 0.2820947918;
-    const float shY1 = 0.4886025119;
-    const float shY2 = 1.0925484306;
-    const float shY20 = 0.3153915653;
-    const float shY22 = 0.5462742153;
+    uint frame = (uint)probeLayout.w;
     [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
     {
-        float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
-        float radial = sqrt(max(1.0 - z * z, 0.0));
-        float phi = float(directionIndex) * 2.39996323;
-        float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
+        float3 direction = ProbeRayDirection(directionIndex, directionCount, coordinate, frame);
         float distance;
         float3 hitNormal;
         int object;
-        float3 radiance = Environment(direction, 0.0);
-        if (TraceScene(world, direction, distance, hitNormal, object, false))
+        float3 radiance = 0.0;
+        bool hit = TraceScene(world, direction, distance, hitNormal, object, false);
+        float emitterDistance;
+        int emitterIndex;
+        if (PathAreaHit(world, direction, emitterDistance, emitterIndex) && emitterDistance < distance)
+        {
+            // A directly visible light is already part of the primary
+            // surface's direct-light estimator. It can still occlude a probe.
+            distance = emitterDistance;
+        }
+        else if (hit)
         {
             float3 position = world + direction * distance;
-            Surface material = TriangleMaterialAt(position, hitNormal, (uint)(-object - 2));
-            float3 view = -direction;
-            uint randomState = (pixel.x * 1973u + pixel.y * 9277u + directionIndex * 26699u + 1u);
-            radiance = PathDirectLight(position, hitNormal, hitNormal, view, material);
-            radiance += PathAreaDirect(position, hitNormal, hitNormal, view, material, randomState);
-            distanceSum += distance;
-            distanceSquaredSum += distance * distance;
-            ++hitCount;
+            uint triangleIndex = (uint)(-object - 2);
+            float3 geometricNormal = rayTriangles[triangleIndex].normal;
+            if (dot(geometricNormal, direction) > 0.0) geometricNormal = -geometricNormal;
+            if (dot(hitNormal, geometricNormal) < 0.0) hitNormal = -hitNormal;
+            if (dot(hitNormal, -direction) < 1e-5) hitNormal = geometricNormal;
+            Surface material = TriangleMaterialAt(position, hitNormal, triangleIndex);
+            radiance = ProbeDirectDiffuse(position, hitNormal, geometricNormal, -direction, material);
         }
-        sh0 += radiance * (shProjection * shY00);
-        sh1 += radiance * (shProjection * shY1 * direction.y);
-        sh2 += radiance * (shProjection * shY1 * direction.z);
-        sh3 += radiance * (shProjection * shY1 * direction.x);
-        sh4 += radiance * (shProjection * shY2 * direction.x * direction.y);
-        sh5 += radiance * (shProjection * shY2 * direction.y * direction.z);
-        sh6 += radiance * (shProjection * shY20 * (3.0 * direction.z * direction.z - 1.0));
-        sh7 += radiance * (shProjection * shY2 * direction.x * direction.z);
-        sh8 += radiance * (shProjection * shY22 *
-            (direction.x * direction.x - direction.y * direction.y));
+        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
+            coefficients[coefficient] += radiance * ProbeSHBasis(coefficient, direction);
+        // Misses count as clear to the integration limit. Keeping moments in
+        // cell units avoids oversaturating the half-float squared distances.
+        float cellDistance = min(distance / spacing, kProbeDistanceLimit);
+        float3 sample = float3(cellDistance, cellDistance * cellDistance, 1.0);
+        [unroll] for (int bin = 0; bin < kProbeDistanceDirections; ++bin)
+        {
+            float cosine = direction[bin / 2] * (bin % 2 == 0 ? 1.0 : -1.0);
+            distanceMoments[bin] += sample * ProbeDistanceWeight(cosine);
+        }
     }
-    float3 coefficients[9] = {sh0, sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8};
+    bool historyValid = probeParameters.y > 0.5;
+    float4 previousDC = 0.0;
+    if (historyValid)
+        previousDC = probeAtlasPrevious.Load(int3(atlasBase, pixel.y, 0));
+    float window = ProbeUpdateWindow(probeGrid.w, previousDC.a, probeLayout.w);
+    float blend = rcp(window);
+    float shProjection = 4.0 * PI / float(directionCount);
     [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
     {
-        float4 current = float4(clamp(coefficients[coefficient], 0.0, 65504.0),
-            coefficient == 0 ? 1.0 : 0.0);
-        if (probeParameters.y > 0.5)
+        int2 slot = int2(atlasBase + coefficient, pixel.y);
+        float3 current = clamp(coefficients[coefficient] * shProjection, -65504.0, 65504.0);
+        if (historyValid)
         {
-            float4 previous = probeAtlasPrevious.Load(
-                int3(atlasBase + coefficient, pixel.y, 0));
-            current = lerp(previous, current, saturate(1.0 - probeGrid.w));
+            float3 previous = coefficient == 0 ? previousDC.rgb : probeAtlasPrevious.Load(int3(slot, 0)).rgb;
+            current = lerp(previous, current, blend);
         }
-        probeAtlasOutput[uint2(atlasBase + coefficient, pixel.y)] = current;
+        probeAtlasOutput[slot] = float4(current, window);
     }
-    if (hitCount > 0)
+    [unroll] for (int bin = 0; bin < kProbeDistanceDirections; ++bin)
     {
-        float inverseHits = 1.0 / float(hitCount);
-        float meanDistance = distanceSum * inverseHits;
-        float meanSquared = distanceSquaredSum * inverseHits;
-        probeDepthOutput[pixel] = float4(meanDistance, meanSquared,
-            float(hitCount) / float(directionCount), 1.0);
-    }
-    else
-    {
-        probeDepthOutput[pixel] = 0.0;
+        int2 slot = int2(pixel.x * kProbeDistanceDirections + bin, pixel.y);
+        // Pool weighted sums before normalizing. Averaging per-frame ratios
+        // overweights sparse directional bins and biases visibility near planes.
+        float3 estimate = distanceMoments[bin] / float(directionCount);
+        if (historyValid)
+        {
+            float3 previous = probeDepthPrevious.Load(int3(slot, 0)).xyz;
+            estimate = lerp(float3(previous.xy * previous.z, previous.z), estimate, blend);
+        }
+        float2 moments = estimate.z > 1e-6 ? estimate.xy / estimate.z :
+            float2(kProbeDistanceLimit, kProbeDistanceLimit * kProbeDistanceLimit);
+        probeDepthOutput[slot] = float4(moments, estimate.z, 0.0);
     }
 }
 
-// Reflection-only dispatch used by the raster SSGI specular composite. It
+// A wide, weak reflection averages fine penumbra structure. Evaluate each
+// rectangle at its centre for this lobe only. Approximate solid angle with
+// an equal projected-area disk; it tends to A*cos(theta)/d^2 in the far
+// field and remains bounded by a hemisphere near the emitting surface.
+float3 BroadReflectionDirect(float3 position, float3 normal, float3 view, Surface material)
+{
+    float3 radiance = PathDirectLight(position, normal, normal, view, material);
+    float3 origin = position + normal * RAY_EPSILON;
+    [loop] for (uint index = 0; index < min((uint)lightInfo.x, 32u); ++index)
+    {
+        if (sceneLights[index].positionType.w != 2.0) continue;
+        PathAreaEmitter emitter = PathAreaAt((int)index);
+        float3 delta = emitter.center - origin;
+        float distance = length(delta);
+        float3 incoming = delta / max(distance, 1e-8);
+        float cosine = dot(normal, incoming);
+        float pdf = PathAreaPdf(emitter, incoming, distance);
+        if (cosine <= 0.0 || pdf <= 0.0 || !PathAreaVisible(emitter, origin, incoming, distance)) continue;
+        float ratio = rcp(PI * pdf);
+        float radial = sqrt(1.0 + ratio);
+        float solidAngle = (2.0 * PI * ratio) / (radial * (1.0 + radial));
+        float unusedPdf;
+        float3 brdf = PathBrdf(normal, view, incoming, material, true, true, 1.0, unusedPdf);
+        radiance += brdf * cosine * solidAngle * emitter.radiance * PathAreaRange(emitter, distance);
+    }
+    return radiance;
+}
+
+float4 TraceReflectionSample(float3 origin, float3 direction, float coneAlphaSquared, bool wide)
+{
+    float distance;
+    float3 normal;
+    int object;
+    if (!TraceScene(origin, direction, distance, normal, object, false)) return 0.0;
+
+    float3 position = origin + direction * distance;
+    Surface material = TriangleMaterialAt(position, normal, (uint)(-object - 2));
+    // The incident directions covered by one ray broaden the apparent GGX
+    // highlight at its hit. Add the two squared lobe widths before shading;
+    // four discrete light samples hitting a sharp unfiltered metal otherwise
+    // paint four pinpoints even in a very rough wall's reflection.
+    float hitAlpha = material.roughness * material.roughness;
+    material.roughness = sqrt(sqrt(saturate(hitAlpha * hitAlpha + coneAlphaSquared)));
+    if (wide) return float4(BroadReflectionDirect(position, normal, -direction, material), 1.0);
+    // The single-frame raster composite has no specular accumulation. Use the
+    // same deterministic rectangle quadrature as the visible raster surfaces.
+    float3 diffuse, specular;
+    ShadeSurfaceContributions(position, normal, -direction, material, 0.0, false, diffuse, specular);
+    return float4(diffuse + specular, 1.0);
+}
+
+// Reflection dispatch shared by the raster SSGI and DDGI composites. It
 // writes incident radiance reflected from the primary surface into the shared
 // indirect texture; the raster composite applies its own Fresnel/roughness
 // weighting, so this stays a pure radiance transport result.
@@ -298,32 +387,53 @@ void ResolveReflection(uint2 pixel)
     Surface material = TriangleMaterialAt(position, normal, (uint)(-object - 2));
     float3 view = normalize(-direction);
     float3 reflection = reflect(-view, normal);
-    uint randomState = PathHash(pixel.x + pixel.y * outputInfo.x + 0x51ed270bu);
-    if (material.roughness > 0.01)
+    float3 rayOrigin = position + geometricNormal * RAY_EPSILON;
+    // Limit the lobe near grazing angles so no sample traces through the
+    // receiver. Fall back to its geometric reflection at a shading silhouette.
+    if (dot(reflection, geometricNormal) <= 0.0) reflection = reflect(-view, geometricNormal);
+    float alpha = material.roughness * material.roughness;
+    float3 f0 = lerp(0.04.xxx, material.albedo, material.metallic);
+    float3 fresnel = Fresnel(saturate(dot(view, normal)), f0);
+    bool wide = UsesWideDxrReflection(material.roughness, material.metallic, fresnel);
+    float spread = min(lerp(0.3, 0.8, smoothstep(0.3, 0.8, material.roughness)) * alpha,
+        0.95 * saturate(dot(reflection, geometricNormal)));
+    float coneAlphaSquared = alpha * alpha;
+    float4 incident = 0.0;
+    if (spread <= 0.003)
+        incident = TraceReflectionSample(rayOrigin, reflection, coneAlphaSquared, wide);
+    else
     {
-        float3 tangent = PathToWorld(float3(1.0, 0.0, 0.0), normal);
-        float3 bitangent = cross(normal, tangent);
-        float angle = PathRandom(randomState) * 2.0 * PI;
-        reflection = normalize(reflection + (tangent * cos(angle) + bitangent * sin(angle)) *
-            material.roughness * 0.3);
-        if (dot(reflection, normal) < 0.01) reflection = normalize(normal + reflection * 0.05);
+        float3 tangent = PathToWorld(float3(1.0, 0.0, 0.0), reflection);
+        float3 bitangent = cross(reflection, tangent);
+        if (wide)
+        {
+            // Every 3x3 reconstruction neighborhood covers all nine strata.
+            // The slow, continuous phase avoids stamping one set of reflected
+            // silhouettes across an entire plane. Opposed rays cancel the tilt
+            // of each pixel's estimate even where few neighbors survive.
+            uint stratum = (pixel.x % 3u) + 3u * (pixel.y % 3u);
+            float angle = PI * frac(float(stratum) * 0.61803399 +
+                (float(pixel.x) + 0.5 * float(pixel.y)) / 768.0);
+            float radius = sqrt((float(stratum) + 0.5) / 9.0);
+            float3 offset = (cos(angle) * tangent + sin(angle) * bitangent) * (spread * radius);
+            float residual = max(0.0, coneAlphaSquared - 0.5 * spread * spread);
+            incident = 0.5 * (TraceReflectionSample(rayOrigin, normalize(reflection + offset), residual, true)
+                + TraceReflectionSample(rayOrigin, normalize(reflection - offset), residual, true));
+        }
+        else
+        {
+            [loop] for (uint tap = 0; tap < 4u; ++tap)
+            {
+                float3 offset = (tap & 1u) ? bitangent : tangent;
+                if (tap & 2u) offset = -offset;
+                float3 ray = normalize(reflection + spread * offset);
+                incident += 0.25 * TraceReflectionSample(rayOrigin, ray, max(0.0, coneAlphaSquared - spread * spread), false);
+            }
+        }
     }
-    float3 radiance = Environment(reflection, material.roughness);
-    float reflectedDistance;
-    float3 reflectedNormal;
-    int reflectedObject;
-    if (TraceScene(position + geometricNormal * RAY_EPSILON, reflection,
-        reflectedDistance, reflectedNormal, reflectedObject, false))
-    {
-        float3 reflectedPosition = position + reflection * reflectedDistance;
-        Surface reflectedMaterial = TriangleMaterialAt(reflectedPosition,
-            normalize(reflectedNormal), (uint)(-reflectedObject - 2));
-        radiance = PathDirectLight(reflectedPosition, normalize(reflectedNormal),
-            normalize(reflectedNormal), -reflection, reflectedMaterial);
-        radiance += PathAreaDirect(reflectedPosition, normalize(reflectedNormal),
-            normalize(reflectedNormal), -reflection, reflectedMaterial, randomState);
-    }
-    indirectLightingOutput[pixel] = float4(clamp(radiance, 0.0, 65504.0), 1.0);
+    // Alpha carries fractional geometry coverage so the composite adds the
+    // environment only for the rays that missed the scene.
+    indirectLightingOutput[pixel] = clamp(incident, 0.0, 65504.0);
 }
 
 [numthreads(8, 8, 1)]

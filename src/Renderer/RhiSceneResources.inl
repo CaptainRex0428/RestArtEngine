@@ -11,10 +11,8 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         }
         candidate.colorImage = rhiDevice->createTexture({targetWidth, targetHeight, 1,
             rhi::Format::RGBA8Unorm, true, "Scene color"});
-        candidate.ssgiDirectHistory = rhiDevice->createTexture({targetWidth, targetHeight, 1,
-            rhi::Format::RGBA8Unorm, true, "SSGI direct history"});
         candidate.ssgiDirectCurrent = rhiDevice->createTexture({targetWidth, targetHeight, 1,
-            rhi::Format::RGBA8Unorm, true, "SSGI current direct color"});
+            rhi::Format::RGBA16Float, true, "GI linear raster base"});
         candidate.ssgiRaw = rhiDevice->createTexture({(targetWidth + 1) / 2, (targetHeight + 1) / 2, 1,
             rhi::Format::RGBA16Float, true, "SSGI raw indirect (half resolution)"});
         candidate.ssgiSpecular = rhiDevice->createTexture({(targetWidth + 1) / 2, (targetHeight + 1) / 2, 1,
@@ -52,7 +50,6 @@ bool createSceneTargets(std::uint32_t targetWidth, std::uint32_t targetHeight, s
         retireSceneTargets();
         sceneColorImage = std::move(candidate.colorImage);
         sceneDepthImage = std::move(candidate.depthImage);
-        ssgiDirectHistoryImage = std::move(candidate.ssgiDirectHistory);
         ssgiDirectCurrentImage = std::move(candidate.ssgiDirectCurrent);
         ssgiRawImage = std::move(candidate.ssgiRaw);
         ssgiSpecularRawImage = std::move(candidate.ssgiSpecular);

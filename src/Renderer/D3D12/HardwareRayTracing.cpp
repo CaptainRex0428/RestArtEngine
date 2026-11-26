@@ -236,6 +236,23 @@ struct HistoryKey {
     bool operator==(const HistoryKey&) const = default;
 };
 
+// The volume is world-space. Camera motion and exposure do not invalidate it,
+// but the volume mapping, geometry and lighting still must match.
+struct ProbeHistoryKey {
+    std::array<float, 3> dimensions{};
+    std::array<float, 4> origin{}, cellSize{};
+    LightingConstants lighting;
+    std::array<float, 16> areaLight{};
+    std::array<std::uint64_t, 5> geometry{};
+    std::uint64_t epoch = 0, view = 0;
+    std::uint32_t rays = 0, order = 0;
+    bool shadows = false;
+    bool operator==(const ProbeHistoryKey&) const = default;
+};
+constexpr UINT kProbeAtlasColumns = kGiMaxProbeGridAxis * kGiMaxProbeGridAxis * 9;
+constexpr UINT kProbeDepthDirections = 6; // matches ProbeLighting.hlsli
+constexpr UINT kDxrDescriptorCount = 18;
+
 std::uint64_t hashBytes(const void* data, std::size_t bytes) {
     auto hash = UINT64_C(1469598103934665603);
     const auto* input = static_cast<const unsigned char*>(data);
@@ -527,10 +544,10 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
             }
             auto* constants = reflection->GetConstantBufferByName(binding.Name);
             D3D12_SHADER_BUFFER_DESC probeDescription{};
-            if (FAILED(constants->GetDesc(&probeDescription)) || probeDescription.Size != 64) {
-                error = "DXR ProbeConstants must match the 64-byte CPU layout."; return false;
+            if (FAILED(constants->GetDesc(&probeDescription)) || probeDescription.Size != 80) {
+                error = "DXR ProbeConstants must match the 80-byte CPU layout."; return false;
             }
-            const char* fields[] = {"probeGrid", "probeOrigin", "probeParameters", "probeLayout"};
+            const char* fields[] = {"probeGrid", "probeOrigin", "probeParameters", "probeLayout", "probeCellSize"};
             for (UINT field = 0; field < std::size(fields); ++field) {
                 D3D12_SHADER_VARIABLE_DESC variable{};
                 D3D12_SHADER_TYPE_DESC type{};
@@ -604,17 +621,18 @@ bool validateShader(IDxcUtils* utils, IDxcResult* result, std::string& error) {
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
             historySrvs |= 1u << (binding.BindPoint - 12);
         }
-        else if (binding.Type == D3D_SIT_TEXTURE && binding.BindPoint == 16 &&
-                 std::strcmp(binding.Name, "probeAtlasPrevious") == 0 &&
+        else if (binding.Type == D3D_SIT_TEXTURE &&
+                 ((binding.BindPoint == 16 && std::strcmp(binding.Name, "probeAtlasPrevious") == 0) ||
+                  (binding.BindPoint == 17 && std::strcmp(binding.Name, "probeDepthPrevious") == 0)) &&
                  binding.Dimension == D3D_SRV_DIMENSION_TEXTURE2D && binding.ReturnType == D3D_RETURN_TYPE_FLOAT) {
-            // DDGI temporal history atlas.
+            historySrvs |= 1u << (binding.BindPoint - 12);
         }
         else { error = std::string("Unexpected DXR shader resource: ") + binding.Name; return false; }
     }
     UINT x = 0, y = 0, z = 0; reflection->GetThreadGroupSize(&x, &y, &z);
     if (!(scene && hardware && lighting && acceleration && triangles && normals && denoise && probe) ||
-        uavMask != 0xfffu || historySrvs != 0xfu || x != 8 || y != 8 || z != 1) {
-        error = "DXR shader must preserve b0/b5/b7/b8/b9, t4/t7/t8/t12..t15, u0..u11 and the 8x8x1 thread-group contract. (uavMask=" +
+        uavMask != 0xfffu || historySrvs != 0x3fu || x != 8 || y != 8 || z != 1) {
+        error = "DXR shader must preserve b0/b5/b7/b8/b9, t4/t7/t8/t12..t17, u0..u11 and the 8x8x1 thread-group contract. (uavMask=" +
             std::to_string(uavMask) + ", historySrvs=" + std::to_string(historySrvs) +
             ", flags=" + std::to_string(scene) + std::to_string(hardware) + std::to_string(lighting) +
             std::to_string(acceleration) + std::to_string(triangles) + std::to_string(normals) +
@@ -643,19 +661,23 @@ struct HardwareRayTracing::Impl {
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12InfoQueue> infoQueue;
     UINT64 nextFence = 0, submitted = 0;
+    // One batch in flight. Realtime trace + resolve is the largest batch.
+    static constexpr UINT maxTimingQueries = 4;
+    ComPtr<ID3D12QueryHeap> timingQueries;
+    ComPtr<ID3D12Resource> timingReadback;
+    UINT64 timingFrequency = 0;
+    UINT pendingTimingQueries = 0;
+    HardwareTransportTiming pendingTiming{}, lastTiming{};
     ComPtr<ID3D12RootSignature> rootSignature;
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12Resource> outputTexture, accumulationTexture, normalGuide, indirectTexture, albedoGuide;
-    // Ray-traced DDGI SH-L1 atlas (RGBA16F, 9216x32, four texels per probe) and depth moments.
-    ComPtr<ID3D12Resource> probeAtlasTexture, probeDepthTexture, probeAtlasHistory;
+    ComPtr<ID3D12Resource> probeAtlasTexture, probeDepthTexture, probeAtlasHistory, probeDepthHistory;
     ComPtr<ID3D11Texture2D> sharedProbeAtlas, sharedProbeDepth;
-    ComPtr<ID3D11ShaderResourceView> probeAtlasView;
     D3D12_RESOURCE_STATES nativeProbeAtlasState = D3D12_RESOURCE_STATE_COMMON;
-    D3D12_RESOURCE_STATES probeHistoryState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     bool probeAtlasReady = false, probeHistoryValid = false;
-    std::uint64_t probeHistoryEpoch = 0;
-    std::uint32_t probeHistoryView = 0;
+    std::uint32_t probeFrame = 0;
+    ProbeHistoryKey probeKey{};
     // Per-object motion: world position of the primary surface in the previous
     // frame. RGBA32F with w=0 for background.
     ComPtr<ID3D12Resource> primaryPreviousPosition;
@@ -695,6 +717,35 @@ struct HardwareRayTracing::Impl {
     std::uint64_t pipelineRevision = 0;
     GlobalIlluminationStatus giStatus;
     std::string message = "Hardware ray tracing has not been initialized.";
+
+    bool createDescriptorHeap(std::string& error) {
+        D3D12_DESCRIPTOR_HEAP_DESC desc{};
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        desc.NumDescriptors = kDxrDescriptorCount * 2;
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (failed(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&descriptors)),
+                   "Create DXR descriptors", error)) return false;
+        // The second half remains null. Bind those descriptors for whichever
+        // branch the shared compute entry does not use, including when the
+        // inactive resources still exist in a raster-owned state.
+        const auto stride = device->GetDescriptorHandleIncrementSize(desc.Type);
+        auto slot = descriptors->GetCPUDescriptorHandleForHeapStart();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = uav.Format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        for (UINT index = 0; index < desc.NumDescriptors; ++index, slot.ptr += stride) {
+            const UINT shaderSlot = index % kDxrDescriptorCount;
+            if (shaderSlot < 10 || shaderSlot == 14 || shaderSlot == 15)
+                device->CreateUnorderedAccessView(nullptr, nullptr, &uav, slot);
+            else device->CreateShaderResourceView(nullptr, &srv, slot);
+        }
+        return true;
+    }
 
     ~Impl() {
         if (native) {
@@ -747,6 +798,45 @@ struct HardwareRayTracing::Impl {
         const auto properties = heap(type); const auto description = bufferDescription(bytes, flags);
         return !failed(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &description,
             state, nullptr, IID_PPV_ARGS(&resource)), "Create DXR buffer", error);
+    }
+    bool prepareGpuTiming() {
+        if (timingQueries) return true;
+        UINT64 frequency = 0;
+        if (FAILED(queue->GetTimestampFrequency(&frequency)) || !frequency) return false;
+        D3D12_QUERY_HEAP_DESC description{};
+        description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        description.Count = maxTimingQueries;
+        ComPtr<ID3D12QueryHeap> queries;
+        if (FAILED(device->CreateQueryHeap(&description, IID_PPV_ARGS(&queries)))) return false;
+        ComPtr<ID3D12Resource> readback;
+        std::string ignored;
+        if (!createBuffer(maxTimingQueries * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK,
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, readback, ignored)) return false;
+        timingQueries = std::move(queries);
+        timingReadback = std::move(readback);
+        timingFrequency = frequency;
+        return true;
+    }
+    // The existing allocator/upload reuse wait has completed this submission.
+    void readCompletedGpuTiming() {
+        if (!pendingTimingQueries) return;
+        const UINT count = pendingTimingQueries;
+        pendingTimingQueries = 0;
+        std::array<UINT64, maxTimingQueries> ticks{};
+        const D3D12_RANGE range{0, count * sizeof(UINT64)};
+        void* mapped = nullptr;
+        if (FAILED(timingReadback->Map(0, &range, &mapped))) return;
+        std::memcpy(ticks.data(), mapped, range.End);
+        const D3D12_RANGE noWrites{0, 0};
+        timingReadback->Unmap(0, &noWrites);
+        double milliseconds = 0.0;
+        for (UINT index = 0; index < count; index += 2) {
+            if (ticks[index + 1] < ticks[index]) return;
+            milliseconds += static_cast<double>(ticks[index + 1] - ticks[index]) * 1000.0 /
+                static_cast<double>(timingFrequency);
+        }
+        lastTiming = pendingTiming;
+        lastTiming.gpuMs = milliseconds;
     }
     bool upload(const void* bytes, std::size_t size, ComPtr<ID3D12Resource>& resource, std::string& error) {
         if (!resource || resource->GetDesc().Width < size) {
@@ -1115,10 +1205,7 @@ bool HardwareRayTracing::initialize(ID3D11Device* device11, ID3D11DeviceContext*
         failed(candidate->device11->OpenSharedFence(sharedFence.value, IID_PPV_ARGS(&candidate->fence11)), "Open DXR fence in DX11", error)) return fail();
     candidate->event.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!candidate->event.value) { error = "Cannot create DXR completion event."; return fail(); }
-    D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
-    descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 18; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)), "Create DXR descriptors", error)) return fail();
+    if (!candidate->createDescriptorHeap(error)) return fail();
     candidate->device.As(&candidate->infoQueue);
     candidate->capable = true;
     candidate->message = "D3D12 DXR 1.1 supported; hardware pipeline has not been compiled.";
@@ -1189,11 +1276,7 @@ bool HardwareRayTracing::initializeNative(ID3D12Device* device, ID3D12CommandQue
             IID_PPV_ARGS(&candidate->fence)), "Create native DXR fence", error)) return fail();
     candidate->event.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!candidate->event.value) { error = "Cannot create native DXR completion event."; return fail(); }
-    D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
-    descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptors.NumDescriptors = 18; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (failed(candidate->device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&candidate->descriptors)),
-            "Create native DXR descriptors", error)) return fail();
+    if (!candidate->createDescriptorHeap(error)) return fail();
     candidate->device.As(&candidate->infoQueue);
     candidate->native = true;
     candidate->capable = true;
@@ -1262,7 +1345,7 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
     parameters[13].DescriptorTable.NumDescriptorRanges = 1;
     parameters[13].DescriptorTable.pDescriptorRanges = &probeDepthRange;
     D3D12_DESCRIPTOR_RANGE probeHistoryRange{}; probeHistoryRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    probeHistoryRange.NumDescriptors = 1; probeHistoryRange.BaseShaderRegister = 16;
+    probeHistoryRange.NumDescriptors = 2; probeHistoryRange.BaseShaderRegister = 16;
     parameters[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[14].DescriptorTable.NumDescriptorRanges = 1;
     parameters[14].DescriptorTable.pDescriptorRanges = &probeHistoryRange;
@@ -1293,6 +1376,7 @@ bool HardwareRayTracing::preparePipeline(const std::filesystem::path& shaderRoot
         !state.wait(state.submitted, error)) return false;
     state.pipeline = std::move(candidate); state.rootSignature = std::move(rootCandidate);
     ++state.pipelineRevision;
+    state.probeHistoryValid = false;
     state.historyValid = false; state.accumulatedSamples = 0; state.sampleSequence = 0;
     state.denoiseHistoryValid = false; state.restirHistoryValid = false;
     state.restirDirectHistoryValid = false; state.previousViewProjection.fill(0.0f);
@@ -1316,6 +1400,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     state.giStatus.effectiveMode = frame.globalIllumination.mode;
     state.giStatus.targetSamples = targetSamples;
     state.indirectReady = false;
+    state.lastTiming = {};
     const auto fail = [&] {
         // A submitted batch may have partially written history even if its
         // synchronization fails. The next safe render must start from scratch.
@@ -1323,6 +1408,7 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.denoiseHistoryValid = false;
         state.restirHistoryValid = false;
         state.restirDirectHistoryValid = false;
+        state.probeHistoryValid = false;
         // Uploads/acceleration structures may already have changed before a
         // later failure. Rebuild their identities on a safe retry as well.
         state.positionHash = state.triangleHash = state.normalHash = state.uvVertexHash = state.uvTriangleHash = 0;
@@ -1337,7 +1423,8 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     if (!state.capable || !state.pipeline) { error = state.message; return fail(); }
     if (frame.globalIllumination.method != GlobalIlluminationMethod::Disabled &&
         frame.globalIllumination.method != GlobalIlluminationMethod::PathTracing &&
-        frame.globalIllumination.method != GlobalIlluminationMethod::ProbeGrid) {
+        frame.globalIllumination.method != GlobalIlluminationMethod::ProbeGrid &&
+        !(frame.reflectionOnly && frame.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace)) {
         error = "The requested global illumination method is unavailable in this backend."; return fail();
     }
     if (frame.globalIllumination.mode != GlobalIlluminationMode::Progressive &&
@@ -1347,21 +1434,32 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     if (!frame.width || !frame.height || frame.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || frame.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         error = "Invalid hardware ray tracing output dimensions."; return fail();
     }
+    if (frame.probeUpdate && !std::all_of(frame.probeGrid.begin(), frame.probeGrid.begin() + 3,
+            [](float dimension) {
+                return std::isfinite(dimension) && dimension >= 1.0f &&
+                    dimension <= kGiMaxProbeGridAxis && std::floor(dimension) == dimension;
+            })) {
+        error = "Invalid DDGI probe grid dimensions."; return fail();
+    }
+    const bool imageDispatch = !frame.probeUpdate || frame.reflectionOnly;
     bool recording = false;
     try {
         if (!state.wait(state.submitted, error)) return fail();
+        state.readCompletedGpuTiming();
         UINT64 dx11Done = 0;
         if (state.native) {
             // Same device/queue as raster: the previous DXR submission already
             // completed; the raster list will be submitted after this one.
-            if (!state.prepareOutput(frame.width, frame.height, 0, error)) return fail();
+            if (imageDispatch && !state.prepareOutput(frame.width, frame.height, 0, error)) return fail();
         } else {
             // Release the prior DX11 copy/read before the DX12 queue writes again.
             dx11Done = ++state.nextFence;
             if (failed(state.context11->Signal(state.fence11.Get(), dx11Done), "Signal DX11-to-DXR fence", error)) return fail();
             state.context11->Flush();
-            if (failed(state.queue->Wait(state.fence.Get(), dx11Done), "Wait for DX11 DXR image consumer", error) ||
-                !state.prepareOutput(frame.width, frame.height, dx11Done, error)) return fail();
+            if (failed(state.queue->Wait(state.fence.Get(), dx11Done), "Wait for DX11 DXR image consumer", error))
+                return fail();
+            if (imageDispatch && !state.prepareOutput(frame.width, frame.height, dx11Done, error))
+                return fail();
         }
         std::vector<RayTriangle> triangles;
         std::vector<XMFLOAT3> positions, normals;
@@ -1384,14 +1482,16 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             uvTriangleHash = hashBytes(uvData.triangles.data(), uvData.triangles.size() * sizeof(meshAttributes::UvTriangle));
             triangleCount = static_cast<std::uint32_t>(triangles.size());
         }
-        const bool pathRequested = frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
+        const bool pathRequested = !frame.probeUpdate && !frame.reflectionOnly &&
+            frame.globalIllumination.method == GlobalIlluminationMethod::PathTracing;
         const bool pathLit = pathRequested && frame.sceneConstants[34] == 0.0f;
         const bool realtime = frame.globalIllumination.mode == GlobalIlluminationMode::Realtime;
-        const bool realtimeLit = pathLit && realtime && !frame.reflectionOnly;
+        const bool realtimeLit = pathLit && realtime;
         // Realtime exports indirect transport only and normally keeps physical
         // visibility for secondary illumination. The global Disabled selection
         // is an explicit override for all light shadowing, including transport.
         const bool transportShadows = frame.sceneConstants[35] < 1.5f && (pathRequested && realtime ? true : frame.shadows);
+        const bool imageShadows = frame.reflectionOnly ? frame.sceneConstants[35] < 1.5f : transportShadows;
         const std::uint32_t contributions = (frame.globalIllumination.indirectDiffuse ? 1u : 0u) |
             (frame.globalIllumination.indirectSpecular ? 2u : 0u);
         // Runtime callers may bypass project validation. Keep invalid floats out
@@ -1479,27 +1579,37 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         const DenoiseConstants denoise{state.previousViewProjection,
             {static_cast<float>(denoiseMode), 0.1f, denoiseRestart ? 1.0f : 0.0f,
                 static_cast<float>(std::clamp(frame.globalIllumination.denoiseIterations, 1u, kGiMaxDenoiseIterations))}};
-        // Root CBVs are 256-byte aligned. Separate immutable constants for the
-        // two realtime dispatches prevent the resolve pass from overwriting
-        // the trace pass's pass/sequence values before either executes.
+        // Root CBVs are 256-byte aligned. Each recorded dispatch binds its
+        // own immutable constants until the allocator's fence completes.
         constexpr std::size_t denoiseOffset = 768;
         constexpr std::size_t lightingOffset = 1024;
         constexpr std::size_t lightingBytes = (sizeof(LightingConstants) + 255) & ~std::size_t(255);
         constexpr std::size_t probeOffset = (lightingOffset + lightingBytes + 255) & ~std::size_t(255);
-        std::array<unsigned char, probeOffset + 256> constants{};
+        constexpr std::size_t inactiveProbeOffset = probeOffset + 256;
+        // The second b5 slot serves either realtime resolve or probe update.
+        constexpr std::size_t secondDispatchOffset = 512;
+        std::array<unsigned char, inactiveProbeOffset + 256> constants{};
         std::memcpy(constants.data(), frame.sceneConstants.data(), sizeof(frame.sceneConstants));
         std::memcpy(constants.data() + denoiseOffset, &denoise, sizeof(denoise));
         std::memcpy(constants.data() + lightingOffset, &frame.lighting, sizeof(frame.lighting));
-        std::array<float, 16> probeConstants{};
+        std::array<float, 20> probeConstants{};
         std::copy_n(frame.probeGrid.begin(), 4, probeConstants.begin());
         std::copy_n(frame.probeOrigin.begin(), 4, probeConstants.begin() + 4);
+        std::copy_n(frame.probeCellSize.begin(), 4, probeConstants.begin() + 16);
+        const auto probeRays = std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays);
+        const auto probeOrder = std::clamp(frame.globalIllumination.probeShOrder, 1u, 2u);
+        const ProbeHistoryKey nextProbeKey{{frame.probeGrid[0], frame.probeGrid[1], frame.probeGrid[2]},
+            frame.probeOrigin, frame.probeCellSize, frame.lighting,
+            frame.areaLight, {positionHash, triangleHash, normalHash, uvVertexHash, uvTriangleHash},
+            frame.historyEpoch, frame.viewId, probeRays, probeOrder, transportShadows};
         const bool probeHistoryValid = state.probeHistoryValid &&
-            state.probeHistoryEpoch == frame.historyEpoch && state.probeHistoryView == frame.viewId;
-        probeConstants[8] = static_cast<float>(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays));
+            nextProbeKey == state.probeKey;
+        const auto probeFrame = probeHistoryValid ? state.probeFrame : 0u;
+        probeConstants[8] = static_cast<float>(probeRays);
         probeConstants[9] = probeHistoryValid ? 1.0f : 0.0f;
-        probeConstants[10] = 0.0f;
-        probeConstants[11] = frame.probeUpdate ? 1.0f : 0.0f;
-        probeConstants[12] = static_cast<float>(std::clamp(frame.globalIllumination.probeShOrder, 1u, 2u));
+        probeConstants[11] = 1.0f;
+        probeConstants[12] = static_cast<float>(probeOrder);
+        probeConstants[15] = static_cast<float>(probeFrame);
         std::memcpy(constants.data() + probeOffset, probeConstants.data(), sizeof(probeConstants));
         std::uint32_t restirPacked = 0;
         if (frame.globalIllumination.sampling == GlobalIlluminationSampling::Restir) {
@@ -1511,23 +1621,23 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             if (frame.globalIllumination.restirSpatialReuse) restirPacked += 1000000u;
         }
         const HardwareConstants hardware{frame.inverseViewProjection,
-            {frame.width, frame.height, triangleCount, transportShadows ? 1u : 0u},
+            {frame.width, frame.height, triangleCount, imageShadows ? 1u : 0u},
             {frame.reflectionOnly ? 2.0f : (frame.reflections ? 1.0f : 0.0f), static_cast<float>(targetSamples), indirectDiffuseIntensity,
                 static_cast<float>(restirPacked)},
             {sampleOffset, batch, maxBounces, pathRequested ? 1u : 0u},
             {static_cast<std::uint32_t>(frame.globalIllumination.mode), contributions, 0u, sequenceOffset}, frame.areaLight, frame.thinLens};
         std::memcpy(constants.data() + 256, &hardware, sizeof(hardware));
-        auto resolve = hardware;
-        resolve.giOptions[2] = 1;
-        std::memcpy(constants.data() + 512, &resolve, sizeof(resolve));
+        auto secondDispatch = hardware;
+        if (frame.probeUpdate) secondDispatch.outputInfo[3] = transportShadows ? 1u : 0u;
+        else secondDispatch.giOptions[2] = 1;
+        std::memcpy(constants.data() + secondDispatchOffset, &secondDispatch, sizeof(secondDispatch));
         if (!state.upload(constants.data(), constants.size(), state.constants, error)) return fail();
-        constexpr UINT probeAtlasWidth = 9216, probeCountWidth = 1024, probeHeight = 32;
-        if (frame.probeUpdate && (!state.probeAtlasTexture || !state.probeDepthTexture || !state.probeAtlasReady)) {
+        if (frame.probeUpdate && !state.probeAtlasReady) {
             if (!state.wait(dx11Done, error)) return fail();
             D3D12_RESOURCE_DESC probeDescription{};
             probeDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-            probeDescription.Width = probeAtlasWidth;
-            probeDescription.Height = probeHeight;
+            probeDescription.Width = kProbeAtlasColumns;
+            probeDescription.Height = kGiMaxProbeGridAxis;
             probeDescription.DepthOrArraySize = probeDescription.MipLevels = 1;
             probeDescription.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
             probeDescription.SampleDesc.Count = 1;
@@ -1556,16 +1666,21 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             };
             if (!createProbeImage(state.probeAtlasTexture, state.sharedProbeAtlas, "Create DDGI probe irradiance atlas") ||
                 !createProbeImage(state.probeDepthTexture, state.sharedProbeDepth, "Create DDGI probe depth atlas")) return fail();
-            D3D12_RESOURCE_DESC historyDescription = probeDescription;
-            historyDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
-            if (failed(state.device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE,
-                    &historyDescription, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
-                    IID_PPV_ARGS(&state.probeAtlasHistory)),
-                    "Create DDGI probe history atlas", error)) return fail();
+            const auto createHistory = [&](UINT width, ComPtr<ID3D12Resource>& history,
+                                           const char* operation) {
+                D3D12_RESOURCE_DESC description = probeDescription;
+                description.Flags = D3D12_RESOURCE_FLAG_NONE;
+                description.Width = width;
+                return !failed(state.device->CreateCommittedResource(&heapProperties,
+                    D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    nullptr, IID_PPV_ARGS(&history)), operation, error);
+            };
+            if (!createHistory(kProbeAtlasColumns, state.probeAtlasHistory, "Create DDGI SH history") ||
+                !createHistory(kGiMaxProbeGridAxis * kGiMaxProbeGridAxis * kProbeDepthDirections,
+                    state.probeDepthHistory, "Create DDGI directional depth history")) return fail();
             state.nativeProbeAtlasState = D3D12_RESOURCE_STATE_COMMON;
             state.probeAtlasReady = true;
             state.probeHistoryValid = false;
-            state.probeHistoryState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             D3D12_UNORDERED_ACCESS_VIEW_DESC probeView{};
             probeView.Format = probeDescription.Format;
             probeView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -1576,8 +1691,10 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             state.device->CreateUnorderedAccessView(state.probeAtlasTexture.Get(), nullptr, &probeView, descriptor);
             descriptor.ptr += increment;
             state.device->CreateUnorderedAccessView(state.probeDepthTexture.Get(), nullptr, &probeView, descriptor);
-            descriptor.ptr += static_cast<SIZE_T>(2) * increment;
+            descriptor.ptr += increment;
             state.device->CreateShaderResourceView(state.probeAtlasHistory.Get(), nullptr, descriptor);
+            descriptor.ptr += increment;
+            state.device->CreateShaderResourceView(state.probeDepthHistory.Get(), nullptr, descriptor);
         }
         if (failed(state.allocator->Reset(), "Reset DXR allocator", error) ||
             failed(state.list->Reset(state.allocator.Get(), state.pipeline.Get()), "Reset DXR command list", error)) return fail();
@@ -1598,13 +1715,15 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         // Native resources return to the states consumed by the raster pipeline:
         // the hardware image is copied to scene colour, the indirect image is
         // sampled by deferred/forward lighting.
-        makeTransition(transitions[0], state.outputTexture.Get(),
-            state.native ? state.nativeOutputState : D3D12_RESOURCE_STATE_COMMON,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        makeTransition(transitions[1], state.indirectTexture.Get(),
-            state.native ? state.nativeIndirectState : D3D12_RESOURCE_STATE_COMMON,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
+        if (imageDispatch) {
+            makeTransition(transitions[0], state.outputTexture.Get(),
+                state.native ? state.nativeOutputState : D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            makeTransition(transitions[1], state.indirectTexture.Get(),
+                state.native ? state.nativeIndirectState : D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
+        }
         ID3D12DescriptorHeap* heaps[] = {state.descriptors.Get()}; state.list->SetDescriptorHeaps(1, heaps);
         state.list->SetComputeRootSignature(state.rootSignature.Get());
         state.list->SetComputeRootConstantBufferView(0, state.constants->GetGPUVirtualAddress());
@@ -1612,24 +1731,47 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
         state.list->SetComputeRootShaderResourceView(2, state.triangleData->GetGPUVirtualAddress());
         state.list->SetComputeRootShaderResourceView(3, state.tlas->GetGPUVirtualAddress());
         state.list->SetComputeRootShaderResourceView(4, state.normalData->GetGPUVirtualAddress());
-        state.list->SetComputeRootDescriptorTable(5, state.descriptors->GetGPUDescriptorHandleForHeapStart());
         state.list->SetComputeRootConstantBufferView(6, state.constants->GetGPUVirtualAddress() + lightingOffset);
         state.list->SetComputeRootShaderResourceView(7, state.uvVertexData->GetGPUVirtualAddress());
         state.list->SetComputeRootShaderResourceView(8, state.uvTriangleData->GetGPUVirtualAddress());
         state.list->SetComputeRootConstantBufferView(9, state.constants->GetGPUVirtualAddress() + denoiseOffset);
-        const auto historySrvOffset = static_cast<UINT64>(state.device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 10;
-        auto historyTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
-        historyTable.ptr += historySrvOffset;
-        state.list->SetComputeRootDescriptorTable(10, historyTable);
-        state.list->Dispatch((frame.width + 7) / 8, (frame.height + 7) / 8, 1);
-        // Resolve reads the full trace image and its guides, including neighbor
-        // pixels. A UAV barrier must make every trace thread's writes visible.
-        // The same barrier also orders persistent history between frames.
-        uavBarrier(state.list.Get(), nullptr);
+        const auto descriptorStride = state.device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        const auto bindTable = [&](UINT rootIndex, UINT slot) {
+            auto table = state.descriptors->GetGPUDescriptorHandleForHeapStart();
+            table.ptr += static_cast<UINT64>(descriptorStride) * slot;
+            state.list->SetComputeRootDescriptorTable(rootIndex, table);
+        };
+        const auto bindDispatchResources = [&](bool updateProbes) {
+            const UINT imageDescriptors = updateProbes ? kDxrDescriptorCount : 0;
+            const UINT probeDescriptors = updateProbes ? 0 : kDxrDescriptorCount;
+            bindTable(5, imageDescriptors);
+            bindTable(10, imageDescriptors + 10);
+            state.list->SetComputeRootConstantBufferView(11, state.constants->GetGPUVirtualAddress() +
+                (updateProbes ? probeOffset : inactiveProbeOffset));
+            bindTable(12, probeDescriptors + 14);
+            bindTable(13, probeDescriptors + 15);
+            bindTable(14, probeDescriptors + 16);
+        };
+        const bool timeDispatches = frame.timingFrameId != 0 && state.prepareGpuTiming();
+        UINT timingCount = 0;
+        const auto dispatch = [&](UINT groupsX, UINT groupsY) {
+            if (timeDispatches)
+                state.list->EndQuery(state.timingQueries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timingCount++);
+            state.list->Dispatch(groupsX, groupsY, 1);
+            if (timeDispatches)
+                state.list->EndQuery(state.timingQueries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timingCount++);
+        };
+        if (imageDispatch) {
+            bindDispatchResources(false);
+            dispatch((frame.width + 7) / 8, (frame.height + 7) / 8);
+            // Resolve reads the full trace image and its guides. The UAV
+            // barrier also orders persistent history between frames.
+            uavBarrier(state.list.Get(), nullptr);
+        }
         if (realtimeLit) {
-            state.list->SetComputeRootConstantBufferView(1, state.constants->GetGPUVirtualAddress() + 512);
-            state.list->Dispatch((frame.width + 7) / 8, (frame.height + 7) / 8, 1);
+            state.list->SetComputeRootConstantBufferView(1, state.constants->GetGPUVirtualAddress() + secondDispatchOffset);
+            dispatch((frame.width + 7) / 8, (frame.height + 7) / 8);
             uavBarrier(state.list.Get(), nullptr);
         }
         if (temporalDenoise) {
@@ -1690,73 +1832,67 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             copyReservoir(state.restirReservoirRead, state.restirReservoirWrite);
         if (restirDirectCopy)
             copyReservoir(state.restirDirectRead, state.restirDirectWrite);
-        if (frame.probeUpdate && state.probeAtlasTexture) {
+        const auto probeDestination = state.native ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+            : D3D12_RESOURCE_STATE_COMMON;
+        if (frame.probeUpdate) {
+            state.list->SetComputeRootConstantBufferView(1, state.constants->GetGPUVirtualAddress() + secondDispatchOffset);
+            bindDispatchResources(true);
             D3D12_RESOURCE_BARRIER probeBarriers[2]{};
-            for (auto& barrier : probeBarriers) {
-                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                barrier.Transition.StateBefore = state.nativeProbeAtlasState;
-                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            }
-            probeBarriers[0].Transition.pResource = state.probeAtlasTexture.Get();
-            probeBarriers[1].Transition.pResource = state.probeDepthTexture.Get();
+            makeTransition(probeBarriers[0], state.probeAtlasTexture.Get(), state.nativeProbeAtlasState,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            makeTransition(probeBarriers[1], state.probeDepthTexture.Get(), state.nativeProbeAtlasState,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             state.list->ResourceBarrier(2, probeBarriers);
-            state.list->SetComputeRootConstantBufferView(11, state.constants->GetGPUVirtualAddress() + probeOffset);
-            const auto increment = state.device->GetDescriptorHandleIncrementSize(
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            auto probeTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
-            probeTable.ptr += static_cast<SIZE_T>(14) * increment;
-            state.list->SetComputeRootDescriptorTable(12, probeTable);
-            probeTable.ptr += increment;
-            state.list->SetComputeRootDescriptorTable(13, probeTable);
-            auto historyTable = state.descriptors->GetGPUDescriptorHandleForHeapStart();
-            historyTable.ptr += static_cast<SIZE_T>(16) * increment;
-            state.list->SetComputeRootDescriptorTable(14, historyTable);
-            state.list->Dispatch((probeCountWidth + 7) / 8, (probeHeight + 7) / 8, 1);
-            uavBarrier(state.list.Get(), nullptr);
-            const auto probeDestination = state.native ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
-                : D3D12_RESOURCE_STATE_COMMON;
-            D3D12_RESOURCE_BARRIER copyBarriers[2]{};
-            copyBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            copyBarriers[0].Transition.pResource = state.probeAtlasTexture.Get();
-            copyBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            copyBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            copyBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            copyBarriers[1].Transition.pResource = state.probeAtlasHistory.Get();
-            copyBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            copyBarriers[1].Transition.StateBefore = state.probeHistoryState;
-            copyBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-            state.list->ResourceBarrier(2, copyBarriers);
-            state.list->CopyResource(state.probeAtlasHistory.Get(), state.probeAtlasTexture.Get());
-            copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            copyBarriers[0].Transition.StateAfter = probeDestination;
-            copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            copyBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            state.list->ResourceBarrier(2, copyBarriers);
-            probeBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            probeBarriers[1].Transition.StateAfter = probeDestination;
-            state.list->ResourceBarrier(1, &probeBarriers[1]);
-            state.nativeProbeAtlasState = probeDestination;
-            state.probeHistoryState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            state.probeHistoryValid = true;
-            state.probeHistoryEpoch = frame.historyEpoch;
-            state.probeHistoryView = frame.viewId;
+            const auto columns = static_cast<UINT>(frame.probeGrid[0] * frame.probeGrid[2]);
+            const auto rows = static_cast<UINT>(frame.probeGrid[1]);
+            dispatch((columns + 7) / 8, (rows + 7) / 8);
+            const auto publishProbeAtlas = [&](ID3D12Resource* atlas, ID3D12Resource* history,
+                                               UINT stride) {
+                D3D12_RESOURCE_BARRIER barriers[2]{};
+                makeTransition(barriers[0], atlas, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+                makeTransition(barriers[1], history, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+                state.list->ResourceBarrier(2, barriers);
+                D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+                source.pResource = atlas;
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                destination.pResource = history;
+                destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const D3D12_BOX activeRegion{0, 0, 0, columns * stride, rows, 1};
+                state.list->CopyTextureRegion(&destination, 0, 0, 0, &source, &activeRegion);
+                makeTransition(barriers[0], atlas, D3D12_RESOURCE_STATE_COPY_SOURCE, probeDestination);
+                makeTransition(barriers[1], history, D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                state.list->ResourceBarrier(2, barriers);
+            };
+            publishProbeAtlas(state.probeAtlasTexture.Get(), state.probeAtlasHistory.Get(),
+                probeOrder == 2 ? 9u : 4u);
+            publishProbeAtlas(state.probeDepthTexture.Get(), state.probeDepthHistory.Get(),
+                kProbeDepthDirections);
         }
-        for (auto& barrier : transitions)
-            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        if (state.native) {
-            transitions[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            transitions[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            state.nativeOutputState = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            state.nativeIndirectState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (imageDispatch) {
+            for (auto& barrier : transitions)
+                std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            if (state.native) {
+                transitions[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                transitions[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+            // Shared bridge images return to COMMON before the DX11 wait;
+            // native images return to raster-consumable states.
+            state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
         }
-        // Shared bridge images return to COMMON before the DX11 ownership wait;
-        // native images return to raster-consumable states.
-        state.list->ResourceBarrier(static_cast<UINT>(std::size(transitions)), transitions);
+        if (timingCount)
+            state.list->ResolveQueryData(state.timingQueries.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                0, timingCount, state.timingReadback.Get(), 0);
         const HRESULT closeResult = state.list->Close(); recording = false;
         if (failed(closeResult, "Close DXR command list", error)) { state.geometryReady = false; return fail(); }
         ID3D12CommandList* lists[] = {state.list.Get()}; state.queue->ExecuteCommandLists(1, lists);
+        if (imageDispatch && state.native) {
+            state.nativeOutputState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            state.nativeIndirectState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        if (frame.probeUpdate) state.nativeProbeAtlasState = probeDestination;
         const UINT64 completed = ++state.nextFence;
         // Even a failed signal must prevent allocator/upload reuse on a retry.
         // Waiting for the unsignaled value will fail safely or time out.
@@ -1796,23 +1932,31 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
             : GlobalIlluminationMotionVectors::CameraOnly;
         state.giStatus.accumulatedSamples = state.accumulatedSamples;
         if (frame.probeUpdate) {
+            if (!probeHistoryValid) ++state.giStatus.historyRevision;
+            state.probeKey = nextProbeKey;
+            state.probeHistoryValid = true;
+            // float4 constants carry the frame count. This bound retains exact
+            // integer increments and freezes only the running-average age.
+            state.probeFrame = probeFrame >= 2047u ? 1024u : probeFrame + 1u;
             const char* probeSh = frame.globalIllumination.probeShOrder > 1 ? "SH-L2" : "SH-L1";
             state.giStatus.effective = GlobalIlluminationMethod::ProbeGrid;
             state.giStatus.effectiveMode = GlobalIlluminationMode::Realtime;
             state.giStatus.accumulatedSamples = 1;
             state.giStatus.reason = "Hardware ray-traced DDGI: " +
-                std::to_string(std::clamp(frame.probeRayCount, 1u, kGiMaxProbeRays)) +
-                std::string(" probe rays, 9216x32 ") + probeSh + " probe atlas + depth moments.";
+                std::to_string(probeRays) + " rays per probe, " + probeSh +
+                " with directional visibility.";
         }
         state.indirectReady = realtimeLit || frame.reflectionOnly;
-        state.dispatches += 1u;
+        state.dispatches += frame.probeUpdate && frame.reflectionOnly ? 2u : 1u;
         state.message = "D3D12 DXR 1.1 active: " + std::to_string(state.triangleCount) + " triangles. ";
         if (pathRequested) {
             state.message += (realtime ? "Realtime GI " : "Progressive GI ") + std::to_string(state.accumulatedSamples) + "/" +
                 std::to_string(targetSamples) + " samples; indirect diffuse " +
                 (frame.globalIllumination.indirectDiffuse ? "on, " : "off, ") + "indirect specular " +
                 (frame.globalIllumination.indirectSpecular ? "on. " : "off. ") + state.giStatus.reason;
-        } else {
+        } else if (frame.reflectionOnly) {
+            state.message += "Raster reflection rays active.";
+        } else if (!frame.probeUpdate) {
             state.message += std::string(frame.reflections ? "Reflections on, " : "Reflections off, ") +
                 (frame.shadows ? "shadows on." : "shadows off.");
         }
@@ -1840,6 +1984,10 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
                 " rays per probe, 9216x32 " +
                 std::string(frame.globalIllumination.probeShOrder > 1 ? "SH-L2" : "SH-L1") +
                 " RGBA16F).";
+        if (timingCount) {
+            state.pendingTiming = {frame.timingFrameId, 0.0, frame.probeUpdate, frame.reflectionOnly};
+            state.pendingTimingQueries = timingCount;
+        }
         return true;
     } catch (const std::exception& exception) {
         if (recording) { state.list->Close(); state.geometryReady = false; }
@@ -1872,7 +2020,7 @@ ID3D11Texture2D* HardwareRayTracing::probeDepth() const {
     return impl_->probeAtlasReady ? impl_->sharedProbeDepth.Get() : nullptr;
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::probeAtlasSize() const {
-    return {9216, 32};
+    return {kProbeAtlasColumns, kGiMaxProbeGridAxis};
 }
 std::pair<std::uint32_t, std::uint32_t> HardwareRayTracing::nativeOutputSize() const {
     return {impl_->width, impl_->height};
@@ -1899,6 +2047,7 @@ std::vector<std::string> HardwareRayTracing::debugMessages() const {
     return result;
 }
 std::uint64_t HardwareRayTracing::dispatchCount() const { return impl_->dispatches; }
+HardwareTransportTiming HardwareRayTracing::lastGpuTiming() const { return impl_->lastTiming; }
 GlobalIlluminationStatus HardwareRayTracing::globalIlluminationStatus() const { return impl_->giStatus; }
 std::uint32_t HardwareRayTracing::validationErrorCount() const {
     const auto& queue = impl_->infoQueue;

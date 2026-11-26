@@ -2,6 +2,7 @@
 
 #include <RestArtEngine/Renderer/GlobalIllumination.h>
 #include <RestArtEngine/Renderer/Lighting.h>
+#include <RestArtEngine/Renderer/RenderDiagnostics.h>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -35,18 +36,21 @@ struct Frame {
     // emitted radiance/reserved. Kept outside the locked raster b0 contract.
     std::array<float, 16> areaLight{0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,0};
     std::array<float, 4> probeGrid{}; // X, Y, Z, hysteresis
-    std::array<float, 4> probeOrigin{}; // x, y, z, spacing
+    std::array<float, 4> probeOrigin{0, 0, 0, 1}; // xyz volume corner, w maximum cell extent
+    std::array<float, 4> probeCellSize{1, 1, 1, 0}; // per-axis cell extents in metres, reserved
     std::uint32_t probeRayCount = 16;
     std::uint32_t width = 0, height = 0;
     bool reflections = true, shadows = true;
     bool probeUpdate = false;
-    // Reflection-only frame used by raster SSGI; the resolved texture is
-    // exposed through nativeIndirect()/indirectLighting().
+    // Raster GI reflections, optionally dispatched alongside a probe update.
+    // The resolved texture is exposed through nativeIndirect()/indirectLighting().
     bool reflectionOnly = false;
     GlobalIlluminationSettings globalIllumination;
     // Changed by the owning scene renderer for explicit restart or re-enable.
     std::uint64_t historyEpoch = 0;
     std::uint64_t viewId = 1;
+    // Nonzero application-frame identity requests GPU timing on the DXR queue.
+    std::uint64_t timingFrameId = 0;
 };
 
 class HardwareRayTracing {
@@ -65,8 +69,8 @@ public:
     // this module and remain alive until resize/shutdown.
     [[nodiscard]] ID3D12Resource* nativeOutput() const;
     [[nodiscard]] ID3D12Resource* nativeIndirect() const;
-    // Ray-traced DDGI irradiance atlas, RGBA16F 1024x32. Native mode exposes
-    // the D3D12 resource; hybrid mode exposes the shared DX11 texture.
+    // Ray-traced DDGI SH and directional depth atlases. Native mode exposes
+    // D3D12 resources; hybrid mode exposes the shared DX11 textures.
     [[nodiscard]] ID3D12Resource* nativeProbeAtlas() const;
     [[nodiscard]] ID3D11Texture2D* probeAtlas() const;
     [[nodiscard]] ID3D12Resource* nativeProbeDepth() const;
@@ -93,6 +97,11 @@ public:
     [[nodiscard]] std::vector<std::string> debugMessages() const;
     [[nodiscard]] std::uint32_t validationErrorCount() const;
     [[nodiscard]] std::uint64_t dispatchCount() const;
+    // Sum of GPU intervals bracketing individual DXR compute dispatches. AS
+    // builds, inter-dispatch barriers, history copies and raster work are outside
+    // the intervals. Read after render for the preceding submission; frameId 0
+    // means that no completed, valid timing was collected.
+    [[nodiscard]] HardwareTransportTiming lastGpuTiming() const;
     [[nodiscard]] GlobalIlluminationStatus globalIlluminationStatus() const;
 
 private:

@@ -337,6 +337,8 @@ void globalIlluminationRoundTrip() {
         saved.at("customExtension") == fixture.original.at("customExtension"),
         "Saving GI preserves unknown nested and project fields.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::ScreenSpace;
+    requested.globalIllumination.screenSpaceQuality = renderer::GlobalIlluminationQuality::High;
+    requested.globalIllumination.screenSpaceRayCount = 3;
     requested.globalIllumination.screenSpaceSteps = 12;
     requested.globalIllumination.screenSpaceRadius = 4.5f;
     requested.globalIllumination.screenSpaceThickness = 0.35f;
@@ -344,10 +346,12 @@ void globalIlluminationRoundTrip() {
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "SSGI method and march settings survive project reload.");
     const auto savedSsgi = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
-    require(savedSsgi.at("method") == "screenSpace" && savedSsgi.at("screenSpaceSteps") == 12 &&
+    require(savedSsgi.at("method") == "screenSpace" && savedSsgi.at("screenSpaceQuality") == "high" &&
+        savedSsgi.at("screenSpaceRayCount") == 3 && savedSsgi.at("screenSpaceSteps") == 12 &&
         savedSsgi.at("screenSpaceRadius") == 4.5f && savedSsgi.at("screenSpaceThickness") == 0.35f,
         "SSGI serializes its stable method name and march settings.");
     requested.globalIllumination.method = renderer::GlobalIlluminationMethod::ProbeGrid;
+    requested.globalIllumination.probeQuality = renderer::GlobalIlluminationQuality::Low;
     requested.globalIllumination.probeGridX = 20;
     requested.globalIllumination.probeGridY = 10;
     requested.globalIllumination.probeGridZ = 24;
@@ -356,15 +360,17 @@ void globalIlluminationRoundTrip() {
     requested.globalIllumination.probeAutoFit = false;
     requested.globalIllumination.probeRayCount = 24;
     requested.globalIllumination.probeShOrder = 2;
+    requested.globalIllumination.probeScreenSpaceSteps = 11;
     require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
     require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested,
         "DDGI probe grid settings survive project reload.");
     const auto savedDdgi = Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination");
-    require(savedDdgi.at("method") == "probeGrid" && savedDdgi.at("probeGridX") == 20 &&
+    require(savedDdgi.at("method") == "probeGrid" && savedDdgi.at("probeQuality") == "low" &&
+        savedDdgi.at("screenSpaceQuality") == "high" && savedDdgi.at("probeGridX") == 20 &&
         savedDdgi.at("probeGridY") == 10 && savedDdgi.at("probeGridZ") == 24 &&
         savedDdgi.at("probeSpacing") == 1.5f && savedDdgi.at("probeHysteresis") == 0.8f &&
         savedDdgi.at("probeAutoFit") == false && savedDdgi.at("probeRayCount") == 24 &&
-        savedDdgi.at("probeShOrder") == 2,
+        savedDdgi.at("probeShOrder") == 2 && savedDdgi.at("probeScreenSpaceSteps") == 11,
         "DDGI serializes its probe grid and history controls.");
     requested.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
     requested.globalIllumination.restirCandidates = 7;
@@ -404,6 +410,65 @@ void globalIlluminationRoundTrip() {
     require(Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination").at("method") == "disabled",
         "Disabled GI uses its stable method name.");
     require(fixture.temporaryCount() == 0, "GI saves leave no temporary manifests.");
+}
+
+void globalIlluminationQualityBudgets() {
+    using namespace renderer;
+    using enum GlobalIlluminationQuality;
+    Fixture fixture;
+    auto oldProject = fixture.original;
+    oldProject["rendering"]["globalIllumination"] = {
+        {"method", "screenSpace"}, {"screenSpaceSteps", 19}, {"probeGridY", 11}
+    };
+    fixture.write(oldProject);
+    ProjectPaths loaded;
+    std::string error;
+    require(loadProject(fixture.manifest, loaded, error), error);
+    auto request = loaded.rendering.globalIllumination;
+    require(request.screenSpaceQuality == Custom && request.probeQuality == Custom &&
+        resolveGiQuality(request).screenSpaceSteps == 19,
+        "Old projects keep their authored budgets and select Custom.");
+
+    std::uint32_t previousScreenWork = 0, previousProbeWork = 0, previousScreenProbeWork = 0;
+    for (const auto quality : {Low, Medium, High}) {
+        request.method = GlobalIlluminationMethod::ScreenSpace;
+        request.screenSpaceQuality = quality;
+        const auto ssgi = resolveGiQuality(request);
+        const auto screenWork = ssgi.screenSpaceRayCount * ssgi.screenSpaceSteps;
+        require(screenWork > previousScreenWork && ssgi.probeGridY == 11,
+            "SSGI presets increase trace work without changing DDGI settings.");
+        previousScreenWork = screenWork;
+
+        request.method = GlobalIlluminationMethod::ProbeGrid;
+        request.probeQuality = quality;
+        const auto ddgi = resolveGiQuality(request);
+        const auto probeWork = ddgi.probeGridX * ddgi.probeGridY * ddgi.probeGridZ * ddgi.probeRayCount;
+        const auto screenProbeWork = probeWork * ddgi.probeScreenSpaceSteps;
+        require(probeWork > previousProbeWork && screenProbeWork > previousScreenProbeWork &&
+            ddgi.screenSpaceSteps == 19 && ddgi.probeShOrder == (quality == High ? 2u : 1u),
+            "DDGI presets increase DXR and screen-space probe work without changing SSGI settings.");
+        previousProbeWork = probeWork;
+        previousScreenProbeWork = screenProbeWork;
+    }
+    request.screenSpaceQuality = request.probeQuality = Custom;
+    require(resolveGiQuality(request).probeGridY == 11,
+        "Returning to Custom restores the original DDGI grid.");
+    request.method = GlobalIlluminationMethod::ScreenSpace;
+    require(resolveGiQuality(request).screenSpaceSteps == 19,
+        "Returning to Custom restores the original SSGI settings.");
+    request.screenSpaceRayCount = 0;
+    request.screenSpaceSteps = 100;
+    const auto boundedSsgi = resolveGiQuality(request);
+    require(boundedSsgi.screenSpaceRayCount == 1 && boundedSsgi.screenSpaceSteps == kGiMaxScreenSpaceSteps,
+        "Direct renderer callers get a bounded custom SSGI loop budget.");
+    request.method = GlobalIlluminationMethod::ProbeGrid;
+    request.probeGridX = 0;
+    request.probeRayCount = 100;
+    request.probeScreenSpaceSteps = 0;
+    const auto boundedDdgi = resolveGiQuality(request);
+    require(boundedDdgi.probeGridX == 2 && boundedDdgi.probeRayCount == kGiMaxProbeRays &&
+        boundedDdgi.probeScreenSpaceSteps == 1 && boundedDdgi.screenSpaceSteps == kGiMaxScreenSpaceSteps,
+        "Direct renderer callers get bounded custom probe and screen reflection budgets.");
 }
 
 void globalIlluminationValidation() {
@@ -446,10 +511,9 @@ void globalIlluminationValidation() {
             reject(Json{{restirBool, invalid}}, restirBool);
     for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
         reject(Json{{"probeAutoFit", invalid}}, "probeAutoFit");
-    for (const auto& invalid : {Json(0), Json(-1), Json(33), Json("16"), Json(1.5), Json(nullptr)})
-        reject(Json{{"probeRayCount", invalid}}, "probeRayCount");
-    for (const auto& invalid : {Json(0), Json(3), Json(-1), Json("2"), Json(1.5), Json(nullptr)})
-        reject(Json{{"probeShOrder", invalid}}, "probeShOrder");
+    for (const char* key : {"screenSpaceQuality", "probeQuality"})
+        for (const auto& invalid : {Json(nullptr), Json(0), Json(true), Json("Low"), Json("ultra"), Json::object()})
+            reject(Json{{key, invalid}}, key);
     for (const char* contribution : {"indirectDiffuse", "indirectSpecular"})
         for (const auto& invalid : {Json(nullptr), Json(0), Json(1), Json("true"), Json::array(), Json::object()})
             reject(Json{{contribution, invalid}}, contribution);
@@ -473,10 +537,13 @@ void globalIlluminationValidation() {
     for (const auto& bound : {Bound{"samplesPerFrame", renderer::kGiMaxSamplesPerFrame},
             Bound{"targetSamples", renderer::kGiMaxTargetSamples}, Bound{"maxBounces", renderer::kGiMaxBounces},
             Bound{"denoiseIterations", renderer::kGiMaxDenoiseIterations},
+            Bound{"screenSpaceRayCount", renderer::kGiMaxScreenSpaceRays},
             Bound{"screenSpaceSteps", renderer::kGiMaxScreenSpaceSteps},
             Bound{"probeGridX", renderer::kGiMaxProbeGridAxis},
             Bound{"probeGridY", renderer::kGiMaxProbeGridAxis},
             Bound{"probeGridZ", renderer::kGiMaxProbeGridAxis},
+            Bound{"probeRayCount", renderer::kGiMaxProbeRays}, Bound{"probeShOrder", 2u},
+            Bound{"probeScreenSpaceSteps", renderer::kGiMaxProbeScreenSpaceSteps},
             Bound{"restirCandidates", renderer::kGiMaxRestirCandidates}}) {
         for (const auto& invalid : {Json(nullptr), Json(false), Json("4"), Json(1.0), Json(1.5),
                 Json(0), Json(-1), Json(bound.maximum + 1), Json(std::numeric_limits<std::uint64_t>::max()),
@@ -535,6 +602,24 @@ void globalIlluminationValidation() {
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.screenSpaceSteps = renderer::kGiMaxScreenSpaceSteps + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceQuality = static_cast<renderer::GlobalIlluminationQuality>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeQuality = static_cast<renderer::GlobalIlluminationQuality>(99);
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.screenSpaceRayCount = 0;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeScreenSpaceSteps = renderer::kGiMaxProbeScreenSpaceSteps + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeRayCount = renderer::kGiMaxProbeRays + 1;
+    invalidRequest(invalid);
+    invalid = {};
+    invalid.globalIllumination.probeShOrder = 3;
     invalidRequest(invalid);
     invalid = {};
     invalid.globalIllumination.screenSpaceRadius = 0.0f;
@@ -693,6 +778,7 @@ int main() {
         backendSelectionRoundTrip();
         backendSelectionValidation();
         globalIlluminationRoundTrip();
+        globalIlluminationQualityBudgets();
         globalIlluminationValidation();
         replacementFailure();
         editingDependenciesAndRestart();

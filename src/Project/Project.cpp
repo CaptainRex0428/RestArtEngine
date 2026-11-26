@@ -71,6 +71,10 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     if (settings.sampling != renderer::GlobalIlluminationSampling::Uniform &&
         settings.sampling != renderer::GlobalIlluminationSampling::Restir)
         throw std::runtime_error("rendering.globalIllumination.sampling must be uniform or restir.");
+    if (!renderer::giQualityKey(settings.screenSpaceQuality))
+        throw std::runtime_error("rendering.globalIllumination.screenSpaceQuality must be custom, low, medium or high.");
+    if (!renderer::giQualityKey(settings.probeQuality))
+        throw std::runtime_error("rendering.globalIllumination.probeQuality must be custom, low, medium or high.");
     if (!std::isfinite(settings.indirectDiffuseIntensity) || settings.indirectDiffuseIntensity < 0.0f ||
         settings.indirectDiffuseIntensity > renderer::kGiMaxIndirectDiffuseIntensity)
         throw std::runtime_error("rendering.globalIllumination.indirectDiffuseIntensity must be a finite number from 0 to 8.");
@@ -84,7 +88,11 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     range("maxBounces", settings.maxBounces, renderer::kGiMaxBounces);
     range("denoiseIterations", settings.denoiseIterations, renderer::kGiMaxDenoiseIterations);
     range("restirCandidates", settings.restirCandidates, renderer::kGiMaxRestirCandidates);
+    range("screenSpaceRayCount", settings.screenSpaceRayCount, renderer::kGiMaxScreenSpaceRays);
     range("screenSpaceSteps", settings.screenSpaceSteps, renderer::kGiMaxScreenSpaceSteps);
+    range("probeRayCount", settings.probeRayCount, renderer::kGiMaxProbeRays);
+    range("probeShOrder", settings.probeShOrder, 2);
+    range("probeScreenSpaceSteps", settings.probeScreenSpaceSteps, renderer::kGiMaxProbeScreenSpaceSteps);
     if (!std::isfinite(settings.screenSpaceRadius) || settings.screenSpaceRadius <= 0.0f ||
         settings.screenSpaceRadius > 100.0f)
         throw std::runtime_error("rendering.globalIllumination.screenSpaceRadius must be a finite number from >0 to 100.");
@@ -219,7 +227,23 @@ RenderingSettings readRenderingSettings(const Json& value) {
         readCount("targetSamples", settings.globalIllumination.targetSamples, renderer::kGiMaxTargetSamples);
         readCount("maxBounces", settings.globalIllumination.maxBounces, renderer::kGiMaxBounces);
         readCount("denoiseIterations", settings.globalIllumination.denoiseIterations, renderer::kGiMaxDenoiseIterations);
+        readCount("screenSpaceRayCount", settings.globalIllumination.screenSpaceRayCount, renderer::kGiMaxScreenSpaceRays);
         readCount("screenSpaceSteps", settings.globalIllumination.screenSpaceSteps, renderer::kGiMaxScreenSpaceSteps);
+        const auto readQuality = [&gi](const char* key, renderer::GlobalIlluminationQuality& target) {
+            const auto it = gi.find(key);
+            if (it == gi.end()) return;
+            using enum renderer::GlobalIlluminationQuality;
+            for (const auto candidate : {Custom, Low, Medium, High}) {
+                if (*it == renderer::giQualityKey(candidate)) {
+                    target = candidate;
+                    return;
+                }
+            }
+            throw std::runtime_error(std::string("rendering.globalIllumination.") + key +
+                " must be custom, low, medium or high.");
+        };
+        readQuality("screenSpaceQuality", settings.globalIllumination.screenSpaceQuality);
+        readQuality("probeQuality", settings.globalIllumination.probeQuality);
         const auto readPositiveFloat = [&gi](const char* key, float& target, float maximum) {
             if (!gi.contains(key)) return;
             const auto& encoded = gi.at(key);
@@ -246,30 +270,18 @@ RenderingSettings readRenderingSettings(const Json& value) {
                 throw std::runtime_error("rendering.globalIllumination.probeAutoFit must be a boolean.");
             settings.globalIllumination.probeAutoFit = gi.at("probeAutoFit").get<bool>();
         }
-        if (gi.contains("probeRayCount")) {
-            const auto& encoded = gi.at("probeRayCount");
-            if (!encoded.is_number_integer() || encoded.get<std::int64_t>() < 1 ||
-                encoded.get<std::int64_t>() > static_cast<std::int64_t>(renderer::kGiMaxProbeRays))
-                throw std::runtime_error("rendering.globalIllumination.probeRayCount must be an integer from 1 to 32.");
-            settings.globalIllumination.probeRayCount =
-                static_cast<std::uint32_t>(encoded.get<std::int64_t>());
-        }
-        if (gi.contains("probeShOrder")) {
-            const auto& encoded = gi.at("probeShOrder");
-            if (!encoded.is_number_integer() || (encoded.get<std::int64_t>() != 1 &&
-                encoded.get<std::int64_t>() != 2))
-                throw std::runtime_error("rendering.globalIllumination.probeShOrder must be 1 or 2.");
-            settings.globalIllumination.probeShOrder =
-                static_cast<std::uint32_t>(encoded.get<std::int64_t>());
-        }
+        readCount("probeRayCount", settings.globalIllumination.probeRayCount, renderer::kGiMaxProbeRays);
+        readCount("probeShOrder", settings.globalIllumination.probeShOrder, 2);
+        readCount("probeScreenSpaceSteps", settings.globalIllumination.probeScreenSpaceSteps,
+            renderer::kGiMaxProbeScreenSpaceSteps);
         if (gi.contains("probeHysteresis")) {
             const auto& encoded = gi.at("probeHysteresis");
             if (!encoded.is_number())
                 throw std::runtime_error("rendering.globalIllumination.probeHysteresis must be a finite number from 0 to 1.");
-            const double value = encoded.get<double>();
-            if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+            const double hysteresis = encoded.get<double>();
+            if (!std::isfinite(hysteresis) || hysteresis < 0.0 || hysteresis > 1.0)
                 throw std::runtime_error("rendering.globalIllumination.probeHysteresis must be a finite number from 0 to 1.");
-            settings.globalIllumination.probeHysteresis = static_cast<float>(value);
+            settings.globalIllumination.probeHysteresis = static_cast<float>(hysteresis);
         }
         if (gi.contains("denoiser")) {
             if (!gi.at("denoiser").is_string())
@@ -1072,9 +1084,12 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["restirDirect"] = settings.globalIllumination.restirDirect;
         gi["restirIndirect"] = settings.globalIllumination.restirIndirect;
         gi["restirSpatialReuse"] = settings.globalIllumination.restirSpatialReuse;
+        gi["screenSpaceQuality"] = renderer::giQualityKey(settings.globalIllumination.screenSpaceQuality);
+        gi["screenSpaceRayCount"] = settings.globalIllumination.screenSpaceRayCount;
         gi["screenSpaceSteps"] = settings.globalIllumination.screenSpaceSteps;
         gi["screenSpaceRadius"] = settings.globalIllumination.screenSpaceRadius;
         gi["screenSpaceThickness"] = settings.globalIllumination.screenSpaceThickness;
+        gi["probeQuality"] = renderer::giQualityKey(settings.globalIllumination.probeQuality);
         gi["probeGridX"] = settings.globalIllumination.probeGridX;
         gi["probeGridY"] = settings.globalIllumination.probeGridY;
         gi["probeGridZ"] = settings.globalIllumination.probeGridZ;
@@ -1083,6 +1098,7 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["probeAutoFit"] = settings.globalIllumination.probeAutoFit;
         gi["probeRayCount"] = settings.globalIllumination.probeRayCount;
         gi["probeShOrder"] = settings.globalIllumination.probeShOrder;
+        gi["probeScreenSpaceSteps"] = settings.globalIllumination.probeScreenSpaceSteps;
         auto& aa = rendering["antiAliasing"];
         if (aa.is_null()) aa = Json::object();
         switch (settings.antiAliasing.method) {

@@ -11,6 +11,13 @@ namespace rae::renderer {
 enum class DebugTextureChannel { RGB, R, G, B, A };
 enum class GpuTimingStatus { Unavailable, Pending, Ready, Disjoint };
 
+// Timestamp interval on the DXR command list. A zero frameId means unavailable.
+struct HardwareTransportTiming {
+    std::uint64_t frameId = 0;
+    double gpuMs = 0;
+    bool probeUpdate = false, reflectionOnly = false;
+};
+
 struct RenderPassTiming {
     std::string name;
     double cpuMs = 0.0;

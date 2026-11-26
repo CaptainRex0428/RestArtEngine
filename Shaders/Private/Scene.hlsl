@@ -72,12 +72,13 @@ SamplerComparisonState shadowSampler : register(s1);
 // image in linear HDR, aligned with the current scene viewport.
 cbuffer GlobalIlluminationConstants : register(b6)
 {
-    float4 giViewport; // effective realtime GI, local width, local height, reserved
-    // enabled, world-space march radius, thickness, artistic intensity
+    float4 giViewport; // path-traced realtime GI, local width, local height, SSGI steps
+    // diffuse enabled, world-space march radius, hit thickness, artistic intensity
     float4 giScreenSpace;
     row_major float4x4 giPreviousViewProjection;
-    // history valid, frame index, current-frame weight, spatial taps
+    // history valid, frame index, current-frame weight, specular source (0/off, 1/SSR, 2/DXR)
     float4 giHistory;
+    float4 giTrace; // diffuse ray count, resolution divisor, viewport origin XY
 };
 Texture2D<float4> indirectLightingBuffer : register(t9);
 Texture2D<float4> motionBuffer : register(t16);
@@ -85,6 +86,7 @@ Texture2D<float4> ssgiDirectCurrent : register(t17);
 Texture2D<float4> ssgiRawIndirect : register(t18);
 Texture2D<float4> ssgiHistoryIndirect : register(t19);
 Texture2D<float4> ssgiSpecularRaw : register(t21);
+Texture2D<float4> probeRayRadiance : register(t13);
 Texture2D<float4> probeAtlasRead : register(t14);
 Texture2D<float4> probeColorSource : register(t15);
 Texture2D<float4> probeDepthAtlas : register(t20);
@@ -93,7 +95,8 @@ cbuffer ProbeConstants : register(b9)
     float4 probeGrid;    // x, y, z probe counts, history hysteresis
     float4 probeOrigin;  // grid origin xyz, world spacing
     float4 probeParameters;  // enabled, previous atlas valid, intensity, mode
-    float4 probeLayout;      // x = SH order (1 or 2), yzw reserved
+    float4 probeLayout;      // SH order, screen-space rays, screen-space steps, update frame
+    float4 probeCellSize;    // world-space cell pitch on X, Y, Z
 };
 #endif
 
@@ -126,6 +129,7 @@ void CameraPrimaryRay(float2 ndc, out float3 origin, out float3 direction, out f
 }
 
 #include "Lighting.hlsli"
+#include "ProbeLighting.hlsli"
 
 struct VertexInput
 {
@@ -593,6 +597,11 @@ float3 Fresnel(float cosine, float3 reflectance)
     return reflectance + (1.0 - reflectance) * factor;
 }
 
+bool UsesWideDxrReflection(float roughness, float metallic, float3 fresnel)
+{
+    return roughness >= 0.6 && metallic < 0.1 && max(fresnel.r, max(fresnel.g, fresnel.b)) < 0.15;
+}
+
 float SceneLightVisibility(uint index, SceneLight source, SceneLightSample lightSample,
     float3 position, float3 normal, float2 uv, bool deferred)
 {
@@ -680,10 +689,9 @@ float3 ShadeSurface(float3 position, float3 normal, float3 view, Surface materia
         directDiffuse, directSpecular);
 }
 
-float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool deferred)
+float3 ApplyRasterReflection(float3 color, float3 position, float3 normal, float3 view,
+    Surface material, float2 uv, bool deferred)
 {
-    float3 view = CameraViewDirection(position);
-    float3 color = ShadeSurface(position, normal, view, material, uv, deferred);
 #if defined(RAE_HARDWARE_RAYTRACING)
     if (traceOptions.x > 0.5)
 #else
@@ -715,6 +723,13 @@ float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool d
         }
     }
     return max(color, 0.0);
+}
+
+float3 Shade(float3 position, float3 normal, Surface material, float2 uv, bool deferred)
+{
+    float3 view = CameraViewDirection(position);
+    return ApplyRasterReflection(ShadeSurface(position, normal, view, material, uv, deferred),
+        position, normal, view, material, uv, deferred);
 }
 
 float3 DisplayColor(float3 linearColor)
@@ -810,552 +825,78 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 }
 
 #if !defined(RAE_HARDWARE_RAYTRACING)
-// Screen-space diffuse GI trace. The depth/normal buffer and previous-frame
-// direct colour are current; the indirect result is accumulated separately so
-// the trace never samples its own previous indirect contribution.
-float3 ProbeIrradiance(float3 position, float3 normal);
-
-float3 ScreenSpaceTrace(uint2 pixel, float3 position, float3 normal)
-{
-    if (giScreenSpace.x < 0.5 || giHistory.x < 0.5 || giViewport.w < 0.5) return 0.0;
-    uint steps = max((uint)giViewport.w, 1u);
-    uint rayCount = 4u;
-    float radius = max(giScreenSpace.y, 0.05);
-    float stepSize = radius / float(steps);
-    float thickness = max(giScreenSpace.z, stepSize * 1.25);
-    float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
-    float3 bitangent = cross(normal, tangent);
-    float frame = giHistory.y;
-    float3 sum = 0.0;
-    float weight = 0.0;
-    [loop] for (uint rayIndex = 0; rayIndex < rayCount; ++rayIndex)
-    {
-        float seed = frac(sin(dot(float2(pixel) + float2(frame * 37.0, rayIndex * 19.0),
-            float2(12.9898, 78.233))) * 43758.5453);
-        float phi = seed * 6.2831853 + float(rayIndex) * 2.3999632;
-        float cosTheta = sqrt(frac(seed + float(rayIndex) * 0.6180339));
-        float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
-        // Cosine-weighted hemisphere: the averaged incident radiance is the
-        // diffuse irradiance / π and composes directly with receiver albedo.
-        float3 direction = normalize(tangent * (cos(phi) * sinTheta) +
-            bitangent * (sin(phi) * sinTheta) + normal * cosTheta);
-        bool resolved = false;
-        [loop] for (uint step = 1; step <= steps; ++step)
-        {
-            float travel = float(step) * stepSize;
-            float3 samplePosition = position + direction * travel;
-            float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
-            if (clip.w <= 0.0001) break;
-            float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
-            if (any(uv < 0.0) || any(uv > 1.0)) break;
-            float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
-            if (scenePosition.w < 0.5) continue;
-            float3 delta = scenePosition.xyz - samplePosition;
-            if (dot(delta, delta) > thickness * thickness) continue;
-            // A ray hitting a front-facing surface must approach it from the
-            // front; reject back faces and distant depth mismatches.
-            float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
-            if (dot(hitNormal, direction) > -0.05) continue;
-            float3 radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
-            // One additional diffuse bounce: the previous resolved indirect
-            // image is the best available incident radiance for surfaces that
-            // are themselves only indirectly lit.
-            radiance += ssgiHistoryIndirect.SampleLevel(gbufferSampler, uv, 0).rgb * 0.5;
-            // Emissive/light surfaces are not diffuse receivers. Linear radiance
-            // can exceed one, so reject only clearly HDR emitters.
-            float luminance = dot(radiance, float3(0.2126, 0.7152, 0.0722));
-            if (luminance > 4.0) continue;
-            sum += min(radiance, 4.0);
-            weight += 1.0;
-            resolved = true;
-            break;
-        }
-        if (!resolved)
-        {
-            // No depth hit (screen edge or off-screen): use the low-resolution
-            // DDGI probe atlas for off-screen energy, with environment as the
-            // remaining fallback.
-            float3 probeFallback = ProbeIrradiance(position, normal);
-            sum += Environment(direction, 0.0) * 0.25 + probeFallback;
-            weight += max(0.25, dot(abs(probeFallback), float3(0.333, 0.333, 0.333)));
-        }
-    }
-    return weight > 0.0 ? sum / weight : 0.0;
-}
-
-float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
-{
-    int3 pixel = int3(int2(input.position.xy), 0);
-    // Trace at half resolution; sample the full-resolution G-buffer through
-    // normalized UVs so the half-res pixel still addresses its true receiver.
-    float4 position = positionBuffer.SampleLevel(gbufferSampler, input.uv, 0);
-    if (position.w < 0.5) return 0.0;
-    float3 normal = normalize(normalBuffer.SampleLevel(gbufferSampler, input.uv, 0).xyz);
-    return float4(ScreenSpaceTrace(uint2(pixel.xy), position.xyz, normal), 1.0);
-}
-
-float3 ScreenSpaceSpecular(uint2 pixel, float3 position, float3 normal,
-    float roughness, float metallic, float3 albedo)
-{
-    if (giScreenSpace.x < 0.5 || giViewport.w < 0.5) return 0.0;
-    uint steps = max((uint)giViewport.w, 1u);
-    float radius = max(giScreenSpace.y, 0.05);
-    float stepSize = radius / float(steps);
-    float thickness = max(giScreenSpace.z, stepSize * 1.25);
-    float3 view = normalize(cameraPosition.xyz - position);
-    float3 reflection = reflect(-view, normal);
-    float seed = frac(sin(dot(float2(pixel) + giHistory.y * 37.0,
-        float2(12.9898, 78.233))) * 43758.5453);
-    if (roughness > 0.01)
-    {
-        float3 tangent = normalize(cross(abs(normal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0), normal));
-        float3 bitangent = cross(normal, tangent);
-        float angle = seed * 6.2831853;
-        reflection = normalize(reflection + (tangent * cos(angle) + bitangent * sin(angle)) *
-            roughness * 0.45);
-        if (dot(reflection, normal) < 0.01) reflection = normalize(normal + reflection * 0.05);
-    }
-    float3 radiance = Environment(reflection, roughness);
-    bool reflected = false;
-    [loop] for (uint step = 1; step <= steps; ++step)
-    {
-        float3 samplePosition = position + reflection * (float(step) * stepSize);
-        float4 clip = mul(float4(samplePosition, 1.0), viewProjection);
-        if (clip.w <= 0.0001) break;
-        float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
-        if (any(uv < 0.0) || any(uv > 1.0)) break;
-        float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, uv, 0);
-        if (scenePosition.w < 0.5) continue;
-        float3 delta = scenePosition.xyz - samplePosition;
-        if (dot(delta, delta) > thickness * thickness) continue;
-        float3 hitNormal = normalize(normalBuffer.SampleLevel(gbufferSampler, uv, 0).xyz);
-        if (dot(hitNormal, reflection) > -0.05) continue;
-        radiance = probeColorSource.SampleLevel(gbufferSampler, uv, 0).rgb;
-        reflected = true;
-        break;
-    }
-    if (!reflected)
-        radiance += ProbeIrradiance(position, reflection);
-    float nv = saturate(dot(normal, view));
-    float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
-    return min(radiance, 4.0) * fresnel * saturate(1.0 - roughness * 0.85);
-}
-
-float4 PSScreenSpaceGiSpecular(FullscreenOutput input) : SV_TARGET
-{
-    float4 position = positionBuffer.SampleLevel(gbufferSampler, input.uv, 0);
-    if (position.w < 0.5) return 0.0;
-    float4 normalBufferValue = normalBuffer.SampleLevel(gbufferSampler, input.uv, 0);
-    float4 albedo = albedoBuffer.SampleLevel(gbufferSampler, input.uv, 0);
-    return float4(ScreenSpaceSpecular(uint2(input.position.xy), position.xyz,
-        normalize(normalBufferValue.xyz), albedo.a, normalBufferValue.a, albedo.rgb), 1.0);
-}
-
-struct SSGICompositeOutput
-{
-    float4 color : SV_TARGET0;
-    float4 history : SV_TARGET1;
-};
-SSGICompositeOutput PSScreenSpaceGiComposite(FullscreenOutput input)
-{
-    SSGICompositeOutput output;
-    int3 pixel = int3(int2(input.position.xy), 0);
-    float4 position = positionBuffer.Load(pixel);
-    if (position.w < 0.5)
-    {
-        output.color = Background(input.uv);
-        output.history = 0.0;
-        return output;
-    }
-    float4 normal = normalBuffer.Load(pixel);
-    float3 normalValue = normalize(normal.xyz);
-    float3 raw = ssgiRawIndirect.SampleLevel(gbufferSampler, input.uv, 0).rgb;
-    float2 rawTexel = 2.0 / max(giViewport.zw, float2(1.0, 1.0));
-    float3 spatialSum = raw;
-    float spatialWeight = 1.0;
-    float3 low = raw;
-    float3 high = raw;
-    int2 coordinate = int2(pixel.xy);
-    [unroll] for (int y = -1; y <= 1; ++y)
-    [unroll] for (int x = -1; x <= 1; ++x)
-    {
-        if (x == 0 && y == 0) continue;
-        int2 neighbour = coordinate + int2(x, y);
-        if (any(neighbour < 0) || any(neighbour >= int2(giViewport.yz))) continue;
-        int3 neighbourPixel = int3(neighbour, 0);
-        float4 otherPosition = positionBuffer.Load(neighbourPixel);
-        if (otherPosition.w < 0.5) continue;
-        float4 otherNormal = normalBuffer.Load(neighbourPixel);
-        float cosine = dot(normalValue, normalize(otherNormal.xyz));
-        if (cosine < 0.9) continue;
-        float3 delta = otherPosition.xyz - position.xyz;
-        float plane = abs(dot(delta, normalValue));
-        if (plane > 0.75) continue;
-        float3 sample = ssgiRawIndirect.SampleLevel(gbufferSampler,
-            input.uv + float2(x, y) * rawTexel, 0).rgb;
-        float weight = 1.0 / (1.0 + length(delta) + abs(x) + abs(y));
-        spatialSum += sample * weight;
-        spatialWeight += weight;
-        low = min(low, sample);
-        high = max(high, sample);
-    }
-    float3 indirect = spatialSum / max(spatialWeight, 1e-5);
-    if (giHistory.x > 0.5 && giHistory.w < 1.5)
-    {
-        float4 previousWorld = motionBuffer.Load(pixel);
-        float4 clip = mul(float4(previousWorld.xyz, 1.0), giPreviousViewProjection);
-        if (clip.w > 0.0001)
-        {
-            float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, -clip.y / clip.w * 0.5 + 0.5);
-            if (all(uv > 0.0) && all(uv < 1.0))
-            {
-                float3 history = ssgiHistoryIndirect.SampleLevel(gbufferSampler, uv, 0).rgb;
-                history = clamp(history, low, high);
-                indirect = lerp(history, indirect, saturate(giHistory.z));
-            }
-        }
-    }
-    output.history = float4(indirect, 1.0);
-    float3 directLinear = probeColorSource.Load(pixel).rgb;
-    float3 specular = ssgiSpecularRaw.SampleLevel(gbufferSampler, input.uv, 0).rgb;
-    indirect *= albedoBuffer.Load(pixel).rgb;
-    output.color = giHistory.w > 1.5 ? float4(DisplayColor(indirect + specular), 1.0)
-        : float4(DisplayColor(directLinear + indirect * giScreenSpace.w + specular), 1.0);
-    return output;
-}
-
-static const float kShY00 = 0.2820947918;
-static const float kShY1 = 0.4886025119;
-static const float kShY2 = 1.0925484306;
-static const float kShY20 = 0.3153915653;
-static const float kShY22 = 0.5462742153;
-
-float3 ProbeshIrradiance(float3 c0, float3 c1, float3 c2, float3 c3,
-    float3 c4, float3 c5, float3 c6, float3 c7, float3 c8, int order, float3 normal)
-{
-    float3 n = normalize(normal);
-    float3 irradiance = PI * c0 * kShY00 +
-        (2.0 * PI / 3.0) * kShY1 * (c1 * n.y + c2 * n.z + c3 * n.x);
-    if (order > 1)
-    {
-        float3 l2 = c4 * (kShY2 * n.x * n.y) +
-            c5 * (kShY2 * n.y * n.z) +
-            c6 * (kShY20 * (3.0 * n.z * n.z - 1.0)) +
-            c7 * (kShY2 * n.x * n.z) +
-            c8 * (kShY22 * (n.x * n.x - n.y * n.y));
-        irradiance += (PI / 4.0) * l2;
-    }
-    return irradiance / PI;
-}
-
-float3 ProbeIrradiance(float3 position, float3 normal)
-{
-    if (probeParameters.x < 0.5 || probeParameters.y < 0.5) return 0.0;
-    int shOrder = probeLayout.x > 1.5 ? 2 : 1;
-    int coefficientCount = shOrder == 2 ? 9 : 4;
-    int3 dimensions = int3(probeGrid.xyz);
-    float3 local = (position - probeOrigin.xyz) / max(probeOrigin.w, 1e-4) - 0.5;
-    int3 base = int3(floor(local));
-    float3 fraction = saturate(local - floor(local));
-    float3 c[9];
-    [unroll] for (int shIndex = 0; shIndex < 9; ++shIndex) c[shIndex] = 0.0;
-    float weightSum = 0.0;
-    [unroll] for (int y = 0; y < 2; ++y)
-    [unroll] for (int z = 0; z < 2; ++z)
-    [unroll] for (int x = 0; x < 2; ++x)
-    {
-        int3 coordinate = clamp(base + int3(x, y, z), int3(0, 0, 0), dimensions - 1);
-        float weight = (x ? fraction.x : 1.0 - fraction.x) *
-            (y ? fraction.y : 1.0 - fraction.y) * (z ? fraction.z : 1.0 - fraction.z);
-        int2 probeCoordinate = int2(coordinate.x + coordinate.z * dimensions.x, coordinate.y);
-        int atlasBase = probeCoordinate.x * coefficientCount;
-        float confidence = probeParameters.w > 1.5 && probeParameters.w < 2.5 ? 1.0 :
-            probeAtlasRead.Load(int3(atlasBase, probeCoordinate.y, 0)).a;
-        if (probeParameters.w > 1.5 && probeParameters.w < 2.5)
-        {
-            // Chebyshev visibility still uses the per-probe depth moments.
-            float4 depthSample = probeDepthAtlas.Load(int3(probeCoordinate, 0));
-            float3 probeCenter = probeOrigin.xyz + (float3(coordinate) + 0.5) * probeOrigin.w;
-            float receiverDistance = length(position - probeCenter);
-            float meanDistance = depthSample.x;
-            float meanSquared = depthSample.y;
-            float variance = max(meanSquared - meanDistance * meanDistance, 1e-4);
-            float difference = meanDistance - receiverDistance;
-            float visibility = difference >= 0.0 ? 1.0
-                : saturate(variance / (variance + difference * difference));
-            confidence *= saturate(0.35 + 0.65 * visibility * saturate(depthSample.z));
-        }
-        float weighted = weight * confidence;
-        [loop] for (int coefficient = 0; coefficient < coefficientCount; ++coefficient)
-            c[coefficient] += probeAtlasRead.Load(int3(
-                atlasBase + coefficient, probeCoordinate.y, 0)).rgb * weighted;
-        weightSum += weighted;
-    }
-    float inverseWeight = 1.0 / max(weightSum, 1e-5);
-    return ProbeshIrradiance(c[0] * inverseWeight, c[1] * inverseWeight,
-        c[2] * inverseWeight, c[3] * inverseWeight, c[4] * inverseWeight,
-        c[5] * inverseWeight, c[6] * inverseWeight, c[7] * inverseWeight,
-        c[8] * inverseWeight, shOrder, normal) * probeParameters.z;
-}
-
-float3 BoundProbeIndirect(float3 directColor, float3 indirect)
-{
-    const float3 luminanceWeights = float3(0.2126, 0.7152, 0.0722);
-    float directLuminance = dot(directColor, luminanceWeights);
-    float indirectLuminance = dot(indirect, luminanceWeights);
-    float limit = max(directLuminance * 1.5, 0.08);
-    return indirect * min(1.0, limit / max(indirectLuminance, 1e-4));
-}
-
-// Software ray-traced probe fallback: trace a small set of world-space
-// directions against the current depth/position buffer. This is not DXR, but it
-// replaces the old single projected-pixel copy with an actual multi-ray
-// integration and works on native D3D12 raster as well as strict D3D11.
-struct ProbeSH
-{
-    float3 c0;
-    float3 c1;
-    float3 c2;
-    float3 c3;
-    float3 c4;
-    float3 c5;
-    float3 c6;
-    float3 c7;
-    float3 c8;
-};
-
-ProbeSH SoftwareProbeTrace(int3 probe, int3 dimensions)
-{
-    float spacing = max(probeOrigin.w, 0.01);
-    float3 world = probeOrigin.xyz + (float3(probe) + 0.5) * spacing;
-    ProbeSH sh;
-    sh.c0 = 0.0; sh.c1 = 0.0; sh.c2 = 0.0; sh.c3 = 0.0;
-    sh.c4 = 0.0; sh.c5 = 0.0; sh.c6 = 0.0; sh.c7 = 0.0; sh.c8 = 0.0;
-    const uint directionCount = 64u;
-    const uint stepCount = 24u;
-    const float shProjection = 4.0 * PI / float(directionCount);
-    float probeSeed = frac(sin(dot(float3(probe), float3(12.9898, 78.233, 37.719))) * 43758.5453);
-    float stepSize = max(spacing * 0.75, 0.2);
-    float tolerance = max(spacing * 1.5, stepSize * 1.25);
-    [loop] for (uint directionIndex = 0; directionIndex < directionCount; ++directionIndex)
-    {
-        float z = 1.0 - 2.0 * (float(directionIndex) + 0.5) / float(directionCount);
-        float radial = sqrt(max(1.0 - z * z, 0.0));
-        float phi = (float(directionIndex) + probeSeed) * 2.39996323;
-        float3 direction = float3(radial * cos(phi), z, radial * sin(phi));
-        float3 radiance = Environment(direction, 0.0);
-        float3 sampleWorld = world + direction * stepSize;
-        [loop] for (uint step = 0; step < stepCount; ++step)
-        {
-            float4 clip = mul(float4(sampleWorld, 1.0), viewProjection);
-            if (clip.w > 0.0001)
-            {
-                float2 sampleUv = float2(clip.x / clip.w * 0.5 + 0.5,
-                    -clip.y / clip.w * 0.5 + 0.5);
-                if (all(sampleUv >= 0.0) && all(sampleUv <= 1.0))
-                {
-                    float4 scenePosition = positionBuffer.SampleLevel(gbufferSampler, sampleUv, 0);
-                    if (scenePosition.w >= 0.5 &&
-                        distance(scenePosition.xyz, sampleWorld) <= tolerance)
-                    {
-                        radiance = probeColorSource.SampleLevel(gbufferSampler, sampleUv, 0).rgb;
-                        break;
-                    }
-                }
-            }
-            sampleWorld += direction * stepSize;
-        }
-        sh.c0 += radiance * (shProjection * kShY00);
-        sh.c1 += radiance * (shProjection * kShY1 * direction.y);
-        sh.c2 += radiance * (shProjection * kShY1 * direction.z);
-        sh.c3 += radiance * (shProjection * kShY1 * direction.x);
-        sh.c4 += radiance * (shProjection * kShY2 * direction.x * direction.y);
-        sh.c5 += radiance * (shProjection * kShY2 * direction.y * direction.z);
-        sh.c6 += radiance * (shProjection * kShY20 * (3.0 * direction.z * direction.z - 1.0));
-        sh.c7 += radiance * (shProjection * kShY2 * direction.x * direction.z);
-        sh.c8 += radiance * (shProjection * kShY22 *
-            (direction.x * direction.x - direction.y * direction.y));
-    }
-    return sh;
-}
-
-float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
-{
-    int2 pixel = int2(input.position.xy);
-    int3 dimensions = int3(probeGrid.xyz);
-    int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
-    int coefficient = pixel.x % coefficientCount;
-    int probeX = pixel.x / coefficientCount;
-    int ix = probeX % max(dimensions.x, 1);
-    int iz = probeX / max(dimensions.x, 1);
-    int iy = pixel.y;
-    if (iz >= dimensions.z || iy >= dimensions.y) return 0.0;
-    float4 previous = probeParameters.y > 0.5 ?
-        probeAtlasRead.Load(int3(pixel, 0)) : float4(0.0, 0.0, 0.0, 1.0);
-    if (probeParameters.x < 0.5) return previous;
-    if (probeParameters.w > 2.5)
-    {
-        ProbeSH sh = SoftwareProbeTrace(int3(ix, iy, iz), dimensions);
-        float3 current;
-        if (coefficient == 0) current = sh.c0;
-        else if (coefficient == 1) current = sh.c1;
-        else if (coefficient == 2) current = sh.c2;
-        else if (coefficient == 3) current = sh.c3;
-        else if (coefficient == 4) current = sh.c4;
-        else if (coefficient == 5) current = sh.c5;
-        else if (coefficient == 6) current = sh.c6;
-        else if (coefficient == 7) current = sh.c7;
-        else current = sh.c8;
-        float blend = probeParameters.y > 0.5 ? saturate(1.0 - probeGrid.w) : 1.0;
-        return float4(lerp(previous.rgb, current, blend), 1.0);
-    }
-    // The raster probe update path is either SH software DDGI (above) or the
-    // DXR atlas copied in by the hardware transport; no projected fallback
-    // writes this atlas anymore.
-    return previous;
-}
-
-float4 PSProbeFilter(FullscreenOutput input) : SV_TARGET
-{
-    int2 pixel = int2(input.position.xy);
-    int3 dimensions = int3(probeGrid.xyz);
-    int coefficientCount = probeLayout.x > 1.5 ? 9 : 4;
-    int coefficient = pixel.x % coefficientCount;
-    int probeX = pixel.x / coefficientCount;
-    int ix = probeX % max(dimensions.x, 1);
-    int iz = probeX / max(dimensions.x, 1);
-    int iy = pixel.y;
-    if (iz >= dimensions.z || iy >= dimensions.y) return 0.0;
-    float3 center = probeAtlasRead.Load(int3(pixel, 0)).rgb;
-    float3 filtered = 0.0;
-    float weightSum = 0.0;
-    [unroll] for (int dz = -1; dz <= 1; ++dz)
-    [unroll] for (int dy = -1; dy <= 1; ++dy)
-    [unroll] for (int dx = -1; dx <= 1; ++dx)
-    {
-        int3 coordinate = int3(ix + dx, iy + dy, iz + dz);
-        if (any(coordinate < int3(0, 0, 0)) || any(coordinate >= dimensions)) continue;
-        int atlasBase = (coordinate.x + coordinate.z * dimensions.x) * coefficientCount;
-        float weight = exp(-0.75 * float(dx * dx + dy * dy + dz * dz));
-        filtered += probeAtlasRead.Load(int3(atlasBase + coefficient, coordinate.y, 0)).rgb * weight;
-        weightSum += weight;
-    }
-    if (weightSum <= 0.0) return float4(center, 1.0);
-    return float4(lerp(center, filtered / weightSum, 0.65), 1.0);
-}
+#include "ProbeGridGi.hlsli"
+#include "ScreenSpaceGi.hlsli"
 
 float4 PSProbeComposite(FullscreenOutput input) : SV_TARGET
 {
     int3 pixel = int3(int2(input.position.xy), 0);
-    int debugMode = (int)(viewportDebug.z + 0.5);
+    bool debugIndirect = viewportDebug.z > 10.5 && viewportDebug.z < 11.5;
     float4 position = positionBuffer.Load(pixel);
-    float4 direct = ssgiDirectCurrent.Load(pixel);
-    if (position.w < 0.5) return debugMode == 11 ? float4(0.0, 0.0, 0.0, 1.0) : direct;
-    float4 directLinear = probeColorSource.Load(pixel);
+    float4 base = ssgiDirectCurrent.Load(pixel);
+    if (position.w < 0.5) return debugIndirect ? float4(0.0, 0.0, 0.0, 1.0) : base;
     float4 albedo = albedoBuffer.Load(pixel);
-    float3 normal = normalize(normalBuffer.Load(pixel).xyz);
-    float3 indirect = ProbeIrradiance(position.xyz, normal) * albedo.rgb;
-    indirect = BoundProbeIndirect(directLinear.rgb, indirect);
-    if (debugMode == 11) return float4(DisplayColor(indirect * 2.0), 1.0);
-    return float4(DisplayColor(directLinear.rgb + indirect), 1.0);
+    float4 normalAndMetallic = normalBuffer.Load(pixel);
+    float3 normal = normalize(normalAndMetallic.xyz);
+    float metallic = saturate(normalAndMetallic.a);
+    float3 indirect = 0.0;
+    if (probeParameters.z > 0.0 && metallic < 1.0)
+        indirect = ProbeIrradiance(position.xyz, normal) * albedo.rgb * (1.0 - metallic);
+    if (giHistory.w > 0.5)
+    {
+        float3 view = CameraViewDirection(position.xyz);
+        float3 f0 = lerp(0.04.xxx, albedo.rgb, metallic);
+        float3 fresnel = Fresnel(saturate(dot(normal, view)), f0);
+        SsgiSpatialResolve spatial = (SsgiSpatialResolve)0;
+        if (giHistory.w < 1.5)
+            spatial = SsgiResolveSpatial(pixel.xy, position.xyz, normal, albedo, metallic);
+        indirect += ResolveIndirectReflection(pixel.xy, position.xyz, normal, albedo,
+            metallic, view, fresnel, spatial.specular, spatial.specularMiss);
+    }
+    return float4(DisplayColor(debugIndirect ? indirect : base.rgb + indirect), 1.0);
 }
 
-float4 PSProbeLinear(FullscreenOutput input) : SV_TARGET
+struct GiLinearLightingOutput
+{
+    float4 bounceSource : SV_Target0;
+    float4 rasterBase : SV_Target1;
+};
+
+GiLinearLightingOutput PSProbeLinear(FullscreenOutput input)
 {
     int3 pixel = int3(int2(input.position.xy), 0);
     float4 position = positionBuffer.Load(pixel);
-    if (position.w < 0.5) return 0.0;
+    GiLinearLightingOutput output;
+    output.bounceSource = 0;
+    if (position.w < 0.5)
+    {
+        output.rasterBase = Background(input.uv);
+        return output;
+    }
     float4 albedo = albedoBuffer.Load(pixel);
-    float4 normal = normalBuffer.Load(pixel);
+    float4 normalMetal = normalBuffer.Load(pixel);
+    float3 normal = normalize(normalMetal.xyz);
+    float3 view = CameraViewDirection(position.xyz);
     Surface material = (Surface)0;
     material.albedo = albedo.rgb;
     material.roughness = albedo.a;
-    material.metallic = normal.a;
-    material.grid = 0;
-    return float4(Shade(position.xyz, normalize(normal.xyz), material, input.uv, false), 1.0);
-}
-
-struct ProbeDebugVertex
-{
-    float3 position : POSITION;
-    float3 normal : NORMAL;
-    float3 instancePosition : TEXCOORD1;
-    float2 atlas : TEXCOORD2;
-    float2 radius : TEXCOORD3;
-};
-
-struct ProbeDebugOutput
-{
-    float4 position : SV_POSITION;
-    float3 worldPosition : TEXCOORD0;
-    float3 worldNormal : TEXCOORD1;
-    float4 color : COLOR;
-};
-
-float3 ProbeMarkerLighting(float3 position, float3 normal)
-{
-    float3 lighting = 0.0;
-    // Directional term keeps the spheres readable even when the scene only has
-    // an environment/area light that is not represented in sceneLights.
-    float3 sunDirection = normalize(lightDirectionIntensity.xyz);
-    float sunNdl = saturate(dot(normal, sunDirection));
-    lighting += float3(0.7, 0.7, 0.7) * sunNdl * max(lightDirectionIntensity.w, 0.5);
-    [loop] for (uint index = 0; index < min((uint)lightInfo.x, 32u); ++index)
+    material.metallic = normalMetal.a;
+    float3 diffuse, specular;
+    float3 base = ShadeSurfaceContributions(position.xyz, normal, view, material, input.uv,
+        true, diffuse, specular);
+    if (giHistory.w > 0.5)
     {
-        SceneLight source = sceneLights[index];
-        [loop] for (uint sampleIndex = 0; sampleIndex < SceneLightSampleCount(source); ++sampleIndex)
-        {
-            SceneLightSample lightSample;
-            if (!SampleSceneLight(source, sampleIndex, position, lightSample)) continue;
-            float ndl = saturate(dot(normal, lightSample.direction));
-            lighting += lightSample.irradiance * ndl;
-        }
+        // SSR/DXR includes the environment on misses. Replace the raster environment reflection.
+        float3 f0 = lerp(0.04.xxx, material.albedo, material.metallic);
+        base -= Environment(reflect(-view, normal), material.roughness) *
+            Fresnel(saturate(dot(normal, view)), f0) * (1.0 - material.roughness * 0.45);
     }
-    lighting += Environment(normal, 1.0) * 0.35;
-    return lighting;
-}
-
-ProbeDebugOutput VSProbeDebug(ProbeDebugVertex input)
-{
-    ProbeDebugOutput output;
-    float3 worldPosition = input.instancePosition + input.position * input.radius.x;
-    float4 clip = mul(float4(worldPosition, 1.0), viewProjection);
-    if (clip.w <= 0.0001)
-    {
-        output.position = float4(2.0, 2.0, 2.0, 1.0);
-        output.worldPosition = worldPosition;
-        output.worldNormal = input.normal;
-        output.color = 0.0;
-        return output;
-    }
-    clip.z -= 0.0001 * clip.w;
-    output.position = clip;
-    output.worldPosition = worldPosition;
-    output.worldNormal = input.normal;
-    int2 probeCoordinate = int2(input.atlas);
-    int probeStride = probeLayout.x > 1.5 ? 9 : 4;
-    float4 probe = probeAtlasRead.Load(int3(probeCoordinate.x * probeStride, probeCoordinate.y, 0));
-    output.color = float4(saturate(probe.rgb), 1.0);
+    else base = ApplyRasterReflection(base, position.xyz, normal, view, material, input.uv, true);
+    output.rasterBase = float4(clamp(base, 0.0, 65504.0), 1);
+    output.bounceSource = float4(clamp(diffuse, 0.0, 65504.0), 1);
     return output;
 }
 
-float4 PSProbeDebug(ProbeDebugOutput input) : SV_TARGET
-{
-    float3 normal = normalize(input.worldNormal);
-    float3 lighting = ProbeMarkerLighting(input.worldPosition, normal);
-    // Keep the marker readable against dark scenes and show the key-light
-    // direction through a small specular highlight. Probe irradiance tints the
-    // otherwise neutral sphere.
-    float3 keyDirection = normalize(float3(0.35, 0.8, 0.45));
-    float keyNdl = saturate(dot(normal, keyDirection));
-    float3 viewDirection = normalize(cameraPosition.xyz - input.worldPosition);
-    float3 halfDirection = normalize(keyDirection + viewDirection);
-    float specular = pow(saturate(dot(normal, halfDirection)), 24.0) * 0.35;
-    float3 albedo = lerp(float3(0.5, 0.5, 0.5), saturate(input.color.rgb), 0.65);
-    float3 color = albedo * (0.35 + 0.65 * keyNdl) + albedo * lighting + specular;
-    return float4(saturate(color), 1.0);
-}
 #endif
 
 float4 PSDeferred(FullscreenOutput input) : SV_TARGET
@@ -1367,22 +908,10 @@ float4 PSDeferred(FullscreenOutput input) : SV_TARGET
 #if !defined(RAE_HARDWARE_RAYTRACING)
     if (debugMode == 11)
     {
-        if (probeParameters.x > 0.5)
-        {
-            // Hardware DDGI publishes a complete atlas before Deferred runs, so
-            // its debug view can resolve here. Software DDGI needs the current
-            // direct color as its trace source and is composited in
-            // PSProbeComposite instead.
-            if (probeParameters.w < 2.5)
-                return float4(saturate(ProbeIrradiance(position.xyz,
-                    normalBuffer.Load(pixel).xyz) * albedoBuffer.Load(pixel).rgb * 4.0), 1.0);
-        }
-        else if (giViewport.x > 0.5)
+        if (giViewport.x > 0.5)
             return float4(DisplayColor(indirectLightingBuffer.Load(pixel).rgb), 1.0);
-        // SSGI's trace consumes the direct-lit colour. Keep the normal direct
-        // output here; the composite pass replaces the final colour with the
-        // indirect-only debug result.
-        else if (giViewport.w < 0.5) return 0.0;
+        // DDGI and SSGI both produce their indirect-only view at composite.
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 #endif
     float4 albedo = albedoBuffer.Load(pixel);

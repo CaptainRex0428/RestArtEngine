@@ -101,6 +101,10 @@ struct FeatureCapabilities {
     // The pipeline exists but the last dispatch failed; the request is kept and
     // the raster image is retained until the user retries.
     bool hardwareFrameFailed = false;
+    std::string rasterGiBlockReason;
+    bool rasterGiHardwareExecuted = false;
+    bool rasterGiHardwareReflectionsExecuted = false;
+    bool rasterGiProbeGridExecuted = false;
     bool editorSelection = false;
     // Progressive path tracing resolves depth of field inside the path itself,
     // so the screen-space pass is skipped even though the lens asks for it.

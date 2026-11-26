@@ -593,6 +593,15 @@ void DiagnosticsPanel::drawProfiler(renderer::SceneRenderer& renderer) {
         }
         ImGui::EndTable();
     }
+    const auto gi = renderer.globalIlluminationStatus();
+    const auto dxr = renderer.hardwareTransportTiming();
+    if (dxr.frameId && ((dxr.probeUpdate && gi.usesHardwareProbeTrace) ||
+        (dxr.reflectionOnly && gi.usesHardwareReflections))) {
+        const char* work = dxr.probeUpdate && dxr.reflectionOnly ? "probes + reflections" :
+            dxr.probeUpdate ? "probes" : "reflections";
+        ImGui::TextWrapped("DXR %s | %.3f ms | GPU frame %llu", work, dxr.gpuMs,
+            static_cast<unsigned long long>(dxr.frameId));
+    }
     timingTable(frame.passes, false);
     switch (frame.gpuStatus) {
     case renderer::GpuTimingStatus::Ready:

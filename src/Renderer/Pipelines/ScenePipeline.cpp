@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 20> resourceNames{{
+constexpr std::array<ResourceName, 26> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -30,8 +30,14 @@ constexpr std::array<ResourceName, 20> resourceNames{{
     {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
     {PipelineResource::ScreenSpaceHistory, "ScreenSpaceHistory"},
     {PipelineResource::ProbeAtlas, "ProbeAtlas"},
-    {PipelineResource::ScreenSpaceDirectHistory, "ScreenSpaceDirectHistory"},
+    {PipelineResource::ProbeHistory, "Raw probe history"},
+    {PipelineResource::ProbeRayRadiance, "Probe ray radiance"},
     {PipelineResource::ScreenSpaceDirectCurrent, "ScreenSpaceDirectCurrent"},
+    {PipelineResource::MotionVectors, "MotionVectors"},
+    {PipelineResource::ProbeLinearRadiance, "Diffuse bounce source"},
+    {PipelineResource::ProbeDepthMoments, "Probe depth moments"},
+    {PipelineResource::ScreenSpaceRawSpecular, "Indirect specular"},
+    {PipelineResource::ScreenSpaceFilteredIndirect, "Filtered SSGI diffuse"},
     {PipelineResource::ScreenSpaceRawIndirect, "ScreenSpaceRawIndirect"},
 }};
 
@@ -42,9 +48,9 @@ bool isForwardOnly(RenderPassKind kind) noexcept {
 bool isDeferredOnly(RenderPassKind kind) noexcept {
     return kind == RenderPassKind::GBuffer || kind == RenderPassKind::DeferredLighting ||
         kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiSpecular ||
-        kind == RenderPassKind::ScreenSpaceGiComposite ||
-        kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
-        kind == RenderPassKind::ProbeFilter || kind == RenderPassKind::ProbeComposite;
+        kind == RenderPassKind::ScreenSpaceGiComposite || kind == RenderPassKind::ScreenSpaceDiffuseFilter ||
+        kind == RenderPassKind::ProbeRayTrace || kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
+        kind == RenderPassKind::ProbeSpatialFilter || kind == RenderPassKind::ProbeComposite;
 }
 
 } // namespace
@@ -71,11 +77,13 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::GBuffer: return "G-Buffer";
     case RenderPassKind::DeferredLighting: return "Deferred lighting";
     case RenderPassKind::ScreenSpaceGi: return "SSGI trace";
-    case RenderPassKind::ScreenSpaceGiSpecular: return "SSGI specular trace";
+    case RenderPassKind::ScreenSpaceGiSpecular: return "Screen-space reflections";
+    case RenderPassKind::ScreenSpaceDiffuseFilter: return "SSGI diffuse filter";
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeLinearSource: return "DDGI linear source";
+    case RenderPassKind::ProbeRayTrace: return "Screen-space probe rays";
+    case RenderPassKind::ProbeSpatialFilter: return "Filter screen probe SH";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
-    case RenderPassKind::ProbeFilter: return "DDGI probe filter";
     case RenderPassKind::ProbeComposite: return "DDGI composite";
     case RenderPassKind::ForwardBackground: return "Forward background";
     case RenderPassKind::ForwardGeometry: return "Forward geometry";
@@ -107,16 +115,16 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     if (inputs.rayTriangleScene) directLightingReads |= PipelineResource::RayTriangleScene;
     if (inputs.rasterShadowMap) directLightingReads |= PipelineResource::ShadowMap;
     if (inputs.realtimeIndirect) directLightingReads |= PipelineResource::IndirectLighting;
-    if (inputs.probeGridGi) directLightingReads |= PipelineResource::ProbeAtlas;
 
     if (inputs.rasterShadowMap)
         add(RenderPassKind::ShadowMap, "Shadow map",
             PipelineResource::None, PipelineResource::ShadowMap);
 
     if (inputs.hardwareTransport) {
-        PipelineResource writes = PipelineResource::HardwareImage;
+        PipelineResource writes = inputs.hardwareReflection || inputs.hardwareProbeGi
+            ? PipelineResource::None : PipelineResource::HardwareImage;
         if (inputs.realtimeIndirect) writes |= PipelineResource::IndirectLighting;
-        if (inputs.hardwareProbeGi) writes |= PipelineResource::ProbeAtlas;
+        if (inputs.hardwareProbeGi) writes |= PipelineResource::ProbeAtlas | PipelineResource::ProbeDepthMoments;
         if (inputs.hardwareReflection) writes |= PipelineResource::ScreenSpaceRawSpecular;
         add(RenderPassKind::HardwareTransport, "Hardware ray tracing transport",
             PipelineResource::None, writes);
@@ -128,44 +136,56 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
             PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | PipelineResource::SceneDepth |
                 PipelineResource::MotionVectors);
-        add(RenderPassKind::DeferredLighting, "Deferred lighting / debug",
-            PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                PipelineResource::GBufferPosition | directLightingReads,
-            rasterColor);
+        const auto shadingInputs = PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+            PipelineResource::GBufferPosition | directLightingReads;
         if (inputs.screenSpaceGi || inputs.probeGridGi)
-            add(RenderPassKind::ProbeLinearSource, "Linear direct source",
-                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition,
-                PipelineResource::ProbeLinearRadiance);
-        if (inputs.probeFallbackGi) {
-            add(RenderPassKind::ProbeUpdate, "SSGI probe fallback update",
-                PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                    PipelineResource::ProbeLinearRadiance,
-                PipelineResource::ProbeAtlas);
-            add(RenderPassKind::ProbeFilter, "SSGI probe fallback filter",
-                PipelineResource::ProbeAtlas,
+            add(RenderPassKind::ProbeLinearSource, "GI linear lighting", shadingInputs,
+                PipelineResource::ProbeLinearRadiance | PipelineResource::ScreenSpaceDirectCurrent);
+        else
+            add(RenderPassKind::DeferredLighting, "Deferred lighting / debug", shadingInputs, rasterColor);
+        if (inputs.probeFallbackGi || (inputs.probeGridGi && inputs.updateProbeGrid && !inputs.hardwareProbeGi)) {
+            add(RenderPassKind::ProbeRayTrace, "Screen-space probe rays",
+                PipelineResource::GBufferPosition | PipelineResource::GBufferNormal | PipelineResource::ProbeLinearRadiance,
+                PipelineResource::ProbeRayRadiance);
+            add(RenderPassKind::ProbeUpdate, "Project probe rays into SH",
+                PipelineResource::ProbeRayRadiance | PipelineResource::ProbeHistory, PipelineResource::ProbeHistory);
+            add(RenderPassKind::ProbeSpatialFilter, "Filter screen probe SH",
+                PipelineResource::ProbeHistory | PipelineResource::GBufferPosition | PipelineResource::GBufferNormal,
                 PipelineResource::ProbeAtlas);
         }
+        const bool filterDiffuse = inputs.probeFallbackGi && inputs.screenSpaceDiffuse;
         if (inputs.screenSpaceGi) {
             PipelineResource traceReads =
                 PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition | PipelineResource::ProbeLinearRadiance;
+            traceReads |= PipelineResource::MotionVectors | PipelineResource::ScreenSpaceHistory;
             if (inputs.probeFallbackGi) traceReads = traceReads | PipelineResource::ProbeAtlas;
             add(RenderPassKind::ScreenSpaceGi, "SSGI trace",
                 traceReads,
                 PipelineResource::ScreenSpaceRawIndirect);
-            if (inputs.screenSpaceSpecular)
-                add(RenderPassKind::ScreenSpaceGiSpecular, "SSGI specular trace",
-                    PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                        PipelineResource::GBufferPosition | PipelineResource::GBufferAlbedo |
-                        PipelineResource::ProbeLinearRadiance,
-                    PipelineResource::ScreenSpaceRawSpecular);
+            if (filterDiffuse)
+                add(RenderPassKind::ScreenSpaceDiffuseFilter, "SSGI diffuse filter",
+                    PipelineResource::ScreenSpaceRawIndirect | PipelineResource::GBufferNormal | PipelineResource::GBufferPosition,
+                    PipelineResource::ScreenSpaceFilteredIndirect);
+        }
+        if (inputs.screenSpaceSpecular) {
+            const auto source = inputs.probeGridGi ? PipelineResource::ScreenSpaceDirectCurrent :
+                PipelineResource::ProbeLinearRadiance;
+            add(RenderPassKind::ScreenSpaceGiSpecular, "Screen-space reflections",
+                PipelineResource::GBufferNormal | PipelineResource::GBufferPosition |
+                    PipelineResource::GBufferAlbedo | source |
+                    (inputs.probeFallbackGi ? PipelineResource::ProbeAtlas : PipelineResource::None),
+                PipelineResource::ScreenSpaceRawSpecular);
+        }
+        if (inputs.screenSpaceGi) {
             PipelineResource compositeReads =
-                PipelineResource::ProbeLinearRadiance | PipelineResource::ScreenSpaceRawIndirect |
+                PipelineResource::ScreenSpaceDirectCurrent |
+                (filterDiffuse ? PipelineResource::ScreenSpaceFilteredIndirect : PipelineResource::ScreenSpaceRawIndirect) |
                 PipelineResource::ScreenSpaceHistory | PipelineResource::SceneDepth |
                 PipelineResource::MotionVectors |
                 PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
                 PipelineResource::GBufferPosition;
+            if (inputs.probeFallbackGi) compositeReads |= PipelineResource::ProbeAtlas;
             if (inputs.screenSpaceSpecular || inputs.hardwareReflection)
                 compositeReads = compositeReads | PipelineResource::ScreenSpaceRawSpecular;
             add(RenderPassKind::ScreenSpaceGiComposite, "SSGI composite",
@@ -173,20 +193,14 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                 rasterColor | PipelineResource::ScreenSpaceHistory);
         }
         if (inputs.probeGridGi) {
-            if (!inputs.hardwareTransport)
-                add(RenderPassKind::ProbeUpdate, "DDGI probe update",
-                    PipelineResource::SceneDepth | PipelineResource::GBufferNormal |
-                        PipelineResource::ProbeLinearRadiance,
-                    PipelineResource::ProbeAtlas);
-            add(RenderPassKind::ProbeFilter, "DDGI probe filter",
-                PipelineResource::ProbeAtlas,
-                PipelineResource::ProbeAtlas);
-            add(RenderPassKind::ProbeComposite, "DDGI composite",
-                PipelineResource::ProbeAtlas | PipelineResource::ProbeLinearRadiance |
-                    PipelineResource::ScreenSpaceDirectCurrent |
-                    PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
-                    PipelineResource::GBufferPosition,
-                rasterColor);
+            auto compositeReads = PipelineResource::ScreenSpaceDirectCurrent |
+                PipelineResource::GBufferAlbedo | PipelineResource::GBufferNormal |
+                PipelineResource::GBufferPosition;
+            if (inputs.updateProbeGrid) compositeReads |= PipelineResource::ProbeAtlas;
+            if (inputs.hardwareProbeGi) compositeReads |= PipelineResource::ProbeDepthMoments;
+            if (inputs.screenSpaceSpecular || inputs.hardwareReflection)
+                compositeReads |= PipelineResource::ScreenSpaceRawSpecular;
+            add(RenderPassKind::ProbeComposite, "DDGI composite", compositeReads, rasterColor);
         }
     } else {
         // The background writes the first colour; geometry draws on top of it,
@@ -199,8 +213,8 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
     }
 
     // A resolved hardware image replaces the raster colour after lighting.
-    // DDGI hardware transport only publishes the probe atlas; the raster scene
-    // still owns the colour image.
+    // DDGI and SSGI consume hardware probe or reflection resources in their
+    // raster composite, while a resolved path-traced image replaces raster colour.
     if (inputs.hardwareTransport && !inputs.hardwareProbeGi && !inputs.hardwareReflection &&
         !inputs.screenSpaceGi)
         add(RenderPassKind::HardwareResolve, "Hardware image resolve",
@@ -230,7 +244,7 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
             PipelineResource::SceneColor);
     }
 
-    if (inputs.giDebugProbes) {
+    if (inputs.giDebugProbes && inputs.updateProbeGrid) {
         add(RenderPassKind::GiDebugOverlay, "GI probe debug overlay",
             PipelineResource::SceneDepth | PipelineResource::ProbeAtlas,
             PipelineResource::SceneColor);
@@ -305,6 +319,7 @@ PipelineValidation validatePipeline(const RenderPipeline& pipeline) {
         }
         switch (pass.kind) {
         case RenderPassKind::GBuffer: hasGBuffer = true; break;
+        case RenderPassKind::ProbeLinearSource:
         case RenderPassKind::DeferredLighting: hasDeferredLighting = true; break;
         case RenderPassKind::ForwardBackground: hasForwardBackground = true; break;
         case RenderPassKind::ForwardGeometry: hasForwardGeometry = true; break;

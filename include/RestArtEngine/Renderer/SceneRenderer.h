@@ -90,6 +90,7 @@ struct SceneSettings {
     // 5..10: Roughness, Metallic, Specular F0, Linear depth (0..100m),
     // Direct diffuse, Direct specular. Data modes bypass exposure/tone mapping.
     int debugView = 0;
+    int giDebugExposureEv = 0; // Display-only stops in the raster GI indirect view.
     // Pixels in the selected render target, not desktop/window coordinates.
     // An external editor Scene Viewport starts at (0,0) in its scene texture.
     int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
@@ -257,6 +258,7 @@ public:
     void setDiagnosticsEnabled(bool enabled);
     [[nodiscard]] bool diagnosticsEnabled() const;
     [[nodiscard]] const RenderDiagnosticsFrame& diagnosticsFrame() const;
+    [[nodiscard]] HardwareTransportTiming hardwareTransportTiming() const;
     // Ordered pass declaration and three-layer feature policy for the latest
     // main-scene frame. Tool previews never replace either snapshot.
     [[nodiscard]] const RenderPipeline& activePipeline() const;

@@ -6,6 +6,51 @@ namespace rae::editor {
 
 enum class ProjectRenderingEdit { Backend, HardwareRayTracing, GiMethod, GiMode };
 
+[[nodiscard]] inline const char* giMethodLabel(renderer::GlobalIlluminationMethod method) noexcept {
+    using enum renderer::GlobalIlluminationMethod;
+    switch (method) {
+    case Disabled: return "Off";
+    case PathTracing: return "Path tracing";
+    case ScreenSpace: return "SSGI";
+    case ProbeGrid: return "DDGI";
+    }
+    return "Off";
+}
+
+[[nodiscard]] inline const char* giQualityLabel(renderer::GlobalIlluminationQuality quality) noexcept {
+    using enum renderer::GlobalIlluminationQuality;
+    switch (quality) {
+    case Custom: return "Custom";
+    case Low: return "Low";
+    case Medium: return "Medium";
+    case High: return "High";
+    }
+    return "Custom";
+}
+
+[[nodiscard]] inline const char* giExecutionLabel(const renderer::GlobalIlluminationStatus& status) noexcept {
+    using enum renderer::GlobalIlluminationMethod;
+    if (status.effective == ProbeGrid) {
+        if (status.usesHardwareProbeTrace) return "DDGI (DXR probes)";
+        if (status.usesScreenSpaceProbes) return "DDGI (screen-space probes)";
+        return "DDGI (reflections only)";
+    }
+    if (status.effective == ScreenSpace && status.usesHardwareReflections)
+        return "SSGI + DXR reflections";
+    return giMethodLabel(status.effective);
+}
+
+[[nodiscard]] inline const char* rasterReflectionLabel(const renderer::GlobalIlluminationStatus& status) noexcept {
+    if (status.usesHardwareReflections) return "DXR";
+    if (status.usesScreenSpaceReflections) return "Screen space (SSR)";
+    return "Off";
+}
+
+[[nodiscard]] inline bool hasActiveRasterGiQuality(const renderer::GlobalIlluminationStatus& status) noexcept {
+    return status.effective == renderer::GlobalIlluminationMethod::ScreenSpace ||
+        status.usesHardwareProbeTrace || status.usesScreenSpaceProbes;
+}
+
 // These are current build capabilities, not a probe of the user's adapter.
 // Apply dependencies only after an explicit edit, never while loading a project.
 // Native D3D12 now owns a DXR path; the adapter check happens at runtime.

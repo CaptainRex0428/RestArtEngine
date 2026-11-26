@@ -62,12 +62,15 @@ enum class PipelineResource : std::uint64_t {
     PreviousAntiAliasingHistory = 1ull << 14,
     ScreenSpaceHistory = 1ull << 15,
     ProbeAtlas = 1ull << 16,
-    ScreenSpaceDirectHistory = 1ull << 17,
+    ProbeRayRadiance = 1ull << 17,
     ScreenSpaceDirectCurrent = 1ull << 18,
     ScreenSpaceRawIndirect = 1ull << 19,
     ProbeLinearRadiance = 1ull << 20,
     MotionVectors = 1ull << 21,
     ScreenSpaceRawSpecular = 1ull << 22,
+    ProbeDepthMoments = 1ull << 23,
+    ProbeHistory = 1ull << 24,
+    ScreenSpaceFilteredIndirect = 1ull << 25,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -100,8 +103,8 @@ enum class RenderPassKind : std::uint8_t {
     ScreenSpaceGiSpecular,
     ScreenSpaceGiComposite,
     ProbeLinearSource,
+    ProbeRayTrace,
     ProbeUpdate,
-    ProbeFilter,
     ProbeComposite,
     ForwardBackground,
     ForwardGeometry,
@@ -113,6 +116,8 @@ enum class RenderPassKind : std::uint8_t {
     SelectionComposite,
     GiDebugOverlay,
     FrameCapture,
+    ProbeSpatialFilter,
+    ScreenSpaceDiffuseFilter,
 };
 
 struct RenderPassDeclaration {
@@ -144,7 +149,10 @@ struct PipelineBuildInputs {
     bool screenSpaceSpecular = false;
     bool hardwareReflection = false;
     bool probeFallbackGi = false;
+    bool screenSpaceDiffuse = true;
     bool probeGridGi = false;
+    // Probe-grid composition also supports a reflection-only frame.
+    bool updateProbeGrid = true;
     bool giDebugProbes = false;
     bool depthOfField = false;
     bool antiAliasing = false;
@@ -158,8 +166,7 @@ struct PipelineBuildInputs {
 // input instead of demanding a producer pass.
 inline constexpr PipelineResource pipelineFrameInputs = PipelineResource::RayTriangleScene |
     PipelineResource::PreviousAntiAliasingHistory | PipelineResource::ScreenSpaceHistory |
-    PipelineResource::ScreenSpaceDirectHistory | PipelineResource::ScreenSpaceDirectCurrent |
-    PipelineResource::ProbeAtlas;
+    PipelineResource::ProbeHistory;
 
 [[nodiscard]] RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs);
 

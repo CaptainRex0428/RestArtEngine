@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <commdlg.h>
 #include <RestArtEngine/Editor/SceneEditor.h>
+#include <RestArtEngine/Editor/ProjectSettingsRules.h>
 #include <RestArtEngine/Assets/AssetFile.h>
 #include <RestArtEngine/Assets/AssetOperations.h>
 #include <RestArtEngine/ImGui/EditorTheme.h>
@@ -3382,7 +3383,7 @@ void SceneEditor::drawMaterial() {
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write this material's depth for later geometry. The preference is retained while ZTest is Off.");
     if (!materialDraft_.hardwareDepthCompatible())
-        ImGui::TextWrapped("Hardware ray tracing and GI require ZTest Less or Less equal with ZWrite enabled.");
+        ImGui::TextWrapped("DXR scene effects require ZTest Less or Less equal with ZWrite enabled.");
     ImGui::EndDisabled();
     ImGui::TextDisabled("Project shared shader: %s", pathText(project_.shaderRoot / "Materials/Standard.hlsli").c_str());
     if (pendingMaterial_) {
@@ -3679,43 +3680,62 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
         ImGui::SameLine(); capture |= ImGui::Button("Screenshot");
         ImGui::SameLine();
         {
-            // Hardware activity alone does not imply that indirect lighting is on.
-            // Keep the actual GI state ahead of the long device/FPS text so it is
-            // visible in narrow layouts. This entry only opens the existing settings.
             const auto giStatus = renderer.globalIlluminationStatus();
-            const bool giRequested = settings.globalIllumination.method != renderer::GlobalIlluminationMethod::Disabled;
+            const auto& gi = settings.globalIllumination;
+            const bool giRequested = gi.method != renderer::GlobalIlluminationMethod::Disabled;
+            const bool ssgiRequested = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace;
+            const bool ddgiRequested = gi.method == renderer::GlobalIlluminationMethod::ProbeGrid;
+            const bool realtimeRaster = ssgiRequested || ddgiRequested;
+            const bool pathRequested = gi.method == renderer::GlobalIlluminationMethod::PathTracing;
             const bool hardwareActive = settings.hardwareRayTracing && renderer.hardwareRayTracingActive();
-            const bool giEffective = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
+            const bool giEffective = giRequested && giStatus.effective == gi.method;
+            const bool indirectView = settings.debugView == 11 &&
+                (realtimeRaster || (pathRequested && gi.mode == renderer::GlobalIlluminationMode::Realtime));
+            const bool probeView = settings.debugView == 12 && ddgiRequested;
             std::string giLabel = "GI: Off";
             if (giRequested) {
-                if (settings.debugView == 11 || settings.debugView == 12) giLabel = "GI: Debug";
-                else if (!hardwareActive && settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing) giLabel = "GI: Inactive";
-                else if (settings.debugView != 0) giLabel = "GI: Paused";
+                if (pathRequested && !hardwareActive) giLabel = "GI: Inactive";
+                else if (settings.debugView != 0 && !indirectView && !probeView) giLabel = "GI: Paused";
                 else if (!giEffective) giLabel = "GI: Inactive";
+                else if (ssgiRequested) giLabel = giStatus.usesHardwareReflections ? "GI: SSGI + DXR" : "GI: SSGI";
+                else if (ddgiRequested) giLabel = "GI: DDGI";
                 else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
                 else giLabel = "GI: Progressive " + std::to_string(giStatus.accumulatedSamples) + "/" +
                     std::to_string(giStatus.targetSamples);
+                if (giEffective && indirectView) giLabel += " (indirect)";
+                if (giEffective && probeView) giLabel += " (probes)";
             }
             if (ImGui::SmallButton((giLabel + "###GIStatus").c_str())) showProjectSettings();
             if (ImGui::IsItemHovered()) {
                 ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
                 ImGui::TextUnformatted(giLabel.c_str());
                 ImGui::TextUnformatted("Click to open Project Settings.");
                 if (!giRequested) {
                     ImGui::TextUnformatted("Hardware preview has no diffuse color bleeding.");
                 } else {
-                    ImGui::Text("Requested mode: %s", settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
-                        ? "Realtime" : "Progressive accumulation");
-                    ImGui::Text("Requested indirect diffuse: %s", settings.globalIllumination.indirectDiffuse ? "On" : "Off");
-                    ImGui::Text("Requested indirect specular: %s", settings.globalIllumination.indirectSpecular ? "On" : "Off");
-                    if (!settings.globalIllumination.indirectDiffuse)
+                    ImGui::Text("Requested: %s / %s", giMethodLabel(gi.method),
+                        realtimeRaster || gi.mode == renderer::GlobalIlluminationMode::Realtime
+                            ? "Realtime" : "Progressive accumulation");
+                    if (realtimeRaster) ImGui::Text("Requested quality: %s",
+                        giQualityLabel(ssgiRequested ? gi.screenSpaceQuality : gi.probeQuality));
+                    if (giEffective) {
+                        ImGui::Text("Last scene frame: %s", giExecutionLabel(giStatus));
+                        if (realtimeRaster) {
+                            if (hasActiveRasterGiQuality(giStatus))
+                                ImGui::Text("Active quality: %s", giQualityLabel(giStatus.effectiveQuality));
+                            ImGui::Text("Scene reflections: %s", rasterReflectionLabel(giStatus));
+                        }
+                    }
+                    ImGui::Text("Requested indirect diffuse: %s", gi.indirectDiffuse ? "On" : "Off");
+                    ImGui::Text("Requested indirect specular: %s", gi.indirectSpecular ? "On" : "Off");
+                    if (!gi.indirectDiffuse)
                         ImGui::TextUnformatted("Diffuse color bleeding is disabled at the receiving surface.");
-                    if (!settings.hardwareRayTracing)
-                        ImGui::TextUnformatted("GI is inactive because hardware ray tracing is disabled.");
-                    else if (hardwareActive && settings.debugView != 0)
-                        ImGui::TextUnformatted("GI sampling is paused in this viewport debug mode.");
+                    if (indirectView) ImGui::TextUnformatted("The viewport shows indirect lighting only.");
+                    if (probeView) ImGui::TextUnformatted("The viewport shows the scene with DDGI probe markers.");
                     if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
                 }
+                ImGui::PopTextWrapPos();
                 ImGui::EndTooltip();
             }
         }
@@ -3778,11 +3798,16 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             "Linear depth: positive view-space Z; black 0 m, white 100 m (clamped).",
             "Direct diffuse: direct-light diffuse contribution with current exposure and tone mapping; excludes ambient and reflections.",
             "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections.",
-            "GI indirect: the active realtime GI algorithm's indirect contribution (SSGI/DDGI or path-traced indirect).",
-            "GI probes: scene colour plus real shaded DDGI probe spheres sampled from the engine sphere mesh; sphere tint comes from the probe irradiance and shading shows the light direction."
+            "GI indirect displays the active realtime method's bounced light by itself. Switch to Lit to see the combined result.",
+            "GI probes overlays the DDGI grid on the lit scene. The probe tint shows gathered light."
         };
         const int mode = std::clamp(settings.debugView, 0, static_cast<int>(std::size(legends)) - 1);
         ImGui::TextWrapped("%s", legends[mode]);
+        if (mode == 11 || mode == 12) {
+            const auto giStatus = renderer.globalIlluminationStatus();
+            if (giStatus.effective == renderer::GlobalIlluminationMethod::Disabled)
+                ImGui::TextWrapped("This view needs an active realtime GI method. DDGI probe markers require DDGI.");
+        }
         ImGui::TextWrapped("Data views inspect renderer values; editor display settings do not change material assets.");
         ImGui::Checkbox("VSync", &vsync);
         bool quadLayout = quadView_;
