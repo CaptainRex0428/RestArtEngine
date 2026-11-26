@@ -1,6 +1,6 @@
 # 硬件光线追踪
 
-项目通过 `Project → Project Settings... → Rendering` 配置硬件光追，F3 打开配置窗口。`Hardware ray tracing` 是总开关；`GI method` 选择 Disabled／Path tracing，`GI mode` 独立选择 Progressive accumulation／Realtime，两个间接光贡献开关独立控制漫反射与反射。采样及历史规则见 [GlobalIllumination](GlobalIllumination.md)。参数自动更新；`Save project settings` 或 `Save All` 将请求值写入当前 `.raproject`。关闭程序时未保存配置参与现有保存提示。
+项目通过 `Project → Project Settings... → Rendering` 配置硬件光追，F3 打开配置窗口。打开 `Hardware ray tracing` 后，`GI method` 决定硬件工作。Disabled 可使用硬件反射预览，Path tracing 有 Progressive accumulation／Realtime 两种模式，SSGI 和 DDGI 在 Deferred 中可各自使用 DXR 镜面。DDGI 的漫反射探针也可用 DXR 更新。参数自动更新，`Save project settings` 或 `Save All` 将请求值写入当前 `.raproject`。关闭程序时未保存配置参与现有保存提示。采样及历史规则见 [全局光照](GlobalIllumination.md)。
 
 配置页分别显示设备支持、请求值、实际状态及不可用原因。不支持的设备保留项目请求值，使用现有渲染路径；运行失败保留光栅画面，关闭再开启可重试。解析式反射移到同页的 `Compatibility preview`，是会话设置，不能代表硬件光追。
 
@@ -34,7 +34,7 @@
 }
 ```
 
-硬件总开关、预览效果与 GI 贡献字段必须为布尔值。GI 算法为 `disabled`／`pathTracing`，更新模式为 `progressive`／`realtime`，采样和反弹数为范围内整数。旧 GI 对象缺少模式及贡献字段时按渐进、两项贡献均开启读取。保存只更新对应键，保留其他项目字段和未知嵌套键，经同目录临时文件完整写入后原子替换；失败保留原 manifest。保存的是用户意图，不能根据当前 GPU 自动改写。
+硬件总开关、预览效果与 GI 贡献字段必须为布尔值。GI 算法为 `disabled`／`pathTracing`／`screenSpace`／`probeGrid`，路径追踪模式为 `progressive`／`realtime`，采样和反弹数为范围内整数。旧 GI 对象缺少模式及贡献字段时按渐进、两项贡献均开启读取。保存只更新对应键，保留其他项目字段和未知嵌套键，经同目录临时文件完整写入后原子替换；失败保留原 manifest。保存的是用户意图，不能根据当前 GPU 自动改写。
 
 ## 渲染实现与边界
 
@@ -50,11 +50,13 @@ Windows 实现位于 `src/Renderer/D3D12/HardwareRayTracing.*`，在现有 DX11 
 
 两条 API 通过双向 fence 排序共享图像读写。CPU 在重用命令 allocator 和上传资源前等待上一份 DX12 提交；队列间使用 Signal／Wait，超时及设备移除返回诊断。内部累积与引导图像保持 FP32，实时共享输出使用 FP16 并限制有限值范围。按视口分配的图像合计 60 字节／像素，4K 约 475 MiB，另有场景及加速结构开销；不能承诺固定 FPS。
 
-这是 Windows 上 DX11 编辑器与同适配器 DX12 DXR 1.1 通道的具体组合，尚未实现完整 DX12 场景后端切换。Vulkan、OpenGL、Linux、macOS 的硬件光追尚未实现。当前不包含透明／alpha-test 几何、蒙皮加速结构或运动重投影。
+DXR 通道可在 Windows 的原生 D3D12 和 D3D11 + DXR 混合后端运行。硬件追踪覆盖不透明静态网格及其 Actor 变换。Vulkan、OpenGL、Linux、macOS 的硬件光追尚未实现。
 
 Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到上限仍继续更新；场景或相机变化使历史整体重置。实时解析采用 5×5 几何／材质边缘感知空间滤波，粗糙度小于 0.12 的近镜面表面不做空间模糊。Progressive 仍按目标样本停止，当前没有该模式的降噪器。
 
-`Ray-traced reflections` 仅用于 GI Disabled；GI 启用后采用独立 `Indirect specular` 请求。`Ray-traced shadows` 决定硬件预览／Progressive 的灯光遮挡，并与每灯 Cast shadows、Scene 的全局 Disabled 共同生效。Realtime 主直接光沿用光栅设置：首个投影方向光可用 PCF／PCSS／CSM，局部及附加方向光的直接阴影需 Analytic rays。GI 两个贡献开关只分类第一接收表面的 BRDF，次级表面保留完整光传输，因此漫反射 GI 仍可出现在镜面里。
+`Ray-traced reflections` 控制硬件预览，也会在 SSGI 或 DDGI 开启 `Indirect specular` 时把镜面后端选为 DXR。DDGI 可同时执行 DXR 探针与 DXR 镜面，关闭该反射选项可继续使用 DXR 探针并切回 SSR。DDGI 仅启用镜面时只提交反射 dispatch；两个阶段同时启用时共用场景加速结构和提交，分别写入 HDR 镜面结果与探针 SH、距离矩。Deferred 合成读取启用的输出。
+
+`Ray-traced shadows` 控制硬件预览、渐进路径追踪及 DXR 探针的光源遮挡。独立 DXR 镜面的命中着色与实时路径追踪的次级光照按光源检查可见性，场景全局阴影 Disabled 可关闭这些测试。Deferred 和实时路径追踪的主表面直接光沿用光栅阴影。路径追踪的两个间接贡献开关只分类第一接收表面的 BRDF，次级表面保留完整光传输，因此漫反射 GI 仍可出现在路径追踪的镜面里。SSGI／DDGI 的 DXR 镜面只计算一次物体倒影，具体限制见[实时镜面反射](GlobalIllumination.md#实时镜面反射)。
 
 ## Shader 与数据契约
 
@@ -78,13 +80,18 @@ Realtime 每帧持续采样，以 `History samples` 限制历史权重，达到�
 | u0 | RGBA8 硬件输出。 |
 | u1 | 非共享 RGBA32_FLOAT 线性 HDR 样本均值。 |
 | u2 | 非共享 RGBA32_FLOAT 主表面法线与射线距离引导。 |
-| u3 | 共享 RGBA16_FLOAT 实时间接光输出。 |
+| u3 | RGBA16_FLOAT 实时间接光，或光栅 GI 所用的镜面入射辐射与命中权重。混合后端共享该纹理。 |
 | u4 | 非共享 RGBA32_FLOAT 主表面 albedo 与粗糙度引导。 |
 | u5 | 时域重建间接光写入历史（RGBA16_FLOAT）。 |
 | u6 | 时域重建几何写入历史（RGBA32_FLOAT）。 |
 | u7 | 主表面上一帧世界位置（RGBA32_FLOAT；w=0 表示背景），用于逐物体重投影。 |
 | u8 | 当前帧 ReSTIR 间接 reservoir 写入（RGBA32_FLOAT）。 |
 | u9 | 当前帧 ReSTIR 直接光 reservoir 写入（RGBA32_FLOAT）。 |
+| b9 | DXR 探针布局、起点、单元尺寸及更新参数。 |
+| t16／t17 | 上一帧的探针 SH 与距离矩。 |
+| u10／u11 | 当前帧的探针 SH 与距离矩。 |
+
+Deferred 镜面合成在 PS t21 读取 u3 的反射副本，依据 alpha 补充未命中的环境光。探针合成在 PS t14、t20 分别读取 SH 和方向距离矩。这样组合两条 DXR 路径时能保留同帧的镜面与探针结果。
 
 DX11 光照入口另使用 b6 的 16 字节 `GlobalIlluminationConstants` 和 t9 的共享间接光 SRV。实时采样完成后执行独立解析 Dispatch，使空间滤波只读取已完成的历史与引导；UAV barrier 及共享 fence 保护阶段和 API 之间的依赖。`Temporal + spatial` 在同一解析 Dispatch 内用上一帧 ViewProjection 与 u7 的主表面上一帧世界位置做相机/逐物体重投影，读取 t12/t13，写 u3 与 u5/u6，随后在 DXR 队列内 `CopyResource` 到固定读取历史，避免每帧换 descriptor；重建历史键不包含相机位姿和 Actor 世界矩阵，拓扑／材质／光照变化才重置。ReSTIR 间接 reservoir 使用 t14 读取上一帧估计、u8 写入当前估计；直接光 reservoir 使用 t15/u9；trace pass 后用同一 `CopyResource` 模式回读。两者都通过主表面上一帧世界位置与上一帧 ViewProjection 做时域重投影，仍无空间 reuse。
 

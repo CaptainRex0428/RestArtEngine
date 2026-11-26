@@ -285,7 +285,11 @@ F2 切换 Forward / Deferred；F3 打开项目配置；F1 隐藏 / 显示面板�
 
 同页 `Anti-aliasing` 提供 Off、FXAA、TAA，旧工程默认 FXAA。FXAA 在当前图像上平滑边缘，TAA 结合投影抖动与历史帧改善细小轮廓的稳定性。TAA 的 `Current frame weight` 越低越偏向稳定，越高越快响应运动和光照变化；拖动后实时生效。界面显示请求方案、实际方案、TAA 历史帧数及降级原因，保存与其他工程渲染配置一致。配置格式见 [工程管理](ProjectManagement.md#抗锯齿配置)。
 
-同页 `GI method` 可选 Disabled／Path tracing／Screen space (SSGI)。Path tracing 开启硬件依赖，`GI mode` 独立选择 Progressive accumulation 或 Realtime；SSGI 不依赖 DXR、固定实时且只支持 Deferred，Forward 会显示不可用。`Indirect diffuse (color bleeding)` 与 `Indirect specular (reflections)` 分别控制颜色传递和间接反射，直接光保持独立。实时路径模式持续采样并将间接光交给 Forward／Deferred，`History samples` 限制路径样本权重；渐进模式到 `Target samples` 停止。每帧样本、反弹数和贡献开关立即生效，Restart accumulation 可重建历史；曝光不重置累积。实时模式的 `Denoiser` 可选 Off／Spatial／Temporal+spatial，`Motion vectors` 可选 Camera only／Per object／Automatic，`Denoise iterations` 控制多尺度空间滤波轮数（1–4）；`Sampling` 可选 Uniform／ReSTIR，后者显示候选数及 direct/indirect/spatial reuse 开关。当前 temporal 已接入相机与逐物体重投影（上一帧世界位置 + ViewProjection），状态区会显示实际降噪和运动向量；ReSTIR 使用独立 reservoir 历史做时域/邻域复用。SSGI 另有 `SSGI steps`／`SSGI radius`／`SSGI thickness` 控制屏幕追踪，使用上一帧已着色颜色，首帧和 resize 后重新积累。`Probe grid (DDGI)` 提供 `Probe grid X/Y/Z`、`Probe spacing`、`Probe hysteresis`，在相机目标附近更新动态 probe atlas；它同样只支持 Deferred 且首帧后生效。完整行为和项目字段见 [全局光照](GlobalIllumination.md)。
+同页 `GI method` 提供 Disabled、Path tracing、Screen space (SSGI)、Probe grid (DDGI)。Path tracing 依赖硬件光追，可选渐进积累或实时模式，并独立配置反弹数、采样、降噪及 ReSTIR。SSGI 和 DDGI 使用 Deferred，可在 Low、Medium、High、Custom 间实时切换。自定义参数在切换预设后保留；保存项目设置可带到下次启动。
+
+在 F3 的 Rendering 页选 `Probe grid (DDGI)`，开启 `Indirect diffuse (color bleeding)` 和 `Indirect specular (reflections)` 可同时看到探针互染和金属倒影。支持 DXR 时，打开 `Hardware ray tracing` 与 `Ray-traced reflections` 可反射屏幕外的物体。只关闭 `Ray-traced reflections` 时，探针仍可使用 DXR，镜面改用 SSR。SSR 参数 `SSR distance`、`SSR steps` 和 `SSR thickness` 分别默认 2 m、8 步和 0.2 m。
+
+用 `GI indirect` 查看间接光，关闭漫反射可单独观察倒影，关闭镜面可单独观察互染。`Indirect view EV` 临时放大微弱贡献，回到 Lit 时恢复场景曝光。DDGI 的 `GI probes` 视图叠加按实际辐照度着色的探针，暂时隐藏镜面贡献。项目设置显示上一主视口帧的实际算法以及探针和反射路径。完整行为和各档预算见[全局光照](GlobalIllumination.md#实时镜面反射)。
 
 解析光追同时追踪内置 Sphere / Plane / Cube 与通用 MeshAsset。前 32 个内置对象使用精确解析求交，超出的内置对象、OBJ 和未来网格类型通过结构化三角形缓冲参与环境反射、相互反射和阴影。通用路径不设置引擎层三角形预算，实际可用范围取决于 D3D11 资源创建和显存。它仍是 GPU 解析求交，不是 DXR。
 

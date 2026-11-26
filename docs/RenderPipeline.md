@@ -67,11 +67,13 @@
 | `SelectionMask` | 编辑器描边遮罩（可见 / 遮挡双通道） | 描边遮罩 Pass |
 | `DepthOfFieldSource` | 景深 Pass 的内部源色副本 | 景深 Pass |
 | `FrameCapture` | 帧检查器快照 | 捕获 Pass |
-| `ScreenSpaceHistory` | 上一帧降噪后的 SSGI indirect 历史 | SSGI composite |
-| `ScreenSpaceDirectHistory` | 上一帧 direct-lit colour，供 SSGI trace 采样 | **帧开始前**由上一帧复制，属于外部输入 |
-| `ScreenSpaceDirectCurrent` | 当前帧 direct-lit colour 副本 | **SSGI trace 前**复制，属于外部输入 |
-| `ScreenSpaceRawIndirect` | 当前帧 SSGI trace 的 raw indirect | SSGI trace |
-| `ProbeAtlas` | DDGI 动态 probe 辐照度 atlas（RGBA16F 2D） | DDGI probe update Pass |
+| `ScreenSpaceHistory` | 未乘显示增益的漫反射历史与重投影深度 | SSGI composite，跨帧双缓冲 |
+| `ScreenSpaceDirectCurrent`、`ProbeLinearRadiance` | 当前帧线性光栅基底与可反弹的直接漫反射 | GI linear lighting 的两张 HDR 输出 |
+| `MotionVectors` | 接收面的上帧世界坐标 | GBuffer |
+| `ScreenSpaceRawIndirect` | 半分辨率漫反射追踪结果 | SSGI trace |
+| `ScreenSpaceRawSpecular` | HDR 反射辐射与命中权重，SSR 为半分辨率、DXR 为全分辨率 | Screen-space reflections 或 Hardware ray tracing transport |
+| `ProbeRayRadiance` | 软件探针的每探针／每射线辐射度 | Screen-space probe rays |
+| `ProbeAtlas`、`ProbeDepthMoments` | 带符号 SH 和 DXR 六方向距离矩 | 软件 SH 投影或 DXR probe transport，距离矩只由 DXR 写入 |
 
 几个刻意的取舍：
 
@@ -91,17 +93,17 @@
 | # | Pass | 存在条件 | 读 | 写 |
 | --- | --- | --- | --- | --- |
 | 1 | `Shadow map` | 光栅阴影方案且方向光需要阴影 | — | `ShadowMap` |
-| 2 | `Hardware ray tracing transport` | DXR 本帧执行 | — | `HardwareImage`（+ 实时模式 `IndirectLighting`） |
-| 3 | `GBuffer` | 总是 | — | 三张 G-buffer + `SceneDepth` |
-| 4 | `Deferred lighting / debug` | 总是 | 三张 G-buffer + 可选 `ShadowMap` / `RayTriangleScene` / `IndirectLighting` / `ProbeAtlas` | `SceneColor` |
-| 5 | `SSGI trace` | SSGI 请求且 Deferred 执行 | `SceneDepth`、`GBufferNormal/Position`、`ScreenSpaceDirectHistory` | `ScreenSpaceRawIndirect` |
-| 6 | `SSGI composite` | 同上 | `ScreenSpaceDirectCurrent`、`ScreenSpaceRawIndirect`、`ScreenSpaceHistory`、G-buffer | `SceneColor`、`ScreenSpaceHistory` |
-| 7 | `DDGI probe update` | DDGI 请求且 Deferred 执行 | `SceneColor`、`SceneDepth`、`GBufferNormal` | `ProbeAtlas` |
-| 8 | `Hardware image resolve` | 声明了硬件传输 | `HardwareImage` | `SceneColor` |
-| 9 | `Screen-space depth of field` | 镜头启用 DOF 且不在数据视图 | `SceneColor`、`SceneDepth` | `SceneColor`、`DepthOfFieldSource` |
-| 10 | `Selection masks` | 编辑器有选中 | `SceneDepth` | `SelectionMask` |
-| 11 | `Selection composite` | 编辑器有选中 | `SceneColor`、`SceneDepth`、`SelectionMask` | `SceneColor` |
-| 12 | `Frame capture` | 请求了帧捕获 | `SceneColor`、`SceneDepth`、三张 G-buffer | `FrameCapture` |
+| 2 | Hardware ray tracing transport | 使用 DXR | — | 按用途输出完整图、间接光、反射、探针 SH 与距离矩，DDGI 可同时输出反射和探针数据 |
+| 3 | GBuffer | 总是 | 场景几何 | 三张 G-buffer、运动信息与深度 |
+| 4 | Deferred lighting / debug 或 GI linear lighting | 按实际算法二选一 | G-buffer、有效阴影与几何输入 | 普通场景色，或 GI 使用的 HDR 光栅基底与反弹源 |
+| 5 | Screen-space probe rays → Project probe rays into SH | 软件 DDGI 或 SSGI 探针回退 | G-buffer、当前反弹源、上一帧 SH | 每射线辐射度 → 本帧 SH |
+| 6 | SSGI trace | SSGI | 当前反弹源、几何、有效历史与回退探针 | 半分辨率漫反射 |
+| 7 | Screen-space reflections | SSGI 或 DDGI 启用镜面并使用 SSR | G-buffer，SSGI 读取直接漫反射及可用回退探针，DDGI 读取 HDR 光栅基底 | 半分辨率镜面辐射与命中权重 |
+| 8 | SSGI composite 或 DDGI composite | 对应算法实际启用 | 光栅基底、几何与实际启用的漫反射、镜面输出 | 合成场景色；SSGI 同步写下一帧漫反射历史 |
+| 9 | Hardware image resolve | 硬件完整图像路径 | HardwareImage | SceneColor |
+| 10 | 后处理、选中轮廓、探针可视化与帧捕获 | 各自满足条件 | 场景色和对应资源 | 最终视口及可选捕获 |
+
+DDGI 的光栅合成由 `probeGridGi` 选择，`updateProbeGrid` 控制漫反射探针。DDGI 仅启用镜面时保留合成 Pass，跳过探针追踪及图集读取。两者均走 DXR 时，传输 Pass 提交独立的探针与镜面 dispatch，共用场景加速结构，并向延迟合成发布各自的结果。反射后端和采样限制见[全局光照](GlobalIllumination.md#实时镜面反射)。
 
 ### 4.2 Forward
 
