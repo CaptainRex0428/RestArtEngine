@@ -1,0 +1,6 @@
+<wpf:ResourceDictionary xmlns:wpf="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                        xmlns:s="clr-namespace:System;assembly=mscorlib">
+  <!-- Rider stores the MSBuild major version in the high 16 bits (17 = VS 2022). -->
+  <s:Int64 x:Key="/Default/Environment/Hierarchy/Build/BuildTool/MsbuildVersion/@EntryValue">1114112</s:Int64>
+</wpf:ResourceDictionary>

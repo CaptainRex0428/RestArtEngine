@@ -148,7 +148,7 @@ Content 浏览器分 Project/Engine 两个来源，支持面包屑、前后退�
 ## 环境要求
 
 - Windows 10 / 11（x64）
-- Visual Studio 2022，需勾选「使用 C++ 的桌面开发」（MSVC v143 + Windows SDK）
+- Visual Studio 2022 或 Visual Studio Build Tools 2022，安装「使用 C++ 的桌面开发」，包含 MSVC v143 x64/x86 工具和 Windows SDK
 - CMake **3.24+**（仅 CMake 构建方式需要）
 - Premake **5.0**（仅 Premake 生成 solution 方式需要；`premake5.exe` 随仓库在 `scripts/premake/`）
 - Git（第三方依赖是 submodule，首次需 `git submodule update --init`）
@@ -174,6 +174,10 @@ git submodule update --init
 1. 打开生成的 `RestArtEngine.sln`
 2. 选择 `Debug | x64` 或 `Release | x64`
 3. 构建并运行目标 `RestArtEngine`
+
+生成脚本通过 Visual Studio Installer 的 `vswhere` 查找同时安装了 MSBuild 和 C++ 工具的 VS 2022 实例，将该实例的 64 位 MSBuild 写入本次生成的 Rider 解决方案配置。安装目录和 VS 产品类型（Community、Professional、Enterprise 或 Build Tools）可以因机器而异。换电脑或更换工具链后重新运行 `GenerateWIN.bat`。若脚本提示缺少工具链，请先安装上述 C++ 组件，再重新生成。仓库自带的 Premake 在含中文的源码根目录上可能无法打开 `Build.lua`，遇到该错误可选择不含中文的检出目录。
+
+如果旧工作区仍提示找不到 `Microsoft.Cpp.Default.props`，请查看 Rider 的 Build Output 中的 `Use build tool`。若仍指向 `Microsoft.NET\Framework`，在 `Settings → Build, Execution, Deployment → Toolset and Build` 清除个人层的 MSBuild 覆盖，或选用生成脚本找到的 VS 2022 MSBuild，再重新构建。
 
 生成的工程同时列出 `Shaders/` 下的 HLSL 文件（`.hlsl` / `.hlsli`，标记为 `None`），用于在 Rider / Visual Studio 里直接编辑；它们不参与构建，运行时由引擎编译。改动 shader 后无需重新生成 solution。
 

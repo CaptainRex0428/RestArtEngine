@@ -5,6 +5,14 @@ EngineConfigurations = { "Debug", "Release", "Dist" }
 
 local run_config_dir = ".idea/.idea.RestArtEngine/.idea/runConfigurations"
 
+function generate_rider_toolset()
+    if os.host() ~= "windows" then return end
+    local ok = os.execute([[powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\Generate-RiderToolset.ps1]])
+    if not ok then
+        print("warning: could not generate Rider MSBuild settings.")
+    end
+end
+
 -- Editor files are machine-local and may be cleaned or locked at any time.
 -- Generation degrades to a warning instead of aborting the whole premake run,
 -- because an interrupted run leaves the solution/project files stale.

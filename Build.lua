@@ -13,6 +13,7 @@ workspace "RestArtEngine"
     buildoptions { "/EHsc", "/Zc:preprocessor", "/Zc:__cplusplus", "/utf-8" }
 
 	if _ACTION == "vs2022" then
+		generate_rider_toolset()
 		add_rider_run_configurations()
 	end
 	add_fork_custom_commands()
