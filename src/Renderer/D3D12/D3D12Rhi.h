@@ -60,8 +60,7 @@ public:
     [[nodiscard]] virtual std::pair<D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE>
         allocateUiDescriptor() = 0;
     virtual void freeUiDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE) = 0;
-    [[nodiscard]] virtual rhi::TextureHandle uploadRgba8(std::uint32_t width, std::uint32_t height,
-        std::span<const std::byte> bytes, std::string_view name = {}) = 0;
+
     [[nodiscard]] virtual std::uint64_t uiTextureId(const rhi::TextureHandle&) = 0;
     // Copies the selected source layer's rectangle into destination layer zero.
     virtual void copyTextureRegion(const rhi::TextureHandle& destination, const rhi::TextureHandle& source,

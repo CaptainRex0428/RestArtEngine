@@ -202,12 +202,34 @@ float3 ScreenProbeDirection(uint ray, uint rayCount, int3 coordinate, uint frame
     return ProbeDirectionFromPhase(ray, rayCount, phase);
 }
 
+// Scramble the four phases per group and layer. Every probe has a guaranteed
+// slot once per cycle; an extra slot halfway through serves changing probes.
+uint ScreenProbePhase(uint group, uint layer)
+{
+    uint hash = group * 0x9e3779b9u + layer * 0x85ebca6bu;
+    return ((hash >> 15) ^ hash ^ (uint)probeSchedule.y) & 3u;
+}
+
 float4 PSProbeRayTrace(FullscreenOutput input) : SV_TARGET
 {
     uint2 pixel = uint2(input.position.xy);
     uint3 dimensions = uint3(probeGrid.xyz);
     uint rayCount = clamp((uint)probeLayout.y, 1u, 32u);
-    int3 coordinate = int3(pixel.x % dimensions.x, pixel.y / rayCount, pixel.x / dimensions.x);
+    uint layer = pixel.y / rayCount;
+    uint column = pixel.x;
+    if (probeSchedule.x > 1.5)
+    {
+        uint group = pixel.x >> 1u;
+        uint lane = pixel.x & 1u;
+        column = group * 4u + (ScreenProbePhase(group, layer) ^ (lane * 2u));
+        if (column >= dimensions.x * dimensions.z) return 0.0;
+        // Coefficient 1's spare alpha stores the average relative DC change
+        // between completed SH updates. Alpha on coefficient 0 is the window.
+        uint stride = probeLayout.x > 1.5 ? 9u : 4u;
+        if (lane != 0u && probeAtlasRead.Load(int3(column * stride + 1u, layer, 0)).a < 0.025)
+            return 0.0;
+    }
+    int3 coordinate = int3(column % dimensions.x, layer, column / dimensions.x);
     float3 direction = ScreenProbeDirection(pixel.y % rayCount, rayCount, coordinate, (uint)probeLayout.w);
     float spacing = max(probeOrigin.w, 0.01);
     float3 origin = probeOrigin.xyz + (float3(coordinate) + 0.5) * probeCellSize.xyz;
@@ -215,6 +237,7 @@ float4 PSProbeRayTrace(FullscreenOutput input) : SV_TARGET
     // more cells at a higher quality setting.
     float range = spacing * max(5.0, 0.5 * float(max(dimensions.x, max(dimensions.y, dimensions.z))));
     uint steps = clamp((uint)probeLayout.z, 1u, 24u);
+    [branch] if (probeParameters.w > 4.5) return float4(WorldProbeRay(origin, direction), 1.0);
     return float4(clamp(ScreenProbeRay(origin, direction, spacing, range, steps), 0.0, 65504.0), 1);
 }
 
@@ -229,26 +252,49 @@ float4 PSProbeUpdate(FullscreenOutput input) : SV_TARGET
     if (probeParameters.x < 0.5 || probeParameters.w < 2.5) return 0.0;
     int3 coordinate = int3(column % dimensions.x, pixel.y, column / dimensions.x);
     uint rayCount = clamp((uint)probeLayout.y, 1u, 32u);
+    uint rayColumn = column;
+    if (probeSchedule.x > 1.5)
+    {
+        uint group = column >> 2u;
+        uint relative = (column & 3u) ^ ScreenProbePhase(group, pixel.y);
+        rayColumn = group * 2u + (relative >> 1u);
+        // A scheduled miss still writes alpha 1.  Alpha 0 means no job ran.
+        if ((relative & 1u) != 0u ||
+            probeRayRadiance.Load(int3(rayColumn, pixel.y * rayCount, 0)).a == 0.0)
+            return probeAtlasRead.Load(int3(pixel, 0));
+    }
     float3 estimate = 0.0;
+    float3 dcEstimate = 0.0;
+    bool variability = coefficient == 1u && probeParameters.w > 2.5 && probeParameters.w < 3.5;
     // All SH coefficients reuse the same incident radiance samples.
     [loop] for (uint ray = 0; ray < rayCount; ++ray)
     {
         float3 direction = ScreenProbeDirection(ray, rayCount, coordinate, (uint)probeLayout.w);
-        estimate += probeRayRadiance.Load(int3(column, pixel.y * rayCount + ray, 0)).rgb *
-            ProbeSHBasis(coefficient, direction);
+        float3 radiance = probeRayRadiance.Load(int3(rayColumn, pixel.y * rayCount + ray, 0)).rgb;
+        estimate += radiance * ProbeSHBasis(coefficient, direction);
+        if (variability) dcEstimate += radiance;
     }
     float3 current = clamp(estimate * (4.0 * PI / float(rayCount)), -65504.0, 65504.0);
     float window = 1.0;
+    float change = 1.0;
     if (probeParameters.y > 0.5)
     {
         float4 previous = probeAtlasRead.Load(int3(pixel, 0));
-        window = ProbeUpdateWindow(probeGrid.w, previous.a, probeCellSize.w);
+        float4 dc = variability ? probeAtlasRead.Load(int3(pixel.x - 1u, pixel.y, 0)) : previous;
+        window = ProbeUpdateWindow(probeGrid.w, dc.a, probeCellSize.w);
         // A changed view changes which donors exist in the G-buffer. Keep
         // at most two previous updates' worth of the old visibility.
         if (probeCellSize.w < 0.5) window = min(window, 3.0);
         current = lerp(previous.rgb, current, rcp(window));
+        if (variability)
+        {
+            float3 freshDc = dcEstimate * ((4.0 * PI * 0.2820947918) / float(rayCount));
+            float relativeChange = length(freshDc - dc.rgb) /
+                (window * max(max(length(freshDc), length(dc.rgb)), 0.02));
+            change = lerp(previous.a, relativeChange, 0.25);
+        }
     }
-    return float4(current, window);
+    return float4(current, variability ? change : window);
 }
 
 bool ProbeFilterCrossesVisibleSurface(float3 center, float3 neighbor, float2 viewportSize)
@@ -287,7 +333,10 @@ float4 PSProbeSpatialFilter(FullscreenOutput input) : SV_TARGET
     uint column = pixel.x / coefficientCount;
     if (column >= dimensions.x * dimensions.z || pixel.y >= dimensions.y) return 0.0;
     float4 center = probeAtlasRead.Load(int3(pixel, 0));
-    if (center.a < 0.5) return center;
+    bool variability = coefficient == 1u && probeParameters.w > 2.5 && probeParameters.w < 3.5;
+    // Filter window and validity must be identical for every SH band.
+    float centerWindow = variability ? probeAtlasRead.Load(int3(pixel.x - 1u, pixel.y, 0)).a : center.a;
+    if (centerWindow < 0.5) return center;
 
     int3 coordinate = int3(column % dimensions.x, pixel.y, column / dimensions.x);
     float3 centerPosition = probeOrigin.xyz + (float3(coordinate) + 0.5) * probeCellSize.xyz;
@@ -310,7 +359,9 @@ float4 PSProbeSpatialFilter(FullscreenOutput input) : SV_TARGET
         if (distanceSquared > 6) continue;
         float4 donor = probeAtlasRead.Load(int3(
             (neighbor.x + neighbor.z * dimensions.x) * coefficientCount + coefficient, neighbor.y, 0));
-        if (donor.a < 0.5) continue;
+        // Full initialization populates every active software probe before
+        // this pass. Coefficient 1 alpha may be zero for settled probes.
+        if (!variability && donor.a < 0.5) continue;
         float3 neighborPosition = centerPosition + float3(offset) * probeCellSize.xyz;
         if (ProbeFilterCrossesVisibleSurface(centerPosition, neighborPosition, viewportSize)) continue;
 
@@ -323,8 +374,8 @@ float4 PSProbeSpatialFilter(FullscreenOutput input) : SV_TARGET
     }
     // The coarser SSGI fallback covers a larger world-space area per cell.
     // Keep its footprint stable as the screen-space history converges.
-    float strength = screenFallback ? 0.8 : lerp(1.0, 0.9, smoothstep(4.0, 48.0, center.a));
-    return float4(lerp(center.rgb, sum / weights, strength), center.a);
+    float strength = screenFallback ? 0.8 : lerp(1.0, 0.9, smoothstep(4.0, 48.0, centerWindow));
+    return float4(lerp(center.rgb, sum / weights, strength), centerWindow);
 }
 
 struct ProbeDebugVertex

@@ -12,7 +12,7 @@ struct ResourceName {
     const char* name;
 };
 
-constexpr std::array<ResourceName, 26> resourceNames{{
+constexpr std::array<ResourceName, 28> resourceNames{{
     {PipelineResource::SceneColor, "SceneColor"},
     {PipelineResource::SceneDepth, "SceneDepth"},
     {PipelineResource::ShadowMap, "ShadowMap"},
@@ -30,6 +30,8 @@ constexpr std::array<ResourceName, 26> resourceNames{{
     {PipelineResource::PreviousAntiAliasingHistory, "PreviousAntiAliasingHistory"},
     {PipelineResource::ScreenSpaceHistory, "ScreenSpaceHistory"},
     {PipelineResource::ProbeAtlas, "ProbeAtlas"},
+    {PipelineResource::WorldProbeRadiance, "World probe radiance"},
+    {PipelineResource::WorldProbeScene, "World probe scene"},
     {PipelineResource::ProbeHistory, "Raw probe history"},
     {PipelineResource::ProbeRayRadiance, "Probe ray radiance"},
     {PipelineResource::ScreenSpaceDirectCurrent, "ScreenSpaceDirectCurrent"},
@@ -50,7 +52,7 @@ bool isDeferredOnly(RenderPassKind kind) noexcept {
         kind == RenderPassKind::ScreenSpaceGi || kind == RenderPassKind::ScreenSpaceGiSpecular ||
         kind == RenderPassKind::ScreenSpaceGiComposite || kind == RenderPassKind::ScreenSpaceDiffuseFilter ||
         kind == RenderPassKind::ProbeRayTrace || kind == RenderPassKind::ProbeLinearSource || kind == RenderPassKind::ProbeUpdate ||
-        kind == RenderPassKind::ProbeSpatialFilter || kind == RenderPassKind::ProbeComposite;
+        kind == RenderPassKind::WorldProbeLighting || kind == RenderPassKind::ProbeSpatialFilter || kind == RenderPassKind::ProbeComposite;
 }
 
 } // namespace
@@ -81,6 +83,7 @@ const char* toString(RenderPassKind kind) noexcept {
     case RenderPassKind::ScreenSpaceDiffuseFilter: return "SSGI diffuse filter";
     case RenderPassKind::ScreenSpaceGiComposite: return "SSGI composite";
     case RenderPassKind::ProbeLinearSource: return "DDGI linear source";
+    case RenderPassKind::WorldProbeLighting: return "World probe surface lighting";
     case RenderPassKind::ProbeRayTrace: return "Screen-space probe rays";
     case RenderPassKind::ProbeSpatialFilter: return "Filter screen probe SH";
     case RenderPassKind::ProbeUpdate: return "DDGI probe update";
@@ -144,14 +147,21 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
         else
             add(RenderPassKind::DeferredLighting, "Deferred lighting / debug", shadingInputs, rasterColor);
         if (inputs.probeFallbackGi || (inputs.probeGridGi && inputs.updateProbeGrid && !inputs.hardwareProbeGi)) {
-            add(RenderPassKind::ProbeRayTrace, "Screen-space probe rays",
-                PipelineResource::GBufferPosition | PipelineResource::GBufferNormal | PipelineResource::ProbeLinearRadiance,
+            if (inputs.worldProbeGi && inputs.worldProbeLightingDirty)
+                add(RenderPassKind::WorldProbeLighting, "World probe surface lighting",
+                    PipelineResource::WorldProbeScene, PipelineResource::WorldProbeRadiance);
+            add(RenderPassKind::ProbeRayTrace, inputs.worldProbeGi ? "World-space probe rays" : "Screen-space probe rays",
+                inputs.worldProbeGi ? PipelineResource::WorldProbeScene | PipelineResource::WorldProbeRadiance :
+                    PipelineResource::GBufferPosition | PipelineResource::GBufferNormal | PipelineResource::ProbeLinearRadiance |
+                    (inputs.probeGridGi ? PipelineResource::ProbeHistory : PipelineResource::None),
                 PipelineResource::ProbeRayRadiance);
             add(RenderPassKind::ProbeUpdate, "Project probe rays into SH",
-                PipelineResource::ProbeRayRadiance | PipelineResource::ProbeHistory, PipelineResource::ProbeHistory);
-            add(RenderPassKind::ProbeSpatialFilter, "Filter screen probe SH",
-                PipelineResource::ProbeHistory | PipelineResource::GBufferPosition | PipelineResource::GBufferNormal,
-                PipelineResource::ProbeAtlas);
+                PipelineResource::ProbeRayRadiance | PipelineResource::ProbeHistory,
+                inputs.worldProbeGi ? PipelineResource::ProbeHistory | PipelineResource::ProbeAtlas : PipelineResource::ProbeHistory);
+            if (!inputs.worldProbeGi)
+                add(RenderPassKind::ProbeSpatialFilter, "Filter screen probe SH",
+                    PipelineResource::ProbeHistory | PipelineResource::GBufferPosition | PipelineResource::GBufferNormal,
+                    PipelineResource::ProbeAtlas);
         }
         const bool filterDiffuse = inputs.probeFallbackGi && inputs.screenSpaceDiffuse;
         if (inputs.screenSpaceGi) {

@@ -71,6 +71,8 @@ enum class PipelineResource : std::uint64_t {
     ProbeDepthMoments = 1ull << 23,
     ProbeHistory = 1ull << 24,
     ScreenSpaceFilteredIndirect = 1ull << 25,
+    WorldProbeScene = 1ull << 26,
+    WorldProbeRadiance = 1ull << 27,
 };
 
 constexpr PipelineResource operator|(PipelineResource left, PipelineResource right) noexcept {
@@ -118,6 +120,7 @@ enum class RenderPassKind : std::uint8_t {
     FrameCapture,
     ProbeSpatialFilter,
     ScreenSpaceDiffuseFilter,
+    WorldProbeLighting,
 };
 
 struct RenderPassDeclaration {
@@ -145,6 +148,8 @@ struct PipelineBuildInputs {
     bool hardwareTransport = false;
     bool realtimeIndirect = false;
     bool hardwareProbeGi = false;
+    bool worldProbeGi = false;
+    bool worldProbeLightingDirty = false;
     bool screenSpaceGi = false;
     bool screenSpaceSpecular = false;
     bool hardwareReflection = false;
@@ -166,7 +171,7 @@ struct PipelineBuildInputs {
 // input instead of demanding a producer pass.
 inline constexpr PipelineResource pipelineFrameInputs = PipelineResource::RayTriangleScene |
     PipelineResource::PreviousAntiAliasingHistory | PipelineResource::ScreenSpaceHistory |
-    PipelineResource::ProbeHistory;
+    PipelineResource::ProbeHistory | PipelineResource::WorldProbeScene | PipelineResource::WorldProbeRadiance;
 
 [[nodiscard]] RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs);
 

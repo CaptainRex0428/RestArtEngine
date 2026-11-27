@@ -19,7 +19,7 @@ namespace rae::renderer::d3d12 {
 namespace {
 using Microsoft::WRL::ComPtr;
 using namespace rhi;
-constexpr UINT sampledSlots = 22, constantSlots = 10, vertexSlots = 32;
+constexpr UINT sampledSlots = 24, constantSlots = 11, vertexSlots = 32;
 
 bool initializeDebugRuntime(bool requested) {
     // Debug-layer selection is process-wide. Re-enabling it after another
@@ -634,7 +634,7 @@ void Device12::transition(Texture12& texture, D3D12_RESOURCE_STATES after, UINT 
 }
 void Device12::bindConstantBuffers(ShaderStage stage, std::uint32_t first, std::span<const BufferHandle> buffers) {
     require(stage == ShaderStage::Vertex || stage == ShaderStage::Pixel, "Unknown constant buffer shader stage.");
-    require(first <= constantSlots && buffers.size() <= constantSlots - first, "Constant bindings exceed b0 through b8.");
+    require(first <= constantSlots && buffers.size() <= constantSlots - first, "Constant bindings exceed the scene root signature.");
     for (const auto& handle : buffers) if (handle)
         require(owned<Buffer12>(handle, identity_).desc.usage == BufferUsage::Constant, "Non-constant buffer bound as constants.");
     auto& destination = constants_[stage == ShaderStage::Vertex ? 0 : 1];

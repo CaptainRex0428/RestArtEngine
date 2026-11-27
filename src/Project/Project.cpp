@@ -56,7 +56,7 @@ void validateGlobalIllumination(const renderer::GlobalIlluminationSettings& sett
     using renderer::GlobalIlluminationMethod;
     using renderer::GlobalIlluminationMode;
     if (settings.method != GlobalIlluminationMethod::Disabled && settings.method != GlobalIlluminationMethod::PathTracing &&
-        settings.method != GlobalIlluminationMethod::ScreenSpace && settings.method != GlobalIlluminationMethod::ProbeGrid)
+        settings.method != GlobalIlluminationMethod::ScreenSpace && !renderer::isProbeGi(settings.method))
         throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing, screenSpace or probeGrid.");
     if (settings.mode != GlobalIlluminationMode::Progressive && settings.mode != GlobalIlluminationMode::Realtime)
         throw std::runtime_error("rendering.globalIllumination.mode must be progressive or realtime.");
@@ -177,6 +177,7 @@ RenderingSettings readRenderingSettings(const Json& value) {
             if (method == "disabled") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::Disabled;
             else if (method == "pathTracing") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::PathTracing;
             else if (method == "screenSpace") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::ScreenSpace;
+            else if (method == "softwareWorld") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::SoftwareWorld;
             else if (method == "probeGrid") settings.globalIllumination.method = renderer::GlobalIlluminationMethod::ProbeGrid;
             else throw std::runtime_error("rendering.globalIllumination.method must be disabled, pathTracing, screenSpace or probeGrid.");
         }
@@ -1066,7 +1067,8 @@ bool saveProjectRenderingSettings(const std::filesystem::path& folderOrManifest,
         gi["method"] = settings.globalIllumination.method == renderer::GlobalIlluminationMethod::PathTracing
             ? "pathTracing" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::ScreenSpace
                 ? "screenSpace" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::ProbeGrid
-                    ? "probeGrid" : "disabled";
+                    ? "probeGrid" : settings.globalIllumination.method == renderer::GlobalIlluminationMethod::SoftwareWorld
+                        ? "softwareWorld" : "disabled";
         gi["mode"] = settings.globalIllumination.mode == renderer::GlobalIlluminationMode::Realtime
             ? "realtime" : "progressive";
         gi["indirectDiffuse"] = settings.globalIllumination.indirectDiffuse;

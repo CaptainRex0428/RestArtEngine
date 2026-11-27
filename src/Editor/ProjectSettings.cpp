@@ -150,7 +150,7 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         const bool realtimePathGi = gi.method == renderer::GlobalIlluminationMethod::PathTracing &&
             gi.mode == renderer::GlobalIlluminationMode::Realtime;
         const bool rasterGi = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace ||
-            gi.method == renderer::GlobalIlluminationMethod::ProbeGrid;
+            renderer::isProbeGi(gi.method);
         const bool reflectionsEditable = hardware && (gi.method == renderer::GlobalIlluminationMethod::Disabled ||
             (rasterGi && gi.indirectSpecular));
         bool reflections = reflectionsEditable && settings.hardwareRayTracingReflections;
@@ -179,9 +179,9 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
         ImGui::Spacing();
         ImGui::SeparatorText("Global illumination");
         int method = static_cast<int>(gi.method);
-        if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0Screen space (SSGI)\0Probe grid (DDGI)\0")) {
+        if (ImGui::Combo("GI method", &method, "Disabled\0Path tracing\0Screen space (SSGI)\0Probe grid (DDGI)\0Software world GI (voxel probes)\0")) {
             gi.method = static_cast<renderer::GlobalIlluminationMethod>(method);
-            if (settings.debugView == 12 && gi.method != renderer::GlobalIlluminationMethod::ProbeGrid)
+            if (settings.debugView == 12 && !renderer::isProbeGi(gi.method))
                 settings.debugView = 0;
             if (settings.debugView == 11 &&
                 (gi.method == renderer::GlobalIlluminationMethod::Disabled ||
@@ -191,12 +191,12 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             applyEdit(ProjectRenderingEdit::GiMethod);
         }
         const bool ssgiRequested = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace;
-        const bool ddgiRequested = gi.method == renderer::GlobalIlluminationMethod::ProbeGrid;
+        const bool ddgiRequested = renderer::isProbeGi(gi.method);
         const bool pathRequested = gi.method == renderer::GlobalIlluminationMethod::PathTracing;
         const auto giStatus = renderer.globalIlluminationStatus();
         const bool pathEffective = giStatus.effective == renderer::GlobalIlluminationMethod::PathTracing;
         const bool rasterGiEffective = giStatus.effective == renderer::GlobalIlluminationMethod::ScreenSpace ||
-            giStatus.effective == renderer::GlobalIlluminationMethod::ProbeGrid;
+            renderer::isProbeGi(giStatus.effective);
         if (gi.method != renderer::GlobalIlluminationMethod::Disabled) {
             const bool active = giStatus.effective != renderer::GlobalIlluminationMethod::Disabled;
             ImGui::TextWrapped("Active in last scene frame: %s", active ? giExecutionLabel(giStatus) : "Inactive");
@@ -256,12 +256,14 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
             changed |= ImGui::SliderFloat("SSGI thickness", &gi.screenSpaceThickness, 0.01f, 2.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
         }
         if (ddgiRequested) {
-            ImGui::TextWrapped("DDGI gathers diffuse bounce light in Deferred. DXR probes trace scene geometry. Screen-space probes sample surfaces visible to the camera.");
-            qualityControl("DDGI quality", gi.probeQuality);
+            const bool worldProbes = gi.method == renderer::GlobalIlluminationMethod::SoftwareWorld;
+            if (worldProbes) ImGui::TextWrapped("World-space probes trace voxelized scene geometry, including off-screen surfaces. Moving a light updates indirect diffuse in Deferred.");
+            else ImGui::TextWrapped("DDGI gathers diffuse bounce light in Deferred. DXR probes trace scene geometry. Screen-space probes sample surfaces visible to the camera.");
+            qualityControl(worldProbes ? "World probe quality" : "DDGI quality", gi.probeQuality);
             const auto budget = renderer::resolveGiQuality(gi);
             if (gi.probeQuality == renderer::GlobalIlluminationQuality::Custom) {
                 countSlider("Probe rays", gi.probeRayCount, renderer::kGiMaxProbeRays);
-                countSlider("Screen-space probe steps", gi.probeScreenSpaceSteps, renderer::kGiMaxProbeScreenSpaceSteps);
+                if (!worldProbes) countSlider("Screen-space probe steps", gi.probeScreenSpaceSteps, renderer::kGiMaxProbeScreenSpaceSteps);
                 int shOrder = gi.probeShOrder > 1 ? 1 : 0;
                 if (ImGui::Combo("Probe SH order", &shOrder, "SH-L1 (4 coefficients)\0SH-L2 (9 coefficients)\0")) {
                     gi.probeShOrder = static_cast<std::uint32_t>(shOrder + 1);
@@ -270,6 +272,9 @@ void SceneEditor::drawProjectSettings(renderer::SceneSettings& settings, rendere
                 countSlider("Probe grid X", gi.probeGridX, renderer::kGiMaxProbeGridAxis, 2);
                 countSlider("Probe grid Y", gi.probeGridY, renderer::kGiMaxProbeGridAxis, 2);
                 countSlider("Probe grid Z", gi.probeGridZ, renderer::kGiMaxProbeGridAxis, 2);
+            } else if (worldProbes) {
+                ImGui::TextWrapped("%u x %u x %u grid, %u world-space rays per probe, SH-L%u.",
+                    budget.probeGridX, budget.probeGridY, budget.probeGridZ, budget.probeRayCount, budget.probeShOrder);
             } else {
                 ImGui::TextWrapped("%u x %u x %u grid, %u rays per probe, SH-L%u. Up to %u steps per screen-space ray.",
                     budget.probeGridX, budget.probeGridY, budget.probeGridZ, budget.probeRayCount,

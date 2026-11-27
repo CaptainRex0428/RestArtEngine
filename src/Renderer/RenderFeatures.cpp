@@ -125,7 +125,7 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
 
     // Hardware ray tracing, checked layer by layer. The first failing layer is
     // reported; later requests inherit the same reason.
-    const bool probeGi = requests.globalIllumination == GlobalIlluminationMethod::ProbeGrid;
+    const bool probeGi = isProbeGi(requests.globalIllumination);
     const bool screenGi = requests.globalIllumination == GlobalIlluminationMethod::ScreenSpace;
     FeatureState hardwareState = FeatureState::Off;
     std::string hardwareReason = "Hardware ray tracing was not requested.";
@@ -218,10 +218,10 @@ RenderFeatureMatrix evaluateRenderFeatures(const FeatureRequests& requests,
         }
     }
 
-    if (requests.globalIllumination == GlobalIlluminationMethod::ProbeGrid) {
+    if (isProbeGi(requests.globalIllumination)) {
         if (requests.path != RenderPath::Deferred) {
             set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency,
-                "DDGI needs the Deferred G-buffer; Forward reports the request as unavailable.");
+                "Probe GI needs the Deferred G-buffer; Forward reports the request as unavailable.");
         } else if (!capabilities.rasterGiBlockReason.empty()) {
             set(RenderFeature::ProbeGridGI, FeatureState::BlockedByDependency, capabilities.rasterGiBlockReason);
         } else if (!capabilities.rasterGiProbeGridExecuted) {

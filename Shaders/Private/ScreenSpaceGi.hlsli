@@ -395,7 +395,7 @@ float4 PSScreenSpaceGiSpecular(FullscreenOutput input) : SV_TARGET
     coverage /= float(samples);
     // Misses keep the environment lobe of the full-resolution receiver. SH
     // can supplement a broad reflection with low-frequency scene radiance.
-    if (coverage < 1.0 && roughness > 0.25 && probeParameters.w > 3.5)
+    if (coverage < 1.0 && roughness > 0.25 && probeParameters.w > 3.5 && probeParameters.w < 4.5)
         bounced += ProbeIrradiance(position.xyz, reflection) * roughness * roughness * (1.0 - coverage);
     return float4(bounced, coverage);
 }

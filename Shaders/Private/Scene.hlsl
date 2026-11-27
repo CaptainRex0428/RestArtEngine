@@ -97,6 +97,7 @@ cbuffer ProbeConstants : register(b9)
     float4 probeParameters;  // enabled, previous atlas valid, intensity, mode
     float4 probeLayout;      // SH order, screen-space rays, screen-space steps, update frame
     float4 probeCellSize;    // world-space cell pitch on X, Y, Z
+    float4 probeSchedule;    // standalone software DDGI update period and phase
 };
 #endif
 
@@ -825,6 +826,7 @@ GBufferOutput PSGBuffer(GeometryOutput input, bool frontFace : SV_IsFrontFace)
 }
 
 #if !defined(RAE_HARDWARE_RAYTRACING)
+#include "WorldProbeGi.hlsli"
 #include "ProbeGridGi.hlsli"
 #include "ScreenSpaceGi.hlsli"
 

@@ -3684,7 +3684,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             const auto& gi = settings.globalIllumination;
             const bool giRequested = gi.method != renderer::GlobalIlluminationMethod::Disabled;
             const bool ssgiRequested = gi.method == renderer::GlobalIlluminationMethod::ScreenSpace;
-            const bool ddgiRequested = gi.method == renderer::GlobalIlluminationMethod::ProbeGrid;
+            const bool ddgiRequested = renderer::isProbeGi(gi.method);
             const bool realtimeRaster = ssgiRequested || ddgiRequested;
             const bool pathRequested = gi.method == renderer::GlobalIlluminationMethod::PathTracing;
             const bool hardwareActive = settings.hardwareRayTracing && renderer.hardwareRayTracingActive();
@@ -3698,7 +3698,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
                 else if (settings.debugView != 0 && !indirectView && !probeView) giLabel = "GI: Paused";
                 else if (!giEffective) giLabel = "GI: Inactive";
                 else if (ssgiRequested) giLabel = giStatus.usesHardwareReflections ? "GI: SSGI + DXR" : "GI: SSGI";
-                else if (ddgiRequested) giLabel = "GI: DDGI";
+                else if (ddgiRequested) giLabel = gi.method == renderer::GlobalIlluminationMethod::SoftwareWorld ? "GI: World" : "GI: DDGI";
                 else if (giStatus.effectiveMode == renderer::GlobalIlluminationMode::Realtime) giLabel = "GI: Realtime";
                 else giLabel = "GI: Progressive " + std::to_string(giStatus.accumulatedSamples) + "/" +
                     std::to_string(giStatus.targetSamples);
@@ -3732,7 +3732,7 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
                     if (!gi.indirectDiffuse)
                         ImGui::TextUnformatted("Diffuse color bleeding is disabled at the receiving surface.");
                     if (indirectView) ImGui::TextUnformatted("The viewport shows indirect lighting only.");
-                    if (probeView) ImGui::TextUnformatted("The viewport shows the scene with DDGI probe markers.");
+                    if (probeView) ImGui::TextUnformatted("The viewport shows the scene with probe markers.");
                     if (!giStatus.reason.empty()) ImGui::TextWrapped("%s", giStatus.reason.c_str());
                 }
                 ImGui::PopTextWrapPos();
@@ -3799,14 +3799,14 @@ void SceneEditor::draw(renderer::SceneSettings& settings, renderer::SceneRendere
             "Direct diffuse: direct-light diffuse contribution with current exposure and tone mapping; excludes ambient and reflections.",
             "Direct specular: direct-light specular contribution with current exposure and tone mapping; excludes ambient and reflections.",
             "GI indirect displays the active realtime method's bounced light by itself. Switch to Lit to see the combined result.",
-            "GI probes overlays the DDGI grid on the lit scene. The probe tint shows gathered light."
+            "GI probes overlays the active probe grid on the lit scene. The probe tint shows gathered light."
         };
         const int mode = std::clamp(settings.debugView, 0, static_cast<int>(std::size(legends)) - 1);
         ImGui::TextWrapped("%s", legends[mode]);
         if (mode == 11 || mode == 12) {
             const auto giStatus = renderer.globalIlluminationStatus();
             if (giStatus.effective == renderer::GlobalIlluminationMethod::Disabled)
-                ImGui::TextWrapped("This view needs an active realtime GI method. DDGI probe markers require DDGI.");
+                ImGui::TextWrapped("This view needs an active realtime GI method. Probe markers require a probe GI method.");
         }
         ImGui::TextWrapped("Data views inspect renderer values; editor display settings do not change material assets.");
         ImGui::Checkbox("VSync", &vsync);

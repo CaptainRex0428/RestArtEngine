@@ -8,7 +8,11 @@ namespace rae::renderer {
 
 // A lighting algorithm, independent of Forward/Deferred organization and API.
 // Backends resolve requests against their capabilities without rewriting them.
-enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1, ScreenSpace = 2, ProbeGrid = 3 };
+enum class GlobalIlluminationMethod : std::uint32_t { Disabled = 0, PathTracing = 1, ScreenSpace = 2, ProbeGrid = 3, SoftwareWorld = 4 };
+
+[[nodiscard]] inline constexpr bool isProbeGi(GlobalIlluminationMethod method) noexcept {
+    return method == GlobalIlluminationMethod::ProbeGrid || method == GlobalIlluminationMethod::SoftwareWorld;
+}
 
 // Update policy is independent of the transport algorithm and graphics API.
 enum class GlobalIlluminationMode : std::uint32_t { Progressive = 0, Realtime = 1 };
@@ -123,7 +127,7 @@ inline constexpr float kGiMaxIndirectDiffuseIntensity = 8.0f;
             gi.screenSpaceRayCount = std::clamp(gi.screenSpaceRayCount, 1u, kGiMaxScreenSpaceRays);
             gi.screenSpaceSteps = std::clamp(gi.screenSpaceSteps, 1u, kGiMaxScreenSpaceSteps);
         }
-    } else if (gi.method == GlobalIlluminationMethod::ProbeGrid) {
+    } else if (isProbeGi(gi.method)) {
         // DDGI's standalone SSR control uses the authored step count.
         gi.screenSpaceSteps = std::clamp(gi.screenSpaceSteps, 1u, kGiMaxScreenSpaceSteps);
         struct Budget { std::uint32_t x, y, z, rays, shOrder, screenSteps; };
@@ -165,6 +169,11 @@ struct GlobalIlluminationStatus {
     bool usesHardwareProbeTrace = false;
     bool usesHardwareReflections = false;
     bool usesScreenSpaceProbes = false;
+    // Standalone screen-probe DDGI. The budget bounds actual rays because
+    // optional high-change probes can decline their secondary update slot.
+    std::uint32_t screenProbeUpdatePeriod = 0;
+    std::uint32_t screenProbeRayBudget = 0;
+    bool usesWorldSpaceProbes = false;
     bool usesScreenSpaceReflections = false;
     std::string reason;
 };

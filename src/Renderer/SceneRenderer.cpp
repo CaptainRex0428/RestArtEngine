@@ -8,6 +8,8 @@
 #include <dxgi1_2.h>
 #include <dxgi1_3.h>
 #include <DirectXMath.h>
+#include "WorldVoxelCoverage.h"
+#include <cfloat>
 #include <wrl/client.h>
 
 #include "RestArtEngine/Renderer/SceneRenderer.h"
@@ -116,14 +118,19 @@ struct alignas(16) GlobalIlluminationConstants {
     XMFLOAT4 trace; // diffuse rays, resolution divisor, local viewport origin
 };
 static_assert(sizeof(GlobalIlluminationConstants) == 128);
+struct alignas(16) WorldVolumeConstants {
+    XMFLOAT4 originPitch, dimensions;
+};
+
 struct alignas(16) ProbeConstants {
     XMFLOAT4 grid; // x, y, z, hysteresis
     XMFLOAT4 origin; // xyz volume corner, w maximum cell extent for world-space ray distances
     XMFLOAT4 parameters; // enabled, valid, intensity, mode
     XMFLOAT4 layout; // SH order, screen-space rays, screen-space steps, update frame
-    XMFLOAT4 cellSize; // per-axis world-space cell extents, reserved
+    XMFLOAT4 cellSize; // per-axis cell extents, stable view frame count
+    XMFLOAT4 schedule; // screen-probe rotation period and phase
 };
-static_assert(sizeof(ProbeConstants) == 80 && offsetof(ProbeConstants, cellSize) == 64);
+static_assert(sizeof(ProbeConstants) == 96 && offsetof(ProbeConstants, schedule) == 80);
 struct ProbeDebugMeshVertex {
     float position[3];
     float normal[3];
@@ -246,6 +253,9 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"OutlineConstants", D3D_SIT_CBUFFER, 4, sizeof(OutlineConstants)},
         {"GlobalIlluminationConstants", D3D_SIT_CBUFFER, 6, sizeof(GlobalIlluminationConstants)},
         {"ProbeConstants", D3D_SIT_CBUFFER, 9, sizeof(ProbeConstants)},
+        {"WorldVolumeConstants", D3D_SIT_CBUFFER, 10, sizeof(WorldVolumeConstants)},
+        {"worldProbeSurface", D3D_SIT_TEXTURE, 22, 0},
+        {"worldProbeRadiance", D3D_SIT_TEXTURE, 23, 0},
         {"LightingConstants", D3D_SIT_CBUFFER, 7, sizeof(LightingConstants)},
         {"DepthOfFieldConstants", D3D_SIT_CBUFFER, 8, sizeof(DepthOfFieldConstants)},
         {"AntiAliasingConstants", D3D_SIT_CBUFFER, 5, sizeof(AntiAliasingConstants)},
@@ -327,11 +337,14 @@ bool validateShader(ID3DBlob* bytecode, const char* entry, std::string& error) {
         {"GlobalIlluminationConstants","giPreviousViewProjection",32,64},
         {"GlobalIlluminationConstants","giHistory",96,16},
         {"GlobalIlluminationConstants","giTrace",112,16},
+        {"WorldVolumeConstants","worldVoxelOriginPitch",0,16},
+        {"WorldVolumeConstants","worldVoxelDimensions",16,16},
         {"ProbeConstants","probeGrid",0,16},
         {"ProbeConstants","probeOrigin",16,16},
         {"ProbeConstants","probeParameters",32,16},
         {"ProbeConstants","probeLayout",48,16},
         {"ProbeConstants","probeCellSize",64,16},
+        {"ProbeConstants","probeSchedule",80,16},
         {"DepthOfFieldConstants","dofViewport",0,16},
         {"DepthOfFieldConstants","dofParameters",16,16},
         {"AntiAliasingConstants","aaInverseViewProjection",0,64},
@@ -546,6 +559,7 @@ struct SceneRenderer::Impl {
     XMFLOAT4 probeLayoutCellSize{};
     std::uint32_t probeUpdateFrame = 0;
     std::uint32_t screenGiStableFrames = 0;
+    float lastScreenProbeHysteresis = -1.0f;
     camera::Matrix screenGiPreviousView{};
     std::uint64_t rasterGiSceneKey = 0;
     bool probeLayoutAutoFit = false;
@@ -554,7 +568,17 @@ struct SceneRenderer::Impl {
     std::unordered_map<std::uint64_t, XMMATRIX> previousActorMatrices;
     std::unordered_map<std::uint64_t, XMMATRIX> currentActorMatrices;
     // Index 7 remains the depth-only shadow pipeline without a pixel stage.
-    std::array<rhi::ShaderHandle, 20> pixelModules;
+    std::array<rhi::ShaderHandle, 21> pixelModules;
+    rhi::TextureHandle worldProbeSurface, worldProbeRadiance;
+    rhi::BufferHandle worldProbeVolumeBuffer;
+    WorldVolumeConstants worldProbeVolume{};
+    std::vector<RaySceneInput> worldProbeInputs;
+    std::vector<std::uint8_t> worldProbeSurfaceBytes;
+    std::vector<std::uint32_t> worldProbeMaterialOwners;
+    unsigned worldProbeResolution = 0;
+    bool worldLightValid = false, worldShadowsEnabled = false;
+    LightingConstants worldLightInputs{};
+    std::uint64_t worldLightRevision = 0;
     std::map<std::tuple<unsigned, unsigned, unsigned, bool, bool>, rhi::GraphicsPipelineHandle> graphicsPipelines;
     rhi::BufferHandle sceneBuffer, objectBuffer, rayBuffer, shadowBuffer, giBuffer, lightingBuffer, dofBuffer, aaBuffer, zeroUv, probeBuffer;
     ComPtr<IDXGISwapChain> swapChain;
@@ -723,6 +747,7 @@ struct SceneRenderer::Impl {
     }
 
 #include "RhiSceneResources.inl"
+#include "WorldProbeScene.inl"
 
     bool createPipeline(std::string& error, const LoadProgress& progress = {}) {
         try {
@@ -786,7 +811,8 @@ struct SceneRenderer::Impl {
         ComPtr<ID3D11PixelShader> probeRayPS;
         if (!pixelShader("PSProbeRayTrace", probeRayPS) ||
             !pixelShader("PSProbeSpatialFilter", probeRayPS) ||
-            !pixelShader("PSSsgiDiffuseFilter", ssgiTracePS)) return false;
+            !pixelShader("PSSsgiDiffuseFilter", ssgiTracePS) ||
+            !pixelShader("PSWorldProbeLighting", probeRayPS)) return false;
         shader.Reset();
         if (!compile(shaderRoot, materialPath(), sceneSource, materialSource,
                 "VSProbeDebug", "vs_5_0", shader, error)) return false;
@@ -1808,12 +1834,19 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     state.raySceneActive = false;
     if (diagnosticMainScene) {
         state.giStatus.usesHardwareProbeTrace = state.giStatus.usesHardwareReflections = false;
+        state.giStatus.screenProbeUpdatePeriod = state.giStatus.screenProbeRayBudget = 0;
         state.giStatus.usesScreenSpaceProbes = state.giStatus.usesScreenSpaceReflections = false;
+        state.giStatus.usesWorldSpaceProbes = false;
         state.beginGeometryFrame(world, assets);
     }
     if (!state.rhiDevice || !state.swapchainImage) {
         if (diagnosticMainScene) state.failGeometryFrame();
         error = "Renderer has no render target."; return false;
+    }
+    if (diagnosticMainScene && state.worldProbeSurface &&
+        (settings.globalIllumination.method != GlobalIlluminationMethod::SoftwareWorld ||
+         !settings.globalIllumination.indirectDiffuse || settings.path != RenderPath::Deferred)) {
+        state.releaseWorldProbeScene();
     }
     // Runtime/fullscreen rendering targets the main swap chain. The editor's
     // detached scene target may have a different size from the previous frame.
@@ -1926,7 +1959,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     const XMFLOAT4 aaViewport(static_cast<float>(viewportX),static_cast<float>(viewportY),
         static_cast<float>(viewportWidth),static_cast<float>(viewportHeight));
     const bool rasterGiMethod = settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace ||
-        settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid;
+        isProbeGi(settings.globalIllumination.method);
     if (antiAliasing) state.ensureAntiAliasingTargets(targetWidth,targetHeight,temporalAntiAliasing);
     if (temporalAntiAliasing)
         state.prepareTemporalAntiAliasing(settings,world,assets,materialOverride,cameraView,lighting,aaViewport,projection);
@@ -2122,7 +2155,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     const bool deferredGiView = diagnosticMainScene && settings.path == RenderPath::Deferred;
     const bool rasterGiLightingView = deferredGiView && (settings.debugView == 0 || debugGiIndirect);
     const bool ssgiMethod = settings.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace;
-    const bool ddgiMethod = settings.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid;
+    const bool ddgiMethod = isProbeGi(settings.globalIllumination.method);
     const bool screenSpaceGi = ssgiMethod && rasterGiLightingView &&
         (settings.globalIllumination.indirectDiffuse || settings.globalIllumination.indirectSpecular);
     const bool updateProbeGrid = ddgiMethod && deferredGiView &&
@@ -2135,15 +2168,26 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
         state.hardwareRayTracing->supported() && !state.hardwareRuntimeFailed;
     const bool hardwareReflection = dxrAvailable && rasterSpecular && settings.hardwareRayTracingReflections;
     const bool screenSpaceSpecular = rasterSpecular && !hardwareReflection;
-    const bool hardwareProbeGi = dxrAvailable && updateProbeGrid;
+    const bool worldProbeGi = updateProbeGrid && settings.globalIllumination.method == GlobalIlluminationMethod::SoftwareWorld;
+    const bool hardwareProbeGi = dxrAvailable && updateProbeGrid && !worldProbeGi;
     const bool hardwareTransport = hardwareReflection || hardwareProbeGi ||
         (dxrAvailable && !rasterGiMethod);
     const bool realtimeIndirect = hardwareTransport && realtimeGiRequested &&
         (settings.debugView == 0 || debugGiIndirect);
     const bool probeFallbackGi = screenSpaceGi && !hardwareReflection;
-    const bool rasterProbeGi = updateProbeGrid && !hardwareProbeGi;
+    const bool rasterProbeGi = updateProbeGrid && !hardwareProbeGi && !worldProbeGi;
     const bool giDebugProbes = debugGiProbes && updateProbeGrid;
     const bool probeAtlasActive = updateProbeGrid || probeFallbackGi;
+    bool worldProbeLightingDirty = false;
+    if (worldProbeGi) {
+        const auto& gi = settings.globalIllumination;
+        const unsigned resolution = std::clamp(2u * std::max({gi.probeGridX, gi.probeGridY, gi.probeGridZ}), 16u, 64u);
+        if (!state.prepareWorldProbeScene(world, assets, materialOverride, resolution, error)) return false;
+        const bool shadows = settings.shadowMethod != ShadowMethod::Disabled;
+        state.worldProbeVolume.dimensions.w = shadows ? 1.0f : 0.0f;
+        worldProbeLightingDirty = !state.worldLightValid || state.worldLightRevision != state.revision ||
+            state.worldShadowsEnabled != shadows || std::memcmp(&lighting, &state.worldLightInputs, sizeof(lighting)) != 0;
+    }
     if (diagnosticMainScene) {
         const bool rasterGiActive = screenSpaceGi || probeGridGi;
         const bool rasterHistoryActive = screenSpaceGi || updateProbeGrid;
@@ -2162,8 +2206,11 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             historySettings.screenSpaceRadius = defaults.screenSpaceRadius;
             historySettings.screenSpaceThickness = defaults.screenSpaceThickness;
         }
-        const auto sceneKey = rasterHistoryActive ? state.antiAliasingSceneKey(settings, world, assets,
-            materialOverride, cameraView, lighting, aaViewport, true) : 0;
+        // The world radiance cache tracks geometry, reflectance, lights and shader
+        // revisions directly. Camera and viewport changes do not change transport.
+        const auto sceneKey = worldProbeGi ? state.rasterGiSceneKey + static_cast<unsigned>(worldProbeLightingDirty) :
+            rasterHistoryActive ? state.antiAliasingSceneKey(settings, world, assets,
+                materialOverride, cameraView, lighting, aaViewport, true) : 0;
         if (!rasterHistoryActive || !state.ssgiLastSettingsValid || state.rasterGiSceneKey != sceneKey ||
             !(historySettings == state.ssgiLastSettings) ||
             state.ssgiHistoryEpoch != state.giHistoryEpoch || state.lastGiHardware != hardwareHistory) {
@@ -2197,13 +2244,14 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
                 if (!hardwareReflection && settings.hardwareRayTracing && settings.hardwareRayTracingReflections &&
                     settings.globalIllumination.indirectSpecular) status.reason += " " + state.hardwareStatus;
             } else {
-                status.reason = hardwareProbeGi ? "DDGI with DXR probe rays and directional visibility." :
+                status.reason = worldProbeGi ? "World-space probes trace voxelized scene geometry in software." :
+                    hardwareProbeGi ? "DDGI with DXR probe rays and directional visibility." :
                     rasterProbeGi ? "DDGI with screen-space probe rays. Off-screen geometry is unavailable to probes." :
                     "Diffuse probe update is off.";
                 if (hardwareReflection) status.reason += " DXR reflections.";
                 if (screenSpaceSpecular) status.reason += " Screen-space reflections.";
                 if (settings.hardwareRayTracing && !dxrAvailable &&
-                    (updateProbeGrid || (rasterSpecular && settings.hardwareRayTracingReflections)))
+                    ((updateProbeGrid && !worldProbeGi) || (rasterSpecular && settings.hardwareRayTracingReflections)))
                     status.reason += " " + state.hardwareStatus;
             }
         }
@@ -2217,6 +2265,8 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     pipelineInputs.rayTriangleScene = wantsRayScene;
     pipelineInputs.hardwareTransport = hardwareTransport;
     pipelineInputs.hardwareProbeGi = hardwareProbeGi;
+    pipelineInputs.worldProbeGi = worldProbeGi;
+    pipelineInputs.worldProbeLightingDirty = worldProbeLightingDirty;
     pipelineInputs.realtimeIndirect = realtimeIndirect;
     pipelineInputs.screenSpaceGi = screenSpaceGi;
     pipelineInputs.screenSpaceSpecular = screenSpaceSpecular;
@@ -2379,7 +2429,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     probeData.parameters = XMFLOAT4(probeAtlasActive ? 1.0f : 0.0f,
         probeAtlasActive && (hardwareProbeGi || state.probeAtlasValid) ? 1.0f : 0.0f,
         probeFallbackGi ? 1.0f : (probeSettings.indirectDiffuse ? probeSettings.indirectDiffuseIntensity : 0.0f),
-        hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : (probeFallbackGi ? 4.0f : 0.0f)));
+        worldProbeGi ? 5.0f : hardwareProbeGi ? 2.0f : (rasterProbeGi ? 3.0f : (probeFallbackGi ? 4.0f : 0.0f)));
     probeData.layout = XMFLOAT4(static_cast<float>(std::clamp(
         probeSettings.probeShOrder, 1u, 2u)), static_cast<float>(probeSettings.probeRayCount),
         static_cast<float>(probeSettings.probeScreenSpaceSteps), static_cast<float>(state.probeUpdateFrame));
@@ -2494,6 +2544,10 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
     }
     state.uploadConstants(state.probeBuffer, probeData);
     commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 9, std::span(&state.probeBuffer, 1));
+    if (worldProbeGi) {
+        state.uploadConstants(state.worldProbeVolumeBuffer, state.worldProbeVolume);
+        commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 10, std::span(&state.worldProbeVolumeBuffer, 1));
+    }
     if (state.context) {
         ID3D11Buffer* probeConstantBuffer = state.probeConstants.Get();
         state.context->PSSetConstantBuffers(9, 1, &probeConstantBuffer);
@@ -2770,7 +2824,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
                     }
                     probeData.parameters.y = 0;
                     state.uploadConstants(state.probeBuffer, probeData);
-                } else if (ddgiMethod) {
+                } else if (ddgiMethod && !worldProbeGi) {
                     state.giStatus.effective = GlobalIlluminationMethod::Disabled;
                     state.giStatus.accumulatedSamples = 0;
                 }
@@ -2904,6 +2958,10 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
                                     std::memcmp(&actor.second, &previous->second, sizeof(XMMATRIX)) == 0;
                             });
                 }
+                if (rasterProbeGi) {
+                    stable = stable && state.lastScreenProbeHysteresis == probeSettings.probeHysteresis;
+                    state.lastScreenProbeHysteresis = probeSettings.probeHysteresis;
+                }
                 state.screenGiStableFrames = stable ? std::min(state.screenGiStableFrames + 1u, 2047u) : 0u;
                 state.screenGiPreviousView = cameraView.viewProjection;
                 if (screenSpaceGi) {
@@ -2925,23 +2983,57 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             commands.endRenderPass();
             break;
         }
+        case RenderPassKind::WorldProbeLighting: {
+            state.beginDiagnosticPass(pass.name);
+            rhi::RenderPassDesc rasterPass;
+            rasterPass.name = pass.name;
+            rasterPass.colors = {{state.worldProbeRadiance, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+            rasterPass.reads = {{state.worldProbeSurface, 22}};
+            const auto& size = state.worldProbeRadiance->description();
+            commands.beginRenderPass(rasterPass);
+            commands.setViewport({0, 0, static_cast<float>(size.width), static_cast<float>(size.height)});
+            state.drawRhiFullscreen(20, false);
+            commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY, sceneViewport.Width, sceneViewport.Height});
+            commands.endRenderPass();
+            state.worldLightInputs = lighting;
+            state.worldLightRevision = state.revision;
+            state.worldShadowsEnabled = settings.shadowMethod != ShadowMethod::Disabled;
+            state.worldLightValid = true;
+            break;
+        }
         case RenderPassKind::ProbeRayTrace: {
             state.beginDiagnosticPass(pass.name);
-            probeData.cellSize.w = static_cast<float>(state.screenGiStableFrames);
-            state.uploadConstants(state.probeBuffer, probeData);
+            probeData.cellSize.w = static_cast<float>(worldProbeGi ? state.probeUpdateFrame : state.screenGiStableFrames);
             const auto columns = probeSettings.probeGridX * probeSettings.probeGridZ;
             const auto rows = probeSettings.probeGridY * probeSettings.probeRayCount;
+            // A warm volume uses one guaranteed and one change-sensitive lane
+            // per four probes. Retain the full allocation across camera edits.
+            const bool rotate = rasterProbeGi && state.probeAtlasValid &&
+                state.screenGiStableFrames >= 16u && probeSettings.probeHysteresis > 0.0f && columns >= 4u;
+            const auto traceColumns = rotate ? ((columns + 3u) / 4u) * 2u : columns;
+            probeData.schedule = XMFLOAT4(rotate ? 4.0f : 1.0f,
+                static_cast<float>(state.probeUpdateFrame & 3u), 0, 0);
+            state.uploadConstants(state.probeBuffer, probeData);
+            if (rasterProbeGi) {
+                state.giStatus.screenProbeUpdatePeriod = rotate ? 4u : 1u;
+                state.giStatus.screenProbeRayBudget = traceColumns * rows;
+            }
             if (!state.probeRayImage || state.probeRayImage->description().width != columns ||
                 state.probeRayImage->description().height != rows)
                 state.probeRayImage = state.rhiDevice->createTexture({columns, rows, 1,
-                    rhi::Format::RGBA16Float, true, "Screen-traced probe rays"});
+                    rhi::Format::RGBA16Float, true, "Probe ray radiance"});
             rhi::RenderPassDesc rasterPass;
             rasterPass.name = pass.name;
-            rasterPass.colors = {{state.probeRayImage, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
-            rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
-                {state.probeLinearImage, 15}};
+            rasterPass.colors = {{state.probeRayImage, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+            if (worldProbeGi)
+                rasterPass.reads = {{state.worldProbeSurface, 22}, {state.worldProbeRadiance, 23}};
+            else {
+                rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2},
+                    {state.probeLinearImage, 15}};
+                if (rasterProbeGi) rasterPass.reads.push_back({state.probeAtlasA, 14});
+            }
             commands.beginRenderPass(rasterPass);
-            commands.setViewport({0, 0, static_cast<float>(columns), static_cast<float>(rows)});
+            commands.setViewport({0, 0, static_cast<float>(traceColumns), static_cast<float>(rows)});
             state.drawRhiFullscreen(17, false);
             commands.setViewport({sceneViewport.TopLeftX, sceneViewport.TopLeftY,
                 sceneViewport.Width, sceneViewport.Height});
@@ -2978,6 +3070,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             std::swap(state.probeAtlasA, state.probeAtlasB);
             state.probeAtlasValid = true;
             state.giStatus.usesScreenSpaceProbes = rasterProbeGi;
+            state.giStatus.usesWorldSpaceProbes = worldProbeGi;
             // Retain exact float-integer sample phases on long-running views.
             state.probeUpdateFrame = state.probeUpdateFrame >= 2047u ? 1024u : state.probeUpdateFrame + 1u;
             probeData.parameters.y = 1.0f;
@@ -2992,7 +3085,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             rasterPass.reads = {{state.gbufferImages[0], 0}, {state.gbufferImages[1], 1},
                 {state.gbufferImages[2], 2}, {state.ssgiDirectCurrentImage, 17}};
             if (updateProbeGrid && state.probeAtlasValid)
-                rasterPass.reads.push_back({hardwareProbeGi ? state.probeAtlasA : state.filteredProbeAtlas, 14});
+                rasterPass.reads.push_back({(hardwareProbeGi || worldProbeGi) ? state.probeAtlasA : state.filteredProbeAtlas, 14});
             if (state.giStatus.usesHardwareProbeTrace)
                 rasterPass.reads.push_back({state.probeDepthAtlasImage, 20});
             bindRasterSpecular(rasterPass);
@@ -3109,7 +3202,7 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             debugPass.name = pass.name;
             debugPass.colors = {{destinationImage, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
             debugPass.depth = rhi::DepthAttachment{state.sceneDepthImage, 0, rhi::LoadOp::Load};
-            debugPass.reads = {{hardwareProbeGi ? state.probeAtlasA : state.filteredProbeAtlas, 14}};
+            debugPass.reads = {{(hardwareProbeGi || worldProbeGi) ? state.probeAtlasA : state.filteredProbeAtlas, 14}};
             commands.beginRenderPass(debugPass);
             commands.bindConstantBuffers(rhi::ShaderStage::Vertex, 0, std::span(&state.sceneBuffer, 1));
             commands.bindConstantBuffers(rhi::ShaderStage::Pixel, 7, std::span(&state.lightingBuffer, 1));
@@ -3182,7 +3275,8 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
         featureCapabilities.hardwareFrameFailed = state.hardwareRuntimeFailed;
         featureCapabilities.rasterGiHardwareExecuted = state.giStatus.usesHardwareReflections || state.giStatus.usesHardwareProbeTrace;
         featureCapabilities.rasterGiHardwareReflectionsExecuted = state.giStatus.usesHardwareReflections;
-        featureCapabilities.rasterGiProbeGridExecuted = state.giStatus.usesScreenSpaceProbes || state.giStatus.usesHardwareProbeTrace;
+        featureCapabilities.rasterGiProbeGridExecuted = state.giStatus.usesScreenSpaceProbes ||
+            state.giStatus.usesWorldSpaceProbes || state.giStatus.usesHardwareProbeTrace;
         if (rasterGiMethod && state.giStatus.effective == GlobalIlluminationMethod::Disabled)
             featureCapabilities.rasterGiBlockReason = state.giStatus.reason;
         featureCapabilities.editorSelection = selectionOutline;

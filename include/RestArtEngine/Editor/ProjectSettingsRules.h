@@ -13,6 +13,7 @@ enum class ProjectRenderingEdit { Backend, HardwareRayTracing, GiMethod, GiMode 
     case PathTracing: return "Path tracing";
     case ScreenSpace: return "SSGI";
     case ProbeGrid: return "DDGI";
+    case SoftwareWorld: return "Software world GI";
     }
     return "Off";
 }
@@ -30,6 +31,8 @@ enum class ProjectRenderingEdit { Backend, HardwareRayTracing, GiMethod, GiMode 
 
 [[nodiscard]] inline const char* giExecutionLabel(const renderer::GlobalIlluminationStatus& status) noexcept {
     using enum renderer::GlobalIlluminationMethod;
+    if (status.effective == SoftwareWorld)
+        return status.usesWorldSpaceProbes ? "Software world GI (voxel probes)" : "Software world GI (reflections only)";
     if (status.effective == ProbeGrid) {
         if (status.usesHardwareProbeTrace) return "DDGI (DXR probes)";
         if (status.usesScreenSpaceProbes) return "DDGI (screen-space probes)";
@@ -48,7 +51,7 @@ enum class ProjectRenderingEdit { Backend, HardwareRayTracing, GiMethod, GiMode 
 
 [[nodiscard]] inline bool hasActiveRasterGiQuality(const renderer::GlobalIlluminationStatus& status) noexcept {
     return status.effective == renderer::GlobalIlluminationMethod::ScreenSpace ||
-        status.usesHardwareProbeTrace || status.usesScreenSpaceProbes;
+        status.usesHardwareProbeTrace || status.usesScreenSpaceProbes || status.usesWorldSpaceProbes;
 }
 
 // These are current build capabilities, not a probe of the user's adapter.
@@ -71,7 +74,7 @@ inline void applyProjectRenderingEdit(project::RenderingSettings& settings, Proj
         settings.hardwareRayTracingShadows = false;
         // SSGI/DDGI are raster algorithms and survive a backend that cannot run DXR.
         if (settings.globalIllumination.method != GlobalIlluminationMethod::ScreenSpace &&
-            settings.globalIllumination.method != GlobalIlluminationMethod::ProbeGrid)
+            !isProbeGi(settings.globalIllumination.method))
             settings.globalIllumination.method = GlobalIlluminationMethod::Disabled;
         return;
     }

@@ -177,6 +177,15 @@ public:
         if (!initial.empty()) ++statistics_.bufferUploads;
         return result;
     }
+    TextureHandle uploadRgba8(std::uint32_t width, std::uint32_t height,
+        std::span<const std::byte> bytes, std::string_view name) override {
+        require(width && height && static_cast<std::uint64_t>(width) * height * 4 == bytes.size(),
+            "RGBA8 upload byte count must match texture dimensions.");
+        auto texture = createTexture({width, height, 1, Format::RGBA8Unorm, true, std::string(name)});
+        context_->UpdateSubresource(owned<D3D11Texture>(texture, identity_).object.Get(), 0, nullptr,
+            bytes.data(), width * 4, 0);
+        return texture;
+    }
     TextureHandle createTexture(const TextureDesc& desc) override {
         require(desc.width && desc.height && desc.width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
             desc.height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, "Invalid texture dimensions.");

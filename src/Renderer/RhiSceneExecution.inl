@@ -24,7 +24,7 @@ rhi::GraphicsPipelineHandle graphicsPipeline(unsigned shaderIndex,
         description.colorFormats.assign(2, rhi::Format::RGBA16Float);
     else if (shaderIndex == 1)
         description.colorFormats.assign(4, rhi::Format::RGBA16Float);
-    else if (shaderIndex == 9 || shaderIndex == 11 || shaderIndex == 12 || shaderIndex == 16 || shaderIndex == 17 || shaderIndex == 18 || shaderIndex == 19) description.colorFormats = {rhi::Format::RGBA16Float};
+    else if (shaderIndex == 9 || shaderIndex == 11 || shaderIndex == 12 || shaderIndex == 16 || shaderIndex == 17 || shaderIndex == 18 || shaderIndex == 19 || shaderIndex == 20) description.colorFormats = {rhi::Format::RGBA16Float};
     else if (shaderIndex == 13) description.colorFormats = {rhi::Format::RGBA8Unorm, rhi::Format::RGBA16Float};
     else if (shaderIndex != 7) description.colorFormats = {rhi::Format::RGBA8Unorm};
     description.name = fullscreen ? "Scene fullscreen pipeline" : "Scene mesh pipeline";
@@ -55,7 +55,7 @@ void bindRhiMesh(const GpuMesh& mesh) {
 
 void drawRhiFullscreen(unsigned shader, bool hasDepth) {
     diagnosticVS = "Private/Scene.hlsl::VSFullscreen";
-    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite", "PSProbeComposite", "PSProbeLinear", "PSScreenSpaceGiSpecular", "PSProbeRayTrace", "PSProbeSpatialFilter", "PSSsgiDiffuseFilter"};
+    static constexpr const char* entries[] = {"PSForward", "PSGBuffer", "PSDeferred", "PSBackground", "PSOutlineMask", "PSOutlineComposite", "PSDepthOfField", "Depth-only", "PSFXAA", "PSTAA", "PSAntiAliasingPresent", "PSProbeUpdate", "PSScreenSpaceGi", "PSScreenSpaceGiComposite", "PSProbeComposite", "PSProbeLinear", "PSScreenSpaceGiSpecular", "PSProbeRayTrace", "PSProbeSpatialFilter", "PSSsgiDiffuseFilter", "PSWorldProbeLighting"};
     diagnosticPS = shader < std::size(entries) ? entries[shader] : "Unknown";
     sceneCommands().bindGraphicsPipeline(graphicsPipeline(shader, 0, 16, true, hasDepth));
     sceneCommands().draw(3);

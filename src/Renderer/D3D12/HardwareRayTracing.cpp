@@ -1424,7 +1424,8 @@ bool HardwareRayTracing::render(const Frame& frame, const scene::World& world,
     if (frame.globalIllumination.method != GlobalIlluminationMethod::Disabled &&
         frame.globalIllumination.method != GlobalIlluminationMethod::PathTracing &&
         frame.globalIllumination.method != GlobalIlluminationMethod::ProbeGrid &&
-        !(frame.reflectionOnly && frame.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace)) {
+        !(frame.reflectionOnly && (frame.globalIllumination.method == GlobalIlluminationMethod::ScreenSpace ||
+            frame.globalIllumination.method == GlobalIlluminationMethod::SoftwareWorld))) {
         error = "The requested global illumination method is unavailable in this backend."; return fail();
     }
     if (frame.globalIllumination.mode != GlobalIlluminationMode::Progressive &&

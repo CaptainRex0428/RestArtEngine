@@ -141,6 +141,8 @@ public:
     virtual ~Device() = default;
     [[nodiscard]] virtual BufferHandle createBuffer(const BufferDesc&, std::span<const std::byte> initial = {}) = 0;
     [[nodiscard]] virtual TextureHandle createTexture(const TextureDesc&) = 0;
+    [[nodiscard]] virtual TextureHandle uploadRgba8(std::uint32_t width, std::uint32_t height,
+        std::span<const std::byte> bytes, std::string_view name = {}) = 0;
     [[nodiscard]] virtual ShaderHandle createShader(ShaderStage, std::span<const std::byte>, std::string_view name = {}) = 0;
     [[nodiscard]] virtual GraphicsPipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc&) = 0;
     [[nodiscard]] virtual CommandContext& commands() noexcept = 0;
