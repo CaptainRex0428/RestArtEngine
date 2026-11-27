@@ -2820,6 +2820,8 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
             rasterPass.name = pass.name;
             const bool filter = pass.kind == RenderPassKind::ScreenSpaceDiffuseFilter;
             rasterPass.reads = {{state.gbufferImages[1], 1}, {state.gbufferImages[2], 2}};
+            rasterPass.reads.push_back({state.motionImage, 16});
+            rasterPass.reads.push_back({state.ssgiIndirectHistoryImage, 19});
             if (filter) {
                 if (!state.ssgiFilteredImage) {
                     auto description = state.ssgiRawImage->description();
@@ -2829,8 +2831,6 @@ bool SceneRenderer::render(const SceneSettings& requested, const scene::World& w
                 rasterPass.reads.push_back({state.ssgiRawImage, 18});
             } else {
                 rasterPass.reads.push_back({state.probeLinearImage, 15});
-                rasterPass.reads.push_back({state.motionImage, 16});
-                rasterPass.reads.push_back({state.ssgiIndirectHistoryImage, 19});
                 if (probeFallbackGi) rasterPass.reads.push_back({state.filteredProbeAtlas, 14});
             }
             rasterPass.colors = {{filter ? state.ssgiFilteredImage : state.ssgiRawImage,

@@ -169,13 +169,28 @@ float4 PSSsgiDiffuseFilter(FullscreenOutput input) : SV_TARGET
     float planeTolerance = max(0.01, 0.65 * footprint);
     float depthTolerance = 5.0 * footprint /
         max(abs(dot(normal, CameraViewDirection(position.xyz))), 0.2);
-    // A broad, contiguous Gaussian averages independent ray samples before
-    // upsampling. Geometry weights narrow it on curved surfaces and edges.
+    // Alpha holds the relative standard error of this frame's ray estimate.
+    // A quiet tap next to a noisy one still needs a broad footprint.
+    float4 center = ssgiRawIndirect.Load(int3(tracePixel, 0));
+    // A moving donor can change a stationary receiver. Use the full current
+    // footprint on scene changes, then narrow it as local history recovers.
+    int2 last = traceSize - 1;
+    float noise = center.a;
+    noise = max(noise, ssgiRawIndirect.Load(int3(min(tracePixel + int2(1, 0), last), 0)).a);
+    noise = max(noise, ssgiRawIndirect.Load(int3(min(tracePixel + int2(0, 1), last), 0)).a);
+    float3 previousRadiance;
+    float motionPixels;
+    float coverage = SsgiReadHistory(receiver, footprint, true, previousRadiance, motionPixels);
+    float trust = coverage * (1.0 - smoothstep(0.75, 4.0, motionPixels));
+    trust *= 1.0 - smoothstep(0.25, 0.5, giHistory.z);
+    float broad = max(1.0 - trust, smoothstep(0.04, 0.30, noise));
+    int radius = broad < 0.01 ? 1 : 3;
     static const float gaussian[4] = {1.0, 0.895, 0.641, 0.411};
-    float4 sum = ssgiRawIndirect.Load(int3(tracePixel, 0));
+    static const float narrow[4] = {1.0, 0.5, 0.0, 0.0};
+    float3 sum = center.rgb;
     float weightSum = 1.0;
-    [loop] for (int y = -3; y <= 3; ++y)
-    [loop] for (int x = -3; x <= 3; ++x)
+    [loop] for (int y = -radius; y <= radius; ++y)
+    [loop] for (int x = -radius; x <= radius; ++x)
     {
         if (x == 0 && y == 0) continue;
         int2 tap = tracePixel + int2(x, y);
@@ -190,11 +205,12 @@ float4 PSSsgiDiffuseFilter(FullscreenOutput input) : SV_TARGET
         float cosine = dot(normal, tapNormalMetallic.xyz);
         if (cosine <= 0.94 || tapNormalMetallic.w >= 1.0) continue;
         float normalWeight = smoothstep(0.94, 0.995, cosine);
-        float weight = gaussian[abs(x)] * gaussian[abs(y)] * planeWeight * normalWeight;
-        sum += ssgiRawIndirect.Load(int3(tap, 0)) * weight;
+        float kernel = lerp(narrow[abs(x)] * narrow[abs(y)], gaussian[abs(x)] * gaussian[abs(y)], broad);
+        float weight = kernel * planeWeight * normalWeight;
+        sum += ssgiRawIndirect.Load(int3(tap, 0)).rgb * weight;
         weightSum += weight;
     }
-    return sum / weightSum;
+    return float4(sum / weightSum, center.a);
 }
 
 float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
@@ -220,6 +236,8 @@ float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
     float marchRotation = frac(SsgiSequence(cell).y + frame * 0.41421356);
     float3 sum = 0.0;
     float screenWeight = 0.0;
+    float secondMoment = 0.0;
+    const float3 luma = float3(0.2126, 0.7152, 0.0722);
     [loop] for (uint index = 0; index < rayCount; ++index)
     {
         float phi = frac(rotation.x + float(index) * 0.61803399) * (2.0 * PI);
@@ -240,14 +258,26 @@ float4 PSScreenSpaceGi(FullscreenOutput input) : SV_TARGET
             if (SsgiReadHistory(hitPixel, footprint, false, bounce, unusedMotion) > 0.0)
                 radiance += bounce * 0.35;
             sum += radiance * weight;
+            float luminance = dot(radiance, luma);
+            secondMoment += luminance * luminance * weight;
         }
     }
     // Crossfade at the radius into the same indirect term used by ray misses.
-    if (probeParameters.x > 0.5 && screenWeight < float(rayCount))
-        sum += ProbeIrradiance(position.xyz, normal) * (float(rayCount) - screenWeight);
+    float missingWeight = float(rayCount) - screenWeight;
+    if (probeParameters.x > 0.5 && missingWeight > 0.0)
+    {
+        float3 fallback = ProbeIrradiance(position.xyz, normal);
+        sum += fallback * missingWeight;
+        float fallbackLuma = dot(fallback, luma);
+        secondMoment += fallbackLuma * fallbackLuma * missingWeight;
+    }
     // Cosine-weighted samples estimate E / pi. Weight each attempted ray
     // equally, including misses that resolve to the chosen fallback.
-    return float4(clamp(sum / float(rayCount), 0.0, 65504.0), screenWeight / float(rayCount));
+    float3 estimate = sum / float(rayCount);
+    float mean = dot(estimate, luma);
+    float variance = max(secondMoment / float(rayCount) - mean * mean, 0.0);
+    float error = rayCount > 1 ? sqrt(variance / float(rayCount - 1)) / max(mean, 0.002) : 1.0;
+    return float4(clamp(estimate, 0.0, 65504.0), saturate(error));
 }
 
 bool SsrTrace(float3 position, float3 normal, float3 direction, out int3 hitPixel,

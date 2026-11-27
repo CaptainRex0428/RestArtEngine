@@ -165,7 +165,8 @@ RenderPipeline buildScenePipeline(const PipelineBuildInputs& inputs) {
                 PipelineResource::ScreenSpaceRawIndirect);
             if (filterDiffuse)
                 add(RenderPassKind::ScreenSpaceDiffuseFilter, "SSGI diffuse filter",
-                    PipelineResource::ScreenSpaceRawIndirect | PipelineResource::GBufferNormal | PipelineResource::GBufferPosition,
+                    PipelineResource::ScreenSpaceRawIndirect | PipelineResource::GBufferNormal | PipelineResource::GBufferPosition |
+                        PipelineResource::MotionVectors | PipelineResource::ScreenSpaceHistory,
                     PipelineResource::ScreenSpaceFilteredIndirect);
         }
         if (inputs.screenSpaceSpecular) {
