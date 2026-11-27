@@ -166,6 +166,45 @@ def measure_orbit(captures, method):
             "settled": measure_grain(settled, masks)}
 
 
+def measure_disocclusion(captures, method):
+    if not captures.has(f"{method}-revealed-normals"):
+        return None
+    old_normals = captures.image(f"{method}-occluded-normals", 1, 3).astype(np.int16)
+    normals = captures.image(f"{method}-revealed-normals", 1, 3)
+    # A previously curved receiver has moved away and exposed a planar wall.
+    mask = (np.abs(normals.astype(np.int16) - old_normals).max(axis=2) > 16)
+    mask &= plane_masks(normals)["backWall"]
+    if mask.sum() < 400:
+        raise ValueError("The moving sphere did not expose a measurable back-wall region")
+    reference = captures.image(f"{method}-revealed-64", 64, 0)[mask].astype(np.float32)
+    before = captures.image(f"{method}-occluded", 32, 0)[mask].astype(np.float32)
+    result = {"pixels": int(mask.sum()), "poseDifference": absolute_difference(before - reference)}
+    for frame in (1, 4):
+        current = captures.image(f"{method}-revealed-{frame}", frame, 0)[mask].astype(np.float32)
+        result[str(frame)] = absolute_difference(current - reference)
+    return result
+
+
+def back_wall_corner(captures):
+    normals = captures.image("normals", 1, 3).astype(np.int16)
+    back = (np.abs(normals - PLANES["backWall"]) <= 1).all(axis=-1)
+    side = (np.abs(normals - (255, 128, 128)) <= 1).all(axis=-1)
+    # Follow each visible shared edge onto the back wall. Both samples must
+    # lie on the same uninterrupted receiver, including at higher resolutions.
+    y, x = np.nonzero(side[:, :-1] & back[:, 1:])
+    width = normals.shape[1]
+    near, far = round(width * 0.005), round(width * 0.025)
+    inside = x + far < width
+    y, x = y[inside], x[inside]
+    continuous = np.ones(x.size, dtype=bool)
+    for offset in range(1, far + 1):
+        continuous &= back[y, x + offset]
+    y, x = y[continuous], x[continuous]
+    if x.size < 100:
+        raise ValueError("Cornell corner has too few uninterrupted back-wall rows")
+    return y, x + near, x + far
+
+
 def measure_plane(image, settled, before_edit, mask):
     mean_rgb = image[mask].mean(axis=0)
     mean_luma = float(mean_rgb @ LUMA)
@@ -201,9 +240,12 @@ def measure(captures, masks):
     result = {"directory": str(captures.directory), "adapter": captures.metadata.get("adapter"),
               "settings": {name: captures.metadata.get(name) for name in COMPARABLE_SETTINGS + BUDGET_SETTINGS},
               "methods": {}}
+    rows, near, far = back_wall_corner(captures)
     for method in ("ddgi", "ssgi"):
         mode = result["methods"][method] = {"gpuTiming": captures.metadata["timing"][method], "grain": {}}
         before = captures.image(f"{method}-diffuse-f064", 64, 11)
+        gradient = before[rows, near].astype(np.float32) - before[rows, far]
+        mode["corner"] = {"rows": int(rows.size), "nearMinusFarLuma": float((gradient @ LUMA).mean())}
         for group in ("diffuse", "light-edit"):
             settled = before if group == "diffuse" else captures.image(f"{method}-{group}-f064", 64, 11)
             mode[group] = {}
@@ -226,11 +268,26 @@ def measure(captures, masks):
         orbit = measure_orbit(captures, method)
         if orbit is not None:
             mode["orbit"] = orbit
+        reveal = measure_disocclusion(captures, method)
+        if reveal is not None:
+            mode["disocclusion"] = reveal
     return result
 
 
 def grain_errors(method, mode, baseline):
     errors = []
+    if baseline:
+        reference = baseline["corner"]["nearMinusFarLuma"]
+        if abs(mode["corner"]["nearMinusFarLuma"] - reference) > max(0.5, abs(reference) * 0.15):
+            errors.append(f"{method} indirect lighting gradient changed along the back-wall corner")
+    reveal = mode.get("disocclusion")
+    if reveal:
+        if reveal["poseDifference"]["mae"] < 5.0:
+            errors.append(f"{method} moving sphere produced insufficient contrast")
+        for frame in ("1", "4"):
+            for metric in ("mae", "p95"):
+                if reveal[frame][metric] > 0.3 * reveal["poseDifference"][metric]:
+                    errors.append(f"{method} newly revealed wall f{frame} {metric} retained too much of the previous receiver")
 
     def check_grain(label, row, window, limit):
         metric = row["windows"][window]["lumaResidualP95"]
@@ -271,8 +328,11 @@ def grain_errors(method, mode, baseline):
 
 def quality_errors(candidate, baseline):
     settings = candidate["settings"]
-    if (settings["width"], settings["height"], settings["antiAliasing"]) != (1281, 721, "FXAA"):
-        return ["Quality limits require the fixed 1281x721 Cornell capture with FXAA"]
+    resolution = (settings["width"], settings["height"])
+    if resolution not in ((1281, 721), (1920, 1080), (2560, 1440)) or settings["antiAliasing"] != "FXAA":
+        return ["Quality limits require the Cornell FXAA fixture at its default size, 1080p or 1440p"]
+    if resolution != (1281, 721) and baseline is None:
+        return ["1080p and 1440p checks need --baseline at the same resolution"]
     fixture = {"probeGridBudget": [30, 30, 30], "probeRayBudget": 32, "probeHysteresis": 0.89,
                "ssgiRayBudget": 4, "ssgiStepBudget": 8, "screenSpaceRadius": 2.0, "diffuseIntensity": 3.61,
                "lightEdit": {"horizontalOffsetMetres": 0.5, "radianceMultiplier": 1.65}}
@@ -295,6 +355,22 @@ def quality_errors(candidate, baseline):
     for method, mode in candidate["methods"].items():
         limits = CURVATURE_LIMITS[method]
         errors.extend(grain_errors(method, mode, baseline["methods"][method] if baseline else None))
+        if resolution != (1281, 721):
+            # The same 32 px window subtends a different angle at these sizes.
+            # Compare light response and retained energy at matched scale.
+            reference = baseline["methods"][method]
+            for plane in PLANES:
+                for group in ("diffuse", "light-edit"):
+                    for frame in ("1", "64"):
+                        luma = mode[group][frame][plane]["meanLuma"]
+                        previous = reference[group][frame][plane]["meanLuma"]
+                        if luma < MIN_BASELINE_LUMA_RATIO * previous:
+                            errors.append(f"{method} {group} f{frame} lost light on {plane}")
+                for frame, minimum in EDIT_COMPLETION_MINIMUM.items():
+                    response = mode["light-edit"][str(frame)][plane]["tiles"]["32"]["editCompletion"]
+                    if response is None or response < minimum:
+                        errors.append(f"{method} light edit f{frame} failed on {plane}")
+            continue
         for group in ("diffuse", "light-edit"):
             sequence = mode[group]
             for frame in FRAMES:

@@ -141,6 +141,10 @@ void probeGridInputs() {
     auto build = inputs(RenderPath::Deferred);
     build.probeGridGi = true;
     const auto pipeline = buildScenePipeline(build);
+    const auto rayTrace = indexOf(pipeline, RenderPassKind::ProbeRayTrace);
+    require(rayTrace < pipeline.passes.size() &&
+        contains(passAt(pipeline, rayTrace).reads, PipelineResource::ProbeHistory),
+        "Screen probe scheduling must read the raw per-probe change estimate.");
     require(!hasKind(pipeline, RenderPassKind::DeferredLighting),
         "GI linear source must shade the deferred G-buffer only once.");
     const auto update = indexOf(pipeline, RenderPassKind::ProbeUpdate);
@@ -172,6 +176,23 @@ void probeGridInputs() {
         contains(passAt(debugPipeline, overlay).writes, PipelineResource::SceneColor),
         "GI probe debug overlay must sample the atlas and draw into the scene colour.");
     require(validatePipeline(debugPipeline).valid, "GI probe debug pipeline is inconsistent.");
+    build.worldProbeGi = true;
+    for (const bool dirty : {true, false}) {
+        build.worldProbeLightingDirty = dirty;
+        const auto world = buildScenePipeline(build);
+        const auto trace = indexOf(world, RenderPassKind::ProbeRayTrace);
+        const auto project = indexOf(world, RenderPassKind::ProbeUpdate);
+        require(hasKind(world, RenderPassKind::WorldProbeLighting) == dirty &&
+            (!dirty || indexOf(world, RenderPassKind::WorldProbeLighting) < trace),
+            "World lighting is reinjected before ray tracing only when its cache is dirty.");
+        require(passAt(world, trace).reads == (PipelineResource::WorldProbeScene | PipelineResource::WorldProbeRadiance) &&
+            trace < project && project < indexOf(world, RenderPassKind::ProbeComposite) &&
+            contains(passAt(world, project).writes, PipelineResource::ProbeHistory | PipelineResource::ProbeAtlas),
+            "World probes sample the offscreen scene and publish SH for deferred composition.");
+        require(!hasKind(world, RenderPassKind::ProbeSpatialFilter) && !hasKind(world, RenderPassKind::HardwareTransport) &&
+            contains(passAt(world, indexOf(world, RenderPassKind::GiDebugOverlay)).reads, PipelineResource::ProbeAtlas) &&
+            validatePipeline(world).valid, "World probes render and debug their atlas independently of screen/DXR transport.");
+    }
 }
 
 void probeGridReflections() {

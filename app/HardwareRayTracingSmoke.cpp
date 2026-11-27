@@ -1051,6 +1051,27 @@ void runHardwareRayTracingSmoke(rae::renderer::SceneRenderer& renderer,
         require(uiSettings.debugView == 0, "Switching away from DDGI kept an unavailable probe view.");
         requireActive(GiMethod::ScreenSpace, GiQuality::Low);
         pass("SSGI/DDGI quality presets, independent DDGI reflections, temporary debug EV, probe view, custom budgets and save/reload");
+        selectOption("GI method", "Software world GI (voxel probes)", 4);
+        if (!uiSettings.globalIllumination.indirectDiffuse)
+            click(itemRect(findChild("ProjectSettingsContent"), "Indirect diffuse (color bleeding)").GetCenter());
+        selectOption("World probe quality", "Medium", 2);
+        requireActive(GiMethod::SoftwareWorld, GiQuality::Medium);
+        require(renderer.globalIlluminationStatus().usesWorldSpaceProbes && !renderer.globalIlluminationStatus().usesScreenSpaceProbes,
+            "Selecting world GI did not activate world-space tracing in the viewport.");
+        const auto oldHysteresis = uiSettings.globalIllumination.probeHysteresis;
+        const auto historyRect = itemRect(findChild("ProjectSettingsContent"), "Probe hysteresis");
+        click(ImVec2(historyRect.Min.x + historyRect.GetWidth() * .30f, historyRect.GetCenter().y));
+        require(uiSettings.globalIllumination.probeHysteresis != oldHysteresis && editor.projectSettingsDirty(),
+            "The world-probe history slider did not update the live GI settings.");
+        click(itemRect(findChild("ProjectSettingsContent"), "GI indirect").GetCenter());
+        requireActive(GiMethod::SoftwareWorld, GiQuality::Medium);
+        uiFrame("project-settings-world-medium-indirect.bmp");
+        click(itemRect(findWindow("Project Settings"), "Save project settings").GetCenter());
+        require(project::loadProject(project.manifest, reloaded, error), error);
+        require(!editor.projectSettingsDirty() && !reloaded.rendering.hardwareRayTracing &&
+            reloaded.rendering.globalIllumination == uiSettings.globalIllumination,
+            "Saving the world-GI project settings did not preserve the active method, quality and history.");
+        pass("Software world GI selected from Project Settings, rendered immediately and survived save/reload");
         editor.closeProjectSettings();
         uiFrame();
         require(!editor.projectSettingsOpen(), "Project settings failed to close.");

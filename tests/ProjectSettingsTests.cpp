@@ -372,6 +372,11 @@ void globalIlluminationRoundTrip() {
         savedDdgi.at("probeAutoFit") == false && savedDdgi.at("probeRayCount") == 24 &&
         savedDdgi.at("probeShOrder") == 2 && savedDdgi.at("probeScreenSpaceSteps") == 11,
         "DDGI serializes its probe grid and history controls.");
+    requested.globalIllumination.method = renderer::GlobalIlluminationMethod::SoftwareWorld;
+    require(saveProjectRenderingSettings(fixture.manifest, requested, error), error);
+    require(loadProject(fixture.manifest, loaded, error) && loaded.rendering == requested &&
+        Json::parse(bytes(fixture.manifest)).at("rendering").at("globalIllumination").at("method") == "softwareWorld",
+        "Software world GI keeps a distinct project method and its authored probe settings.");
     requested.globalIllumination.sampling = renderer::GlobalIlluminationSampling::Restir;
     requested.globalIllumination.restirCandidates = 7;
     requested.globalIllumination.restirDirect = false;
@@ -449,6 +454,11 @@ void globalIlluminationQualityBudgets() {
             "DDGI presets increase DXR and screen-space probe work without changing SSGI settings.");
         previousProbeWork = probeWork;
         previousScreenProbeWork = screenProbeWork;
+        request.method = GlobalIlluminationMethod::SoftwareWorld;
+        const auto world = resolveGiQuality(request);
+        require(world.probeGridX == ddgi.probeGridX && world.probeGridY == ddgi.probeGridY &&
+            world.probeGridZ == ddgi.probeGridZ && world.probeRayCount == ddgi.probeRayCount &&
+            world.probeShOrder == ddgi.probeShOrder, "Software world GI resolves the selected probe quality budget.");
     }
     request.screenSpaceQuality = request.probeQuality = Custom;
     require(resolveGiQuality(request).probeGridY == 11,
@@ -728,6 +738,10 @@ void editingDependenciesAndRestart() {
         applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
         require(!draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::ProbeGrid,
             "DDGI survives an incompatible backend because it is a raster algorithm.");
+        draft.globalIllumination.method = GlobalIlluminationMethod::SoftwareWorld;
+        applyProjectRenderingEdit(draft, ProjectRenderingEdit::Backend);
+        require(!draft.hardwareRayTracing && draft.globalIllumination.method == GlobalIlluminationMethod::SoftwareWorld,
+            "Software world GI remains selectable without a DXR backend.");
         require(!projectBackendAllowsHardware(backend), "Strict D3D11 variants do not expose hardware/GI editing.");
     }
     require(projectBackendAllowsHardware(MainRenderBackend::D3D11Dxr), "The hybrid backend allows feature requests.");

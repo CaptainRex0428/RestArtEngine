@@ -14,10 +14,14 @@ namespace rae::renderer { struct SceneSettings; }
 namespace rae::scene { class World; }
 namespace rae::assets { class AssetLibrary; }
 
+void runWorldGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
+    const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
+    const std::filesystem::path& output);
+
 void runRasterGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
     const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
     const std::filesystem::path& output);
 
 void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
     const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
-    const std::filesystem::path& output);
+    const std::filesystem::path& output, unsigned width, unsigned height);

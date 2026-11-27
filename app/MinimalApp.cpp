@@ -747,7 +747,8 @@ int wmain(int argc, wchar_t** argv) {
     bool hardwareRtSelfTest = false, projectSettingsSelfTest = false;
     bool quadView = false;
     bool giSelfTest = false, rasterGiSelfTest = false, pathTracingOverride = false;
-    bool softwareGiSelfTest = false;
+    bool softwareGiSelfTest = false, worldGiSelfTest = false;
+    unsigned giCaptureWidth = 1281, giCaptureHeight = 721;
     bool renderScaleTest = false, materialRenderStateTest = false, lightingSelfTest = false, meshAttributesSelfTest = false, cameraSelfTest = false;
     std::optional<bool> hardwareRtOverride;
     std::optional<MainRenderBackend> backendOverride;
@@ -778,7 +779,14 @@ int wmain(int argc, wchar_t** argv) {
             else if (arg == "--project-settings-self-test") hardwareRtSelfTest = projectSettingsSelfTest = true;
             else if (arg == "--gi-self-test") giSelfTest = true;
             else if (arg == "--raster-gi-self-test") giSelfTest = rasterGiSelfTest = true;
+            else if (arg == "--world-gi-self-test") giSelfTest = rasterGiSelfTest = worldGiSelfTest = true;
             else if (arg == "--software-gi-self-test") giSelfTest = rasterGiSelfTest = softwareGiSelfTest = true;
+            else if (arg == "--gi-test-resolution") {
+                const std::wstring value = i + 1 < argc ? argv[++i] : L"";
+                if (value == L"1080p") { giCaptureWidth = 1920; giCaptureHeight = 1080; }
+                else if (value == L"1440p") { giCaptureWidth = 2560; giCaptureHeight = 1440; }
+                else throw std::runtime_error("--gi-test-resolution expects 1080p or 1440p.");
+            }
             else if (arg == "--render-scale-test") renderScaleTest = true;
             else if (arg == "--material-render-state-self-test") materialRenderStateTest = true;
             else if (arg == "--camera-self-test") cameraSelfTest = true;
@@ -847,7 +855,9 @@ int wmain(int argc, wchar_t** argv) {
                     "--material-render-state-self-test (depth, face and frustum GPU validation)\n"
                     "--camera-self-test (projection, depth of field, previews and GI validation)\n"
                     "--raster-gi-self-test (SSGI / DDGI scene readback and quality budgets on the selected backend)\n"
+                    "--world-gi-self-test (off-screen world-space diffuse colour transfer and light edits)\n"
                     "--software-gi-self-test (Cornell SSGI / screen-space DDGI image sequence and light-edit response)\n"
+                    "--gi-test-resolution 1080p|1440p (software GI capture size; default 1281x721)\n"
                     "--aa-self-test (FXAA/TAA image quality and history validation on the selected backend)\n"
                     "--aa-ui-self-test (live anti-aliasing controls and project persistence validation)\n"
                     "--native-d3d12-self-test (independent native D3D12 GPU validation; no fallback)\n"
@@ -1191,8 +1201,11 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         if (giSelfTest) {
-            if (softwareGiSelfTest)
-                runSoftwareGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir);
+            if (worldGiSelfTest)
+                runWorldGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir);
+            else if (softwareGiSelfTest)
+                runSoftwareGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir,
+                    giCaptureWidth, giCaptureHeight);
             else if (rasterGiSelfTest)
                 runRasterGiSmoke(renderer, settings, editor.world(), editor.assets(), captureDir);
             else runGlobalIlluminationSmoke(renderer, captureDir);
@@ -1453,7 +1466,8 @@ int wmain(int argc, wchar_t** argv) {
             std::cout << "GI effective: "
                 << (gi.effective == GlobalIlluminationMethod::PathTracing ? "pathTracing"
                     : gi.effective == GlobalIlluminationMethod::ScreenSpace ? "screenSpace"
-                    : gi.effective == GlobalIlluminationMethod::ProbeGrid ? "probeGrid" : "disabled")
+                    : gi.effective == GlobalIlluminationMethod::ProbeGrid ? "probeGrid"
+                    : gi.effective == GlobalIlluminationMethod::SoftwareWorld ? "softwareWorld" : "disabled")
                 << "; mode: " << (gi.effectiveMode == GlobalIlluminationMode::Progressive ? "progressive" : "realtime")
                 << "; samples: " << gi.accumulatedSamples << '/' << gi.targetSamples
                 << "; DXR dispatches: " << renderer.hardwareRayTracingDispatchCount() << '\n';

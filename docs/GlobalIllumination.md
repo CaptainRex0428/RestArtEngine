@@ -4,14 +4,14 @@ GI 描述场景中的间接光照。引擎通过平台无关的 `GlobalIlluminat
 
 | 维度 | 当前选择 | 含义 |
 | --- | --- | --- |
-| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI) | 路径追踪直接采样光路。SSGI 从当前视图的可见表面取样。DDGI 在世界空间存储探针，可用 DXR 追踪场景几何，或使用屏幕空间回退。 |
-| 更新模式 `mode` | Progressive accumulation／Realtime | 路径追踪可输出渐进式完整画面，或为光栅提供实时间接光。SSGI 和 DDGI 固定实时更新。 |
+| GI 算法 `method` | Disabled／Path tracing／Screen space (SSGI)／Probe grid (DDGI)／Software world GI (voxel probes) | 路径追踪采样场景光路。SSGI 从可见表面取样。DDGI 使用 DXR 或屏幕探针射线。Software world GI 在世界体素网格上进行软件追踪，可接收离屏表面反弹。 |
+| 更新模式 `mode` | Progressive accumulation／Realtime | 路径追踪可输出渐进式完整画面，或为光栅提供实时间接光。三种 Deferred 光栅 GI 均实时更新。 |
 | 间接贡献 | Indirect diffuse／Indirect specular | 路径追踪、SSGI 和 DDGI 均可分别控制漫反射和镜面反射。DDGI 由探针提供低频漫反射，镜面使用独立的 SSR 或 DXR。 |
 | SSGI 性能与范围 | 质量档、漫反射方向数、步数、半径、厚度 | 调整采样工作量、世界空间追踪范围与交点容差。 |
 | DDGI 性能与范围 | 质量档、网格尺寸、每探针光线数、SH 阶数、屏幕空间步数、间距、自动拟合、历史权重 | 调整空间覆盖、方向精度、更新成本和收敛速度。 |
 | 路径采样 `sampling` | Uniform／ReSTIR | 实时路径追踪可分别调整直接光与间接光的 reservoir 候选。 |
 
-Windows 的严格 D3D11、D3D11 + D3D12 混合后端和原生 D3D12 在 Deferred 主场景支持 SSGI、屏幕空间探针和屏幕空间反射。混合和原生 D3D12 在设备、管线与场景材质兼容 DXR 1.1 时可追踪硬件探针及 SSGI／DDGI 的镜面反射。路径追踪要求 DXR，在 Forward、Deferred 上均有接收端。Vulkan、OpenGL、Linux 和 macOS 尚无上述 GI 执行路径。
+Windows 的严格 D3D11、D3D11 + D3D12 混合后端和原生 D3D12 在 Deferred 主场景支持 SSGI、屏幕空间探针、软件世界空间探针和屏幕空间反射。混合和原生 D3D12 在设备、管线与场景材质兼容 DXR 1.1 时可追踪硬件探针及 SSGI／DDGI 的镜面反射。路径追踪要求 DXR，在 Forward、Deferred 上均有接收端。Vulkan、OpenGL、Linux 和 macOS 尚无上述 GI 执行路径。
 
 ![GI 关闭与开启对比](images/gi-compare.png)
 
@@ -19,7 +19,7 @@ Windows 的严格 D3D11、D3D11 + D3D12 混合后端和原生 D3D12 在 Deferred
 
 ## 配置入口
 
-打开 `Project → Project Settings... → Rendering`（F3），在 `GI method` 选择方法。使用 SSGI 或 DDGI 时选择 Deferred，页面提供 `Use Deferred` 快捷入口。`Active in last scene frame` 显示最近场景帧使用的 GI 或探针来源，`Scene reflections` 显示实际镜面来源（DXR、SSR 或 Off）。`Active quality` 显示活动档位，仅启用 DDGI 镜面时省略探针档位。顶部 GI 状态可打开同一页面。
+打开 `Project → Project Settings... → Rendering`（F3），在 `GI method` 选择方法。使用 SSGI、DDGI 或 Software world GI 时选择 Deferred，页面提供 `Use Deferred` 快捷入口。`Active in last scene frame` 显示最近场景帧使用的 GI 或探针来源，`Scene reflections` 显示实际镜面来源（DXR、SSR 或 Off）。`Active quality` 显示活动档位，仅启用 DDGI 镜面时省略探针档位。顶部 GI 状态可打开同一页面。
 
 选择路径追踪会请求硬件光追，再由 `GI mode` 选择更新方式。显式关闭硬件或选择不提供 DXR 的启动后端时，编辑器关闭硬件反射和阴影，并把路径追踪切至 Disabled。SSGI 或 DDGI 的请求继续保留，按实际能力执行。GI 数值、材质草稿和场景编辑在视口实时更新，`Save project settings`／`Save All` 将项目请求写入 `.raproject`。
 
@@ -106,7 +106,7 @@ SSGI 与 DDGI 用于 Deferred 主场景，包括编辑器场景视口和运行�
 
 漫反射射线的步进采样位置随像素和帧错开。每个候选表面负责采样点前后的一段距离，相邻区间衔接并覆盖设置的射程。在射程最后 25% 内，屏幕命中的贡献平滑减到零，可用的探针按剩余权重补充间接光。这样小物体的反弹光可以平滑过渡到周围表面。
 
-相邻 2×2 个追踪像素对半球分层采样。使用软件探针回退时，独立的半分辨率 Pass 在连续 7×7 邻域里以高斯权重重建当帧漫反射，按接收面法线、金属度、切面距离和视深拒绝跨面的样本。最终合成以 3×3 二次 B 样条重建全分辨率漫反射。合成再按接收面颜色、金属度和 Fresnel 着色。
+相邻 2×2 个追踪像素对半球分层采样。使用软件探针回退时，半分辨率追踪把当前射线亮度的相对标准误差写入原始漫反射纹理的 alpha。滤波 Pass 结合邻域误差、重投影的深度覆盖率和像素运动调整核宽。低方差且历史可靠处可收窄到 3×3，首帧、相机或供光物移动时使用 7×7 高斯核。重建只混合本帧样本，依据接收面法线、金属度、切面距离和视深拒绝跨面采样。最终合成以 3×3 二次 B 样条重建全分辨率漫反射。合成再按接收面颜色、金属度和 Fresnel 着色。
 
 运动向量将接收面投回上一帧，四个历史采样点分别检验深度。首帧和历史失效时使用当前估计。相机和可见几何稳定时，累积窗口逐步增长到 128 帧。相机或供光物体移动、历史覆盖率下降时提高当帧权重，并用当前邻域限制旧值。被遮挡或新出现的表面按有效覆盖率回到当前估计。历史保存未乘艺术强度的间接漫反射，强度只在合成时施加一次。细小物体可能没有落在低分辨率采样点上。
 
@@ -123,7 +123,9 @@ SSGI 与 DDGI 用于 Deferred 主场景，包括编辑器场景视口和运行�
 
 DDGI 在三维规则网格上存储各方向的低频入射光，用于接收面的间接漫反射。自动拟合将可见 Actor 包围盒的 X、Y、Z 跨度分别除以对应轴的单元数。为使薄场景的探针层仍可分开，最小轴间距取 1 厘米和最大轴间距四分之一中的较大值。探针位于单元中心，覆盖在最外层单元的外边界之外逐渐衰减。关闭自动拟合后使用相机目标和统一的 `Probe spacing`，按一个网格间距对齐原点。设置页显示本帧三个轴的实际间距，`GI probes` 可检查探针位置和采到的光照。
 
-每帧对活动网格内的全部探针取球面方向样本，跨帧轮换方向。偶数射线预算在球面上成对采用相反方向，使均匀光场的一阶方向分量相互抵消。奇数自定义预算覆盖整个球面。`Probe hysteresis` 控制历史平滑程度。0 直接使用本帧的探针样本，正值在输入稳定后逐步延长平均窗口，最多 1024 次更新，1 仍持续追踪。拖动迟滞滑块时沿用已有的探针光照，新值从当帧起生效。每个探针在 SH 图集的 alpha 中记录实际保留的历史长度。从 0 调回 1 后，由一个样本重新积累。屏幕探针在相机移动时将历史窗口限制为最多三次更新。场景、灯光、材质或探针布局导致历史失效时，从当帧结果重新开始。更新后的探针可立即供同帧合成采样。
+探针在球面取样，跨帧轮换方向。偶数射线预算在球面上成对采用相反方向，使均匀光场的一阶方向分量相互抵消。奇数自定义预算覆盖整个球面。`Probe hysteresis` 控制历史平滑程度。0 直接使用当帧全量样本，正值在输入稳定后逐步延长平均窗口，最多保留 1024 次更新，1 仍持续追踪。每个探针的第 0 个 SH 系数在 alpha 中记录实际保留的历史长度。拖动迟滞滑块时新值从当帧起生效。从 0 调回 1 后，由一个样本重新积累。屏幕探针在相机移动时将历史窗口限制为最多三次更新。场景、灯光、材质或探针布局导致历史失效时，从当帧结果重新开始。更新后的探针可立即供同帧合成采样。
+
+独立的屏幕空间 DDGI 在首帧、相机移动及光照、几何、材质或迟滞变化时全量追踪。迟滞大于 0 且输入连续稳定 16 帧后，每层按四个探针分组轮换，每个探针至少每四帧更新一次。第 1 个原始 SH 系数的 alpha 记录平均入射光变化量，变化较大的探针可在两次轮换之间再更新一次。跳过的探针保留上次的系数和历史长度。下表按全量更新列出射线预算。SSGI 的回退探针和 DXR 探针仍逐帧更新全部探针。
 
 - **DXR 探针**使用场景加速结构，可命中相机外和隐藏的几何。每条探针射线把命中表面的直接漫反射投影到 SH。矩形光源使用四点面积求积，开启硬件阴影时检查采样点的可见性。镜面高光由镜面通道处理。六个方向各自累计命中距离、距离平方和有效权重，接收时用带偏移的 Chebyshev 可见性权重抑制隔墙漏光。直接看到的矩形灯和天空由光栅主表面的基底处理。
 - **屏幕空间探针**在同一 2×2×2 单元组为相邻探针分配互补的球面方向。每个步段用中点定位 G-buffer 表面，求射线与切平面在整个步段内的交点，再用重投影检查法线和位置。容差按像素覆盖范围和位置缓冲的精度计算。探针起点在视口外时，射线可以在进入视口后命中。每条射线只步进一次，结果暂存并由所有 SH 系数复用，未命中的方向贡献 0。
@@ -158,6 +160,23 @@ DDGI 的 `SSR distance`、`SSR steps`、`SSR thickness` 默认分别为 2 m、8 
 - 经典 SSR 论文沿透视校正的二维 DDA 遍历深度缓冲，随机 SSR 的演讲使用重要性采样、邻域复用和时间重投影处理粗糙反射。引擎当前采用固定预算的世界空间分段求交，加半分辨率追踪和几何／材质约束空间重建。SSGI 的时域历史只服务漫反射。[McGuire、Mara，Efficient GPU Screen-Space Ray Tracing，JCGT 2014](https://jcgt.org/published/0003/04/04/) · [Stachowiak，Stochastic Screen-Space Reflections，SIGGRAPH 2015](https://h3.gd/stochastic-ssr/)
 - Unreal Engine 的 `SSRT/SSRTDiffuseIndirect.usf` 按接收面半球采样，`ScreenSpaceDenoise.cpp` 将当前帧重建和时域处理分开，`Lumen/LumenScreenProbeGatherTemporal.usf` 在复用历史前检查重投影。本引擎沿用当前帧先重建、历史再稳定画面的思路，保留自身的屏幕射线、球谐探针和资源组织。
 - DXR 1.1 定义 `RayQuery`，允许 Compute Shader 直接查询加速结构并处理求交结果。引擎使用该接口实现镜面与探针的独立计算 dispatch，由 Deferred 合成接收结果。[Microsoft DirectX Raytracing Functional Spec，Inline raytracing](https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html#inline-raytracing)
+
+### Software world GI (voxel probes)
+
+在 Deferred 主视图选择 `Software world GI (voxel probes)` 并开启 `Indirect diffuse`。关闭硬件光追后，移出相机的红墙仍能把受光后的颜色反弹到画面内的中性地板。在 `GI indirect` 中关闭间接镜面可以单独检查这部分贡献。开启间接镜面时另行使用 SSR 或可用且已请求的 DXR 反射。
+
+引擎以所有可见几何 Actor 的世界包围盒建立均匀体素网格，按三角形和体素相交结果记录材质槽、几何法线、平面偏移和双面状态。每个占用体素的两个朝向分别缓存受到的直接漫反射光。方向灯、点光、聚光和矩形灯使用场景实际参数，天空使用低频近似。开启场景阴影时，投影灯的采样点通过同一世界网格检测遮挡。探针按 DDA 算法逐格前进，命中后读取表面辐亮度，每条射线的结果供全部 SH 系数复用。接收面使用相邻探针重建低频漫反射。
+
+| 调节项 | 对世界空间探针的作用 |
+| --- | --- |
+| `probeQuality` | Low、Medium、High 使用上方 DDGI 表中的网格、方向数和 SH 阶数。Custom 可按轴设置 2–32 个探针，每探针 1–32 条射线。 |
+| `probeAutoFit`、`probeSpacing` | 控制接收面的探针覆盖。用于射线求交的体素网格始终覆盖场景几何，所以局部探针也能采到网格外的供光物体。 |
+| 网格尺寸 | 体素网格最长轴取最大探针轴数的两倍，限制为 16–64 格。Low、Medium、High 分别为 16、24、32 格，其余轴按场景比例分配。单元尺寸决定薄墙与细节可分辨的尺度。 |
+| `probeHysteresis`、`indirectDiffuseIntensity` | 分别控制探针历史平滑程度和最终接收面的漫反射强度。世界射线按体素交点步进，`probeScreenSpaceSteps` 只影响屏幕追踪。 |
+
+几何或剔除方式变化时，引擎在 CPU 重建体素覆盖。只调整材质底色或金属度时，复用原有体素归属并更新反射率。灯光移动、换色或亮度变化时在 GPU 重新计算表面光照。固定布局下，相机旋转、平移和视野变化均可复用世界光照。停用世界漫反射或切换方法时，主视图释放专用世界缓存。最大 64³ 场景网格的几何和双面辐亮度纹理合计 6 MiB。CPU 留存约 3 MiB 的打包表面及材质索引，探针历史、射线图集和体素化临时分配另计。
+
+该方法计算一次表面漫反射反弹。供光面按每槽底色和金属度求反射率，逐像素 UV 纹理和自定义材质函数的细节尚未进入体素缓存。一个体素仅保留一张代表性面，多层薄几何、密集小物件和跨墙的探针插值可能导致漏光。大范围场景会降低小物体的空间精度，大型动态网格变动会触发 CPU 重建。镜面精度由独立反射通道决定。
 
 ### 调试视图
 
@@ -225,7 +244,7 @@ SSGI 的重投影只读取独立的线性间接图和深度，DDGI 复用世界�
 }
 ```
 
-缺失 GI 对象或 `method` 使用 `disabled`。方法可选 `disabled`、`pathTracing`、`screenSpace`、`probeGrid`。`screenSpaceQuality` 与 `probeQuality` 分别接受 `custom`、`low`、`medium`、`high`。两种光栅方法的缺省预算见上表。缺失 `probeSpacing`、`probeHysteresis`、`probeAutoFit` 时使用 1.0、0.95、true。路径追踪的模式、降噪、运动矢量及采样策略分别默认 `progressive`、`spatial`、`automatic`、`uniform`。两个贡献默认开启，间接漫反射强度默认 1。项目加载和保存验证所选值及数值范围，保留已有未知字段。
+缺失 GI 对象或 `method` 使用 `disabled`。方法可选 `disabled`、`pathTracing`、`screenSpace`、`probeGrid`、`softwareWorld`。`screenSpaceQuality` 与 `probeQuality` 分别接受 `custom`、`low`、`medium`、`high`。光栅方法的缺省预算见上表。缺失 `probeSpacing`、`probeHysteresis`、`probeAutoFit` 时使用 1.0、0.95、true。路径追踪的模式、降噪、运动矢量及采样策略分别默认 `progressive`、`spatial`、`automatic`、`uniform`。两个贡献默认开启，间接漫反射强度默认 1。项目加载和保存验证所选值及数值范围，保留已有未知字段。
 
 在引擎根目录运行光栅 GI 自测，每种后端使用独立的输出目录。以下示例使用 CMake Release 构建，依次覆盖严格 D3D11 的屏幕空间路径、混合和原生 D3D12 的可用硬件路径。
 
@@ -237,6 +256,13 @@ $cornell = '.\Projects\PathTracing_CornellBox\PathTracing_CornellBox.raproject'
 & $engine --raster-gi-self-test --project $cornell --backend d3d12 --hardware-rt --capture-dir artifacts/gi-d3d12
 ./scripts/Test-DdgiImageQuality.ps1 -CaptureDirectory artifacts/gi-d3d12
 ./scripts/Test-SsgiCeilingImageQuality.ps1 -CaptureDirectory artifacts/gi-d3d12 -RequireDxr
+```
+
+世界空间探针自测先用 G-buffer 核实供光墙在相机外，再对比供光墙红／蓝换色、移动矩形灯、加入薄隔墙时的中性地板颜色。输出包括同曝光截图和 `world-gi.json` 中的接收面通道均值。第一条命令在严格 D3D11 上验证纯软件路径。第二条命令在支持 DXR 的原生 D3D12 机器上先测软件路径，再生成渐进路径追踪参照。
+
+```powershell
+& $engine --world-gi-self-test --project $cornell --backend d3d11 --no-backend-fallback --no-hardware-rt --capture-dir artifacts/world-gi-d3d11
+& $engine --world-gi-self-test --project $cornell --backend d3d12 --no-backend-fallback --hardware-rt --capture-dir artifacts/world-gi-d3d12
 ```
 
 DDGI 图像检查使用标准 Cornell 相机的中档 DXR 图，按固定的天花板、地板和漫反射球区域检出网格亮斑、亮度折线与球面黑斑。SSGI 图像检查使用同机位的中档 +3 EV 间接光图，测量天花板弧边两侧的亮度落差，同时检查左球上方亮度和两侧墙面互染。严格 D3D11 下省略 `-RequireDxr`。GPU 自测还保存相隔 1 帧和 97 帧的同曝光 DDGI 间接光图。中档 `ceilingTemporal` 检查在 FXAA 和 3.61 倍间接漫反射强度下预热 32 帧，连续读回 16 帧的天花板区域，验证亮度高于 GI 关闭时，并限制像素相邻帧差值和 8×8 色块时间极差的第 95 百分位。
@@ -256,10 +282,12 @@ py ./scripts/Test-SoftwareGiResponsiveness.py artifacts/gi-software --check --ou
 
 图像脚本用 G-buffer 法线选择天花板、地板和后墙的内部区域，衡量 8／32 像素块的亮度和色度起伏、偏离第 64 帧的程度，以及改灯后当帧接近新光照的程度。`--check` 对固定的 1281×721 夹具检查绝对和相对波动、亮度下限和改灯响应。使用 `--baseline` 可另比对同机位同曝光的基线。省略 `--check` 时输出测量结果，便于比较其他档位。时间戳与图像指标可用于比较改动，帧 64 是测量参考点。脚本还检查 5、9、17 像素邻域内的亮度残差。自测在转动镜头期间保存 Lit，在同一终止机位停稳后再次回读画面和法线，用于衡量移动中的颗粒和光照响应。
 
+移动灰球的回归在遮挡前后分别保存法线，用新露出的后墙像素比较第 1、4 帧与第 64 帧的 RGB 误差。GPU 耗时记录静置和转动时的中位数、最大值及有效帧数。软件自测可追加 `--gi-test-resolution 1080p` 或 `1440p`。这两个尺寸的图像检查需要同尺寸旧版本的采集，使用 `--baseline <旧版本目录> --check` 比较能量与改灯响应，并验证颗粒和新露出区域。沿可见侧墙与后墙的交界，脚本在同一段连续后墙上取近、远两点，比较收敛后保留的亮度梯度。
+
 读取输出目录内的 `raster-gi.json` 和 Lit／GI indirect 图像，可对照质量档、首帧、零强度、实际执行路径及有效 GPU 时戳。比较耗时请使用同次运行的适配器、分辨率、相机和硬件状态；报告中的 `medianGpuFrameMs` 是主渲染 RHI 时间戳区间。DXR 探针与反射另在 DXR command list 上计时，`medianDxrDispatchMs` 只覆盖 dispatch，排除加速结构构建、历史复制与队列同步。Profiler 分别标明帧号和 DXR dispatch 毫秒数。另可使用 `--gi-self-test --capture-dir artifacts/gi-path` 验证路径追踪收敛、颜色溢出和两种光栅接收端，使用 `--hardware-rt-self-test` 检查硬件配置交互与保存重载。
 
 当前不包含透明／折射、发光材质、体积散射、纹理或环境光重要性采样及神经网络降噪。有限反弹、有限样本、现有材质模型和空间滤波会限制结果；高动态范围环境及低粗糙材质可能需要更多样本，快速移动物体的遮挡/深度边界仍可能拖影。同步与硬件能力要求见 [HardwareRayTracing](HardwareRayTracing.md)。
 
 ## 扩展位置
 
-新增 GI 方法涉及 `GlobalIlluminationMethod`、项目格式、设置界面、能力判定和主场景 pass 编排。光栅 GI pass 在 `src/Renderer/Pipelines/ScenePipeline.cpp` 声明资源依赖，在 `SceneRenderer.cpp` 绑定与执行。`Shaders/Private/Scene.hlsl` 引入 `ScreenSpaceGi.hlsli` 与 `ProbeGridGi.hlsli`，分别实现屏幕空间追踪、探针查询及对应的接收面合成。软硬探针共用 `ProbeLighting.hlsli` 的采样方向与带符号 SH 约定。DXR 探针、反射及路径采样使用 `HardwareRayTracing.hlsl` 和 D3D12 后端。积分与光源估计使用 `PathTracing.hlsli`。改变采样分布、网格映射、材质含义或历史格式时，更新对应历史失效条件，并检查各可用后端的实际接收面图像。
+新增 GI 方法涉及 `GlobalIlluminationMethod`、项目格式、设置界面、能力判定和主场景 pass 编排。光栅 GI pass 在 `src/Renderer/Pipelines/ScenePipeline.cpp` 声明资源依赖，在 `SceneRenderer.cpp` 绑定与执行。`Shaders/Private/Scene.hlsl` 引入 `ScreenSpaceGi.hlsli` 与 `ProbeGridGi.hlsli`，分别实现屏幕空间追踪、探针查询及对应的接收面合成。世界场景的体素覆盖与缓存管理位于 `WorldVoxelCoverage.h` 和 `WorldProbeScene.inl`，逐体素照明与软件射线查询位于 `WorldProbeGi.hlsli`。软硬探针共用 `ProbeLighting.hlsli` 的采样方向与带符号 SH 约定。DXR 探针、反射及路径采样使用 `HardwareRayTracing.hlsl` 和 D3D12 后端。积分与光源估计使用 `PathTracing.hlsli`。改变采样分布、网格映射、材质含义或历史格式时，更新对应历史失效条件，并检查各可用后端的实际接收面图像。

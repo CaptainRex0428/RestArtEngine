@@ -1581,6 +1581,210 @@ void runGlobalIlluminationSmoke(rae::renderer::SceneRenderer& renderer,
     }
 }
 
+void runWorldGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
+    const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
+    const std::filesystem::path& output) {
+    using namespace rae::renderer;
+    constexpr unsigned width = 320, height = 192;
+    std::filesystem::create_directories(output);
+    Json report{{"adapter", renderer.adapterName()}, {"width", width}, {"height", height}, {"passed", false}};
+    report["backend"] = mainRenderBackendKey(renderer.mainBackendSelection().effective);
+    const auto publish = [&] { write(output / "world-gi.json", report.dump(2)); };
+    try {
+        std::string error;
+        require(renderer.ensureSceneTargetSize(width, height, error), error);
+        const bool testDxr = settings.hardwareRayTracing && renderer.hardwareRayTracingSupported();
+        const auto initialErrors = renderer.validationErrorCount();
+        const auto initialDispatches = renderer.hardwareRayTracingDispatchCount();
+        settings.editorViewport = settings.viewportVisible = true;
+        settings.offscreenTarget = false;
+        settings.viewportX = settings.viewportY = 0;
+        settings.viewportWidth = width;
+        settings.viewportHeight = height;
+        settings.path = RenderPath::Deferred;
+        settings.rayTracing = settings.hardwareRayTracing = settings.hardwareRayTracingReflections = false;
+        settings.hardwareRayTracingShadows = true;
+        settings.shadowMethod = ShadowMethod::ShadowMapPCF16;
+        settings.antiAliasing.method = AntiAliasingMethod::Disabled;
+        settings.cameraPose.reset();
+        settings.cameraYaw = 0;
+        settings.cameraPitch = .08f;
+        settings.cameraDistance = 6;
+        settings.cameraTarget[0] = settings.cameraTarget[2] = 0;
+        settings.cameraTarget[1] = .65f;
+        settings.cameraLens.verticalFovDegrees = 17;
+        settings.exposure = 1;
+        auto& gi = settings.globalIllumination;
+        gi.method = GlobalIlluminationMethod::Disabled;
+        gi.indirectDiffuse = gi.probeAutoFit = true;
+        gi.indirectSpecular = false;
+        gi.indirectDiffuseIntensity = 1;
+        gi.probeQuality = GlobalIlluminationQuality::High;
+        gi.probeHysteresis = .9f;
+        auto fixture = world;
+        auto fixtureAssets = assets;
+        const auto find = [&](const char* name) {
+            const auto it = std::find_if(fixture.actors.begin(), fixture.actors.end(),
+                [&](const auto& actor) { return actor.name == name && actor.visible; });
+            require(it != fixture.actors.end(), std::string("World GI Cornell fixture requires ") + name);
+            return *it;
+        };
+        const auto wall = find("Red wall");
+        const auto floor = find("Floor");
+        const auto sphereId = find("Satin sphere").id;
+        auto* sphereActor = fixture.findActor(sphereId);
+        const auto greyId = fixtureAssets.createMaterial("World GI grey receiver");
+        auto* grey = fixtureAssets.findMaterial(greyId);
+        std::fill_n(grey->baseColor, 3, .32f);
+        grey->metallic = 0;
+        grey->roughness = .95f;
+        sphereActor->mesh.materialId = greyId;
+        sphereActor->mesh.materialOverrides.clear();
+        sphereActor->transform.position[0] = .55f;
+        sphereActor->transform.position[1] = .48f;
+        sphereActor->transform.position[2] = 0;
+        std::fill_n(sphereActor->transform.scale, 3, .48f);
+        const auto* material = assets.findMaterial(wall.mesh.materialId);
+        require(material != nullptr, "Cornell donor material missing.");
+        auto donor = *material;
+        donor.metallic = 0;
+        donor.roughness = .9f;
+        const auto setBlue = [&](bool blue) {
+            donor.baseColor[0] = blue ? .03f : .8f;
+            donor.baseColor[1] = .03f;
+            donor.baseColor[2] = blue ? .8f : .03f;
+        };
+        // Duplicate the authored zero-thickness wall. Keep both geometries in
+        // the scene throughout and vary only the visibility of this blocker.
+        const auto blockerId = fixture.duplicateActor(wall.id);
+        auto* blocker = fixture.findActor(blockerId);
+        require(blocker != nullptr, "Cannot construct thin partition.");
+        blocker->mesh.materialId = floor.mesh.materialId;
+        blocker->mesh.materialOverrides.clear();
+        blocker->transform.position[0] += .5f;
+        blocker->visible = false;
+        auto& light = fixture.environment.areaLight;
+        require(light.enabled, "Cornell fixture requires the authored rectangular light.");
+        fixture.environment.overrideLighting = true;
+        fixture.environment.directionalIntensity = fixture.environment.environmentIntensity = 0;
+        light.center[0] = -1.35f;
+        const auto capture = [&](unsigned frames) {
+            Pixels pixels;
+            for (unsigned i = 0; i < frames; ++i) {
+                TraceFrame trace;
+                require(renderer.render(settings, fixture, fixtureAssets, error, &donor), error);
+                if (i + 1 == frames) {
+                    unsigned w = 0, h = 0;
+                    require(renderer.readScenePixels(pixels, w, h, error), error);
+                    require(w == width && h == height, "World GI capture dimensions changed.");
+                }
+                require(renderer.present(false, error), error);
+            }
+            return pixels;
+        };
+        settings.debugView = 2;
+        setBlue(false);
+        const auto albedo = capture(1);
+        setBlue(true);
+        const auto blueAlbedo = capture(1);
+        report["visibleDonorPixels"] = changedPixels(albedo, blueAlbedo, 0);
+        require(report["visibleDonorPixels"] == 0, "The coloured donor is visible in the G-buffer.");
+        settings.debugView = 3;
+        const auto normals = capture(1);
+        savePixels(output / "receiver-albedo.bmp", albedo, width, height);
+        savePixels(output / "receiver-normals.bmp", normals, width, height);
+        Mask receiver(width * height);
+        for (unsigned y = 2; y + 2 < height; ++y)
+            for (unsigned x = width / 8; x < width / 2; ++x) {
+                const auto p = y * width + x, i = p * 4;
+                receiver[p] = normals[i + 1] >= 254 && std::abs(int(normals[i]) - 128) < 3 &&
+                    std::abs(int(normals[i + 2]) - 128) < 3 && albedo[i] > 100 &&
+                    std::abs(int(albedo[i]) - albedo[i + 1]) < 8 && std::abs(int(albedo[i]) - albedo[i + 2]) < 8;
+            }
+        report["neutralFloorPixels"] = maskCount(receiver);
+        require(maskCount(receiver) > 200, "No neutral floor receiver in offscreen donor fixture.");
+        // The test material's three equal linear .32 channels are the sphere's
+        // unique albedo ID. Retain the curved hemisphere facing the offscreen wall.
+        Mask sphere(width * height);
+        const int greyByte = int(std::lround(std::pow(.32, 1.0 / 2.2) * 255));
+        for (std::size_t p = 0; p < sphere.size(); ++p) {
+            const auto i = 4 * p;
+            sphere[p] = std::abs(int(albedo[i]) - greyByte) <= 2 && albedo[i] == albedo[i + 1] &&
+                albedo[i] == albedo[i + 2] && normals[i] < 110 && normals[i + 2] > 140;
+        }
+        sphere = erodeMask(sphere, width, height, 1);
+        report["greySpherePixels"] = maskCount(sphere);
+        require(maskCount(sphere) > 200, "The facing hemisphere of the grey test sphere is missing.");
+
+        const auto transfer = [&](const char* label, unsigned frames) {
+            const auto measure = [&](bool blue) {
+                setBlue(blue);
+                const auto image = capture(frames);
+                savePixels(output / (std::string(label) + (blue ? "-blue.bmp" : "-red.bmp")), image, width, height);
+                return std::array{meanColour(image, receiver), meanColour(image, sphere)};
+            };
+            const auto red = measure(false);
+            const auto blue = measure(true);
+            std::array<double, 2> scores;
+            for (unsigned i = 0; i < scores.size(); ++i) {
+                scores[i] = red[i][0] - blue[i][0] + blue[i][2] - red[i][2];
+                report[i == 0 ? "receiver" : "greySphere"][label] =
+                    {{"red", red[i]}, {"blue", blue[i]}, {"redBlueTransfer", scores[i]}};
+            }
+            return scores;
+        };
+        const auto checkTransport = [&](bool reference) {
+            if (reference) {
+                settings.hardwareRayTracing = true;
+                gi.method = GlobalIlluminationMethod::PathTracing;
+                gi.mode = GlobalIlluminationMode::Progressive;
+                gi.samplesPerFrame = 16;
+                gi.targetSamples = 256;
+                gi.maxBounces = 4;
+                settings.debugView = 0;
+            } else {
+                gi.method = GlobalIlluminationMethod::SoftwareWorld;
+                settings.debugView = 11;
+                settings.giDebugExposureEv = 0;
+            }
+            const unsigned frames = reference ? 16 : 32;
+            blocker->visible = false;
+            light.center[0] = -1.35f;
+            const auto nearTint = transfer(reference ? "dxr-near" : "world-near", frames);
+            light.center[0] = 1.35f;
+            const auto farTint = transfer(reference ? "dxr-far" : "world-far", frames);
+            light.center[0] = -1.35f;
+            blocker->visible = true;
+            const auto blocked = transfer(reference ? "dxr-partition" : "world-partition", frames);
+            const auto status = renderer.globalIlluminationStatus();
+            if (reference)
+                require(status.effective == gi.method && status.accumulatedSamples == gi.targetSamples &&
+                    renderer.hardwareRayTracingDispatchCount() > initialDispatches, "DXR reference did not converge.");
+            else
+                require(status.effective == gi.method && status.usesWorldSpaceProbes && !status.usesScreenSpaceProbes &&
+                    !status.usesHardwareProbeTrace && renderer.hardwareRayTracingDispatchCount() == initialDispatches,
+                    "Software world probe transport did not execute independently.");
+            for (unsigned i = 0; i < nearTint.size(); ++i) {
+                const std::string name = i == 0 ? "floor" : "grey sphere";
+                require(nearTint[i] > .001, "Offscreen colour transfer missing on " + name);
+                require(nearTint[i] > farTint[i] + .0003, "Moving the light did not reduce colour transfer onto " + name);
+                require(std::abs(blocked[i]) < nearTint[i] * .5, "Thin partition did not attenuate transfer onto " + name);
+            }
+        };
+        checkTransport(false);
+        report["dxrReference"] = testDxr;
+        if (testDxr) checkTransport(true);
+        report["validationErrors"] = renderer.validationErrorCount() - initialErrors;
+        require(report["validationErrors"] == 0, "World GI GPU validation error.");
+        report["passed"] = true;
+        publish();
+    } catch (const std::exception& failure) {
+        report["failure"] = failure.what();
+        publish();
+        throw;
+    }
+}
+
 void runRasterGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
     const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
     const std::filesystem::path& output) {
@@ -2038,9 +2242,8 @@ void runRasterGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::Sce
 
 void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::SceneSettings settings,
     const rae::scene::World& world, const rae::assets::AssetLibrary& assets,
-    const std::filesystem::path& output) {
+    const std::filesystem::path& output, unsigned width, unsigned height) {
     using namespace rae::renderer;
-    constexpr unsigned width = 1281, height = 721;
     constexpr unsigned settledFrame = 64;
     constexpr unsigned timingWindow = 16;
     const auto hasActor = [&world](const char* name) {
@@ -2080,9 +2283,15 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
         {"probeRayBudget", effectiveProbeBudget.probeRayCount}, {"ssgiRayBudget", screenBudget.screenSpaceRayCount},
         {"ssgiStepBudget", screenBudget.screenSpaceSteps}, {"screenSpaceRadius", gi.screenSpaceRadius},
         {"captures", Json::object()}, {"passed", false}};
-    const auto frame = [&](const rae::scene::World& scene, unsigned index, const std::string& name) {
+    std::map<std::uint64_t, double> measuredGpuFrames;
+    const unsigned settledProbePeriod = effectiveProbeBudget.probeHysteresis > 0.0f ? 4u : 1u;
+    const auto frame = [&](const rae::scene::World& scene, unsigned index, const std::string& name,
+                           unsigned expectedProbePeriod = 0) {
         TraceFrame trace;
         require(renderer.render(settings, scene, assets, error), error);
+        const auto& diagnostic = renderer.diagnosticsFrame();
+        if (diagnostic.gpuStatus == GpuTimingStatus::Ready && diagnostic.gpuFrameId)
+            measuredGpuFrames.emplace(diagnostic.gpuFrameId, diagnostic.gpuTotalMs);
         const auto status = renderer.globalIlluminationStatus();
         require(status.effective == gi.method && !status.usesHardwareProbeTrace && !status.usesHardwareReflections,
             "Unexpected GI mode during software capture: " + status.reason);
@@ -2094,6 +2303,19 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
             const auto filename = name + ".bmp";
             savePixels(output / filename, image, width, height);
             report["captures"][name] = {{"image", filename}, {"frame", index}, {"view", settings.debugView}};
+            if (status.screenProbeUpdatePeriod) {
+                report["captures"][name]["screenProbeUpdatePeriod"] = status.screenProbeUpdatePeriod;
+                report["captures"][name]["screenProbeRayBudget"] = status.screenProbeRayBudget;
+            }
+            if (gi.method == GlobalIlluminationMethod::ProbeGrid && expectedProbePeriod != 0) {
+                const auto columns = effectiveProbeBudget.probeGridX * effectiveProbeBudget.probeGridZ;
+                const auto tracedColumns = expectedProbePeriod == 1 ? columns : 2 * ((columns + 3) / 4);
+                const auto rayBudget = tracedColumns * effectiveProbeBudget.probeGridY * effectiveProbeBudget.probeRayCount;
+                require(status.screenProbeUpdatePeriod == expectedProbePeriod && status.screenProbeRayBudget == rayBudget,
+                    name + ": expected screen-probe update period " + std::to_string(expectedProbePeriod) +
+                    " and ray budget " + std::to_string(rayBudget) + ", got " +
+                    std::to_string(status.screenProbeUpdatePeriod) + " and " + std::to_string(status.screenProbeRayBudget));
+            }
         }
         require(renderer.present(false, error), error);
     };
@@ -2120,7 +2342,7 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
                 for (unsigned i = 1; i <= settledFrame; ++i) {
                     const bool capture = i == 1 || i == 4 || i == 8 || i == 32 || i == settledFrame;
                     const auto suffix = (i < 10 ? "00" : "0") + std::to_string(i);
-                    frame(scene, i, capture ? prefix + "-f" + suffix : std::string{});
+                    frame(scene, i, capture ? prefix + "-f" + suffix : std::string{}, i <= 8 ? 1u : settledProbePeriod);
                 }
             };
             series(world, label + "-diffuse");
@@ -2135,7 +2357,7 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
             std::map<std::string, std::vector<double>> passes;
             for (unsigned i = 1; i <= settledFrame; ++i) {
                 const std::string name = i == 1 ? label + "-lit-f001" : i == settledFrame ? label + "-lit-f064" : "";
-                frame(world, i, name);
+                frame(world, i, name, i == 1 ? 1u : settledProbePeriod);
                 const auto& timing = renderer.diagnosticsFrame();
                 if (i <= settledFrame - timingWindow || timing.gpuStatus != GpuTimingStatus::Ready ||
                     timing.gpuFrameId <= lastTiming) continue;
@@ -2153,6 +2375,7 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
             timing = {{"timedFrames", times.size()}, {"medianGpuFrameMs", median(times)}};
             for (auto& [name, values] : passes)
                 timing["medianGpuPassMs"][name] = median(values);
+            timing["peakGpuFrameMs"] = times.back();
 
             // Keep history live during the orbit. Capture masks at the same
             // camera positions so tests can exclude silhouettes and new surfaces.
@@ -2160,13 +2383,25 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
             const auto savedPitch = settings.cameraPitch;
             const auto savedPose = settings.cameraPose;
             settings.cameraPose.reset();
+            std::vector<std::uint64_t> orbitFrameIds;
             for (unsigned i = 1; i <= 16; ++i) {
                 settings.cameraYaw = savedYaw + 0.019f * static_cast<float>(i);
                 settings.cameraPitch = savedPitch - 0.004f * static_cast<float>(i);
-                frame(world, i, i == 8 || i == 16 ? label + "-orbit-" + std::to_string(i) : "");
+                frame(world, i, i == 8 || i == 16 ? label + "-orbit-" + std::to_string(i) : "", 1u);
+                orbitFrameIds.push_back(renderer.diagnosticsFrame().frameId);
             }
             for (unsigned i = 1; i <= settledFrame; ++i)
-                frame(world, i, i == settledFrame ? label + "-orbit-rest" : "");
+                frame(world, i, i == settledFrame ? label + "-orbit-rest" : "", settledProbePeriod);
+            std::vector<double> orbitTimes;
+            for (auto id : orbitFrameIds) {
+                const auto found = measuredGpuFrames.find(id);
+                if (found != measuredGpuFrames.end()) orbitTimes.push_back(found->second);
+            }
+            timing["timedOrbitFrames"] = orbitTimes.size();
+            if (!orbitTimes.empty()) {
+                timing["medianOrbitGpuMs"] = median(orbitTimes);
+                timing["peakOrbitGpuMs"] = orbitTimes.back();
+            }
             gi.method = GlobalIlluminationMethod::Disabled;
             settings.debugView = 3;
             frame(world, 1, label + "-orbit-normals");
@@ -2174,6 +2409,32 @@ void runSoftwareGiSmoke(rae::renderer::SceneRenderer& renderer, rae::renderer::S
             settings.cameraYaw = savedYaw;
             settings.cameraPitch = savedPitch;
             settings.cameraPose = savedPose;
+            settings.debugView = 0;
+            // Move the diffuse sphere along the red wall, then abruptly pull
+            // it away. Normals at both poses identify newly exposed receivers.
+            auto movingWorld = world;
+            auto sphere = std::find_if(movingWorld.actors.begin(), movingWorld.actors.end(),
+                [](const auto& actor) { return actor.name == "Silver sphere"; });
+            require(sphere != movingWorld.actors.end(), "Moving receiver fixture needs the Silver sphere.");
+            sphere->transform.position[0] = -1.90f;
+            for (unsigned i = 1; i <= 16; ++i) {
+                sphere->transform.position[2] = -0.25f + 0.04f * i;
+                frame(movingWorld, i, "");
+            }
+            for (unsigned i = 1; i <= 32; ++i)
+                frame(movingWorld, i, i == 32 ? label + "-occluded" : "", settledProbePeriod);
+            sphere->transform.position[0] += 1.20f;
+            sphere->transform.position[1] -= 0.65f;
+            for (unsigned i = 1; i <= settledFrame; ++i)
+                frame(movingWorld, i, i == 1 || i == 4 || i == settledFrame
+                    ? label + "-revealed-" + std::to_string(i) : "", i <= 4 ? 1u : settledProbePeriod);
+            gi.method = GlobalIlluminationMethod::Disabled;
+            settings.debugView = 3;
+            frame(movingWorld, 1, label + "-revealed-normals");
+            sphere->transform.position[0] -= 1.20f;
+            sphere->transform.position[1] += 0.65f;
+            frame(movingWorld, 1, label + "-occluded-normals");
+            gi.method = method;
             gi.indirectDiffuse = false;
             settings.debugView = 11;
             frame(world, 1, label + "-specular");
